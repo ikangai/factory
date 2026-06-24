@@ -11,3 +11,5 @@ specs/candidates/*.yaml
 scenarios/staging/*.yaml
 # transient researcher output (vet -> feed the proposer)
 research/staging/*.yaml
+# generated executive summaries (the daily 09:00 update); keep the dir, not the churn
+updates/*.md

@@ -13,6 +13,7 @@ CLI:  python3 -m factory.orchestrator.orchestrator <command> [args]
   round <cid>          evaluate (+held-out sample) -> reporter -> gate to awaiting_gate/rejected
   mine [--limit N]     scenario-miner -> staging (operator vetting)
   status               print a store summary
+  report [--mission]   write a human-readable executive summary -> updates/
 """
 from __future__ import annotations
 
@@ -504,6 +505,29 @@ def cmd_promote_scenario(store: Blackboard, staged_id: str, partition: str) -> N
           f"({os.path.relpath(dest, paths.FACTORY_ROOT)}) + registered in the store.")
 
 
+def cmd_report(store: Blackboard, mission: Optional[str] = None) -> str:
+    """Executive-summary presentation of the run for the human's daily update.
+
+    Generates a short plain-language summary (Discoveries / Decisions / Proposed
+    next steps) from the store + staged files, prints it, and saves it under
+    updates/YYYY-MM-DD-HHMM.md. Read-only: never promotes. The real clock lives
+    here in the command layer (the library generator takes `since` explicitly)."""
+    from datetime import datetime
+    from ..reporting.summary import generate_executive_summary
+
+    now = datetime.now()
+    summary = generate_executive_summary(store, since=now.strftime("%Y-%m-%d"),
+                                          mission=mission)
+    updates_dir = os.path.join(paths.FACTORY_ROOT, "updates")
+    os.makedirs(updates_dir, exist_ok=True)
+    out_path = os.path.join(updates_dir, now.strftime("%Y-%m-%d-%H%M") + ".md")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(summary if summary.endswith("\n") else summary + "\n")
+    print(summary)
+    print(f"\n[report] saved to {os.path.relpath(out_path, paths.FACTORY_ROOT)}")
+    return out_path
+
+
 def cmd_status(store: Blackboard) -> None:
     champ = store.get_champion()
     print("=== clive-harness-factory status ===")
@@ -555,6 +579,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     pp = sub.add_parser("promote-scenario"); pp.add_argument("id")
     pp.add_argument("--partition", choices=["working", "held-out"], default="working")
     sub.add_parser("status")
+    rep = sub.add_parser("report")
+    rep.add_argument("--mission", default=None,
+                     help="optional mission statement to frame the executive summary")
     sub.add_parser("demo")
     au = sub.add_parser("autonomous")
     au.add_argument("--mission", required=True,
@@ -610,6 +637,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_promote_scenario(store, a.id, a.partition)
         elif a.cmd == "status":
             cmd_status(store)
+        elif a.cmd == "report":
+            cmd_report(store, mission=a.mission)
         elif a.cmd == "autonomous":
             from .autonomy import cmd_autonomous
             cmd_autonomous(store, a.mission, max_rounds=a.max_rounds,

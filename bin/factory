@@ -21,7 +21,7 @@ usage: factory <command>
   loop     : init | reset | baseline | propose | evaluate <cid> | round <cid> | holdout-check <cid>
   autonomy : autonomous --mission "..." [--max-rounds N] [--token-budget T] [--no-research] [--dry-run]
   corpus   : mine | staging | show-scenario <id> | synth-check <id> | promote-scenario <id> [--partition working|held-out]
-  inspect  : status | board
+  inspect  : status | board | report [--mission "..."]
   demos    : smoke | demo
 USAGE
           exit 2 ;;

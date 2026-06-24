@@ -241,6 +241,39 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
             print("  candidates awaiting human promotion: (none)")
     print("  Nothing was promoted automatically. Promotion stays a human action.")
     print("=" * 64)
+
+    # ----------------------------------------------------------------------
+    # human-readable executive summary (Discoveries / Decisions / Next steps).
+    # Only for a REAL run — a dry-run invoked no roles and spent nothing, so there
+    # is nothing to present (and we must not spend an LLM call on it). Best-effort:
+    # the generator never crashes, but guard the print/save defensively too.
+    # ----------------------------------------------------------------------
+    if not dry_run:
+        try:
+            from datetime import datetime
+            import os
+            from ..common import paths
+            from ..reporting.summary import generate_executive_summary
+
+            now = datetime.now()
+            exec_summary = generate_executive_summary(
+                store, since=now.strftime("%Y-%m-%d"), mission=mission)
+            print("\n" + "=" * 64)
+            print("EXECUTIVE SUMMARY (for the human's daily update)")
+            print("=" * 64)
+            print(exec_summary)
+            updates_dir = os.path.join(paths.FACTORY_ROOT, "updates")
+            os.makedirs(updates_dir, exist_ok=True)
+            out_path = os.path.join(updates_dir, now.strftime("%Y-%m-%d-%H%M") + ".md")
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write(exec_summary if exec_summary.endswith("\n")
+                         else exec_summary + "\n")
+            print(f"\n[report] saved to "
+                  f"{os.path.relpath(out_path, paths.FACTORY_ROOT)}")
+            summary["report_path"] = out_path
+        except Exception as e:  # noqa: BLE001 — presentation is never fatal to a run
+            print(f"[report] executive summary skipped: {e}", file=sys.stderr)
+
     return summary
 
 
