@@ -57,6 +57,25 @@ unattended *promotion* — the two grading bugs found this session are why.
 - **P2c — Autonomy harness**: mission→continuous loop with budget/Goodhart/held-out
   guardrails; promotion-gate relaxation criteria (explicitly Martin's call).
 
+## Round-2 requirements (Martin, 2026-06-24) — status
+
+1. **Executive summary of an autonomous run** — short, plain-language: discoveries,
+   decisions, proposed next steps. Output of the autonomy harness (axis C). TODO.
+2. **Daily 9:00 update** to the human — proposed + planned next steps — via a
+   scheduled run; the factory must keep **enough backlog** that there's always work
+   to report (research + mining feed the queue). Needs a cron/scheduled job. TODO.
+3. **Generic research focus** — the research topic comes from the target/mission,
+   NOT hardcoded; CLI-driving agents is only *clive's* focus. arXiv/git fetchers are
+   already query-parameterised; wire a `target.research_focus` (or mission-derived)
+   query through the researcher role. TODO (integration).
+4. **Git-repo research** — second source alongside papers. `research/git_repos.py`
+   DONE (GitHub search API, key-less, JSON-safe; verified live). Integration into the
+   researcher role (distil repos like papers, grounded by repo URL) TODO.
+5. **Human-supplied material** — the human can drop papers/links into the daily
+   update; the factory ingests them as research input (fetch + distil → briefs). TODO.
+
+These extend axis B (3,4,5 = research) and axis C (1,2 = autonomy output + scheduling).
+
 ## Open decisions for the human (steer these)
 
 1. **Research access**: which sources + how (web fetch, arXiv API, HF) — and any cost/rate bounds.
