@@ -33,6 +33,34 @@ def _rate(rows: list[dict]) -> float:
     return sum(1 for r in rows if r["outcome"] == "pass") / len(rows)
 
 
+def _latest_cells(store: Blackboard, candidate_id: Optional[str],
+                  partition: str) -> dict[tuple[str, str], str]:
+    """The candidate's CURRENT capability: the latest outcome per
+    (scenario_id, model) cell within a partition.
+
+    `runs_for_candidate` is ordered by created_at, so the last write wins — a
+    champion that has SINCE fixed a scenario (an old 'fail' followed by a fresh
+    'pass') is represented by the 'pass', never penalised by the stale run.
+    Pooling the whole history instead (see _rate over all rows) is precisely the
+    bug behind the false-positive gate clearance (#65)."""
+    cells: dict[tuple[str, str], str] = {}
+    if not candidate_id:
+        return cells
+    for r in store.runs_for_candidate(candidate_id):
+        if r["partition"] == partition:
+            cells[(r["scenario_id"], r["model"])] = r["outcome"]
+    return cells
+
+
+def _cell_rate(cells: dict[tuple[str, str], str],
+               scenarios: Optional[set[str]] = None) -> float:
+    """Pass-rate over the cells whose scenario is in `scenarios` (all, if None)."""
+    vals = [v for (s, _m), v in cells.items() if scenarios is None or s in scenarios]
+    if not vals:
+        return 0.0
+    return sum(1 for v in vals if v == "pass") / len(vals)
+
+
 def candidate_scores(store: Blackboard, candidate_id: str) -> dict:
     runs = store.runs_for_candidate(candidate_id)
     working = [r for r in runs if r["partition"] == "working"]
@@ -76,14 +104,35 @@ def evaluate_promotion(store: Blackboard, candidate_id: str, champion_id: Option
     champ = candidate_scores(store, champion_id) if champion_id else {
         "working_set": 0.0, "held_out": 0.0, "panel_rates": {}}
 
-    working_delta = cand["working_set"] - champ["working_set"]
-    held_delta = cand["held_out"] - champ.get("held_out", 0.0)
+    # LIKE-FOR-LIKE comparison (#65): compare the candidate against the champion
+    # ONLY on the scenarios both have been evaluated on, each at its CURRENT state
+    # (latest run per (scenario, model)). Comparing the candidate's scoped eval
+    # set against the champion's pooled full-history aggregate manufactured a
+    # positive delta in scoped rounds and falsely cleared the gate. With no
+    # champion the candidate stands alone — compare on its own scenarios vs an
+    # empty (zero-rate) champion, preserving the first-candidate path.
+    cand_work = _latest_cells(store, candidate_id, "working")
+    champ_work = _latest_cells(store, champion_id, "working")
+    cand_scn = {s for (s, _m) in cand_work}
+    shared = (cand_scn & {s for (s, _m) in champ_work}) if champion_id else cand_scn
 
-    # Panel regression: no panel model may drop by more than tol vs champion.
+    working_delta = _cell_rate(cand_work, shared) - _cell_rate(champ_work, shared)
+
+    cand_held = _latest_cells(store, candidate_id, "held-out")
+    champ_held = _latest_cells(store, champion_id, "held-out")
+    shared_held = ({s for (s, _m) in cand_held} & {s for (s, _m) in champ_held}
+                   if champion_id else {s for (s, _m) in cand_held})
+    held_delta = _cell_rate(cand_held, shared_held) - _cell_rate(champ_held, shared_held)
+
+    # Panel regression: no panel model may drop by more than tol vs champion —
+    # measured on the SAME shared scenarios at current state.
     panel_ok = True
     panel_deltas = {}
-    for m, rate in cand["panel_rates"].items():
-        base = champ.get("panel_rates", {}).get(m, 0.0)
+    for m in {model for (_s, model) in cand_work}:
+        cand_m = {k: v for k, v in cand_work.items() if k[1] == m}
+        champ_m = {k: v for k, v in champ_work.items() if k[1] == m}
+        rate = _cell_rate(cand_m, shared)
+        base = _cell_rate(champ_m, shared)
         panel_deltas[m] = rate - base
         if rate < base - tol:
             panel_ok = False
@@ -102,6 +151,8 @@ def evaluate_promotion(store: Blackboard, candidate_id: str, champion_id: Option
         "working_delta": working_delta,
         "held_delta": held_delta,
         "panel_deltas": panel_deltas,
+        "n_compared": len(shared),
+        "compared_scenarios": sorted(shared),
         "candidate_scores": cand,
         "champion_scores": champ,
     }
