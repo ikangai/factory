@@ -49,3 +49,16 @@ def read_research_focus(mission_path: str) -> str | None:
             # Collapse to a single line of search-friendly focus text.
             return " ".join(body.split())
     return None
+
+
+def read_mission(mission_path: str) -> str | None:
+    """Parse MISSION.md and return the `## Mission` statement as a single line, or
+    None if absent/unreadable. This is the autonomous loop's STEERING input (what
+    to work on), distinct from `read_research_focus` (what to read about)."""
+    try:
+        with open(mission_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    body = _section_body(text, "Mission")
+    return " ".join(body.split()) if body else None

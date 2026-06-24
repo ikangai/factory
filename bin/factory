@@ -20,6 +20,8 @@ case "${1:-}" in
 usage: factory <command>
   loop     : init | reset | baseline | propose | evaluate <cid> | round <cid> | holdout-check <cid>
   autonomy : autonomous --mission "..." [--max-rounds N] [--token-budget T] [--no-research] [--dry-run]
+  daily    : daily                       # the 09:00 update: bounded autonomous run + exec summary
+  schedule : schedule-install | schedule-uninstall   # launchd agent that fires `daily` at 09:00
   corpus   : mine | staging | show-scenario <id> | synth-check <id> | promote-scenario <id> [--partition working|held-out]
   inspect  : status | board | report [--mission "..."]
   demos    : smoke | demo

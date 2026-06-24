@@ -87,6 +87,15 @@ promotion:
   # Nothing promotes automatically in Phase 0. Promotion is a human action.
   autonomous: false
 
+# --- autonomy: the unattended 09:00 daily run -------------------------------
+autonomy:
+  # `factory daily` (the launchd 09:00 agent) runs a LARGER bounded session so
+  # the factory makes real headway overnight. These are HARD ceilings; the loop
+  # still stops early on no-improvement / research-exhausted. Promotion is NEVER
+  # automatic — candidates only ever reach 'awaiting_gate' for the human.
+  daily_max_rounds: 8
+  daily_token_budget: 500000
+
 # --- board ------------------------------------------------------------------
 dashboard:
   host: "127.0.0.1"

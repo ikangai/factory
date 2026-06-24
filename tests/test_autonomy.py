@@ -26,6 +26,18 @@ CHAMP = orch.CHAMPION_ID
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _stub_exec_summary(tmp_path, monkeypatch):
+    """Keep the loop HERMETIC. cmd_autonomous ends by generating an executive
+    summary, which otherwise makes a real `claude -p` call AND writes into the
+    repo's updates/ dir. Stub the generator (no tokens) and redirect FACTORY_ROOT
+    so the summary write lands in tmp, never the real repo (the summary itself is
+    covered by the reporting tests)."""
+    monkeypatch.setattr(
+        "factory.reporting.summary.generate_executive_summary",
+        lambda *a, **k: "## Discoveries\n(stub)\n\n## Decisions\n(stub)\n\n"
+                        "## Proposed next steps\n(stub)\n")
+    monkeypatch.setattr("factory.common.paths.FACTORY_ROOT", str(tmp_path))
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     # Isolate the research staging dir to tmp so the loop's brief-counting (and the
@@ -172,20 +184,69 @@ def test_stops_early_on_no_improvement(store, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (b) early stop: no-work (governor holds AND research stages nothing new)
+# (b) KEEP BUSY: when the governor never arms, broaden research instead of
+#     stopping — keep surfacing discoveries so the 09:00 update has content.
 # ---------------------------------------------------------------------------
-def test_stops_early_on_no_work(store, monkeypatch):
+def test_idle_broadens_research_and_keeps_working(store, monkeypatch):
+    """Governor never arms (champion robust) but each idle round the broadened
+    research sweep finds NEW material → the loop must NOT stop on 'no work'; it
+    keeps researching every round (escalating breadth) until a hard ceiling."""
+    _install_promotion_spy(monkeypatch, store)
+    _hold_governor(monkeypatch)
+    seen: list = []  # (max_papers, max_repos) for each research call
+
+    def fake_research(s, query=None, max_papers=8, max_repos=6, **k):
+        seen.append((max_papers, max_repos))
+        # every idle round finds NEW material → a fresh brief lands on disk
+        from factory.common import paths
+        os.makedirs(paths.RESEARCH_STAGING_DIR, exist_ok=True)
+        with open(os.path.join(paths.RESEARCH_STAGING_DIR,
+                               f"rb-{len(seen)}.yaml"), "w") as fh:
+            fh.write("id: rb\nstatus: staged\n")
+
+    monkeypatch.setattr(orch, "cmd_research", fake_research)
+    monkeypatch.setattr(orch, "cmd_baseline", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_propose", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_round", lambda s, *a, **k: None)
+
+    summary = autonomy.cmd_autonomous(store, "mission", max_rounds=4,
+                                      do_research=True)
+
+    assert summary["rounds_run"] == 4
+    assert summary["stop_reason"] == "max_rounds reached"
+    # researched EVERY round (kept busy), not just the scheduled cadence
+    assert len(seen) == 4
+    # breadth escalated on a later idle round (more papers AND repos than round 1)
+    assert seen[1][0] > seen[0][0]
+    assert seen[1][1] > seen[0][1]
+    # bounded: never blows past the breadth cap (default factor 4 over base 8)
+    assert max(p for p, _ in seen) <= 8 * 4
+
+
+# ---------------------------------------------------------------------------
+# (b) KEEP BUSY has a floor: if broadened research is ALSO dry for K rounds,
+#     stop (research exhausted) rather than spin — must broaden >1 round first.
+# ---------------------------------------------------------------------------
+def test_stops_when_idle_research_exhausted(store, monkeypatch):
     _install_promotion_spy(monkeypatch, store)
     _hold_governor(monkeypatch)
     calls: list = []
-    _patch_steps(monkeypatch, propose_returns=[], gate_clears=[],
-                 calls=calls, research_stages=False)
+
+    def fake_research(s, query=None, max_papers=8, max_repos=6, **k):
+        calls.append("research")  # finds NOTHING new → no marker file written
+
+    monkeypatch.setattr(orch, "cmd_research", fake_research)
+    monkeypatch.setattr(orch, "cmd_baseline", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_propose", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_round", lambda s, *a, **k: None)
 
     summary = autonomy.cmd_autonomous(store, "mission", max_rounds=10,
                                       do_research=True)
 
-    assert summary["rounds_run"] == 1
-    assert "no work" in summary["stop_reason"]
+    assert "research exhausted" in summary["stop_reason"]
+    # broadened for several rounds before giving up (== triggers.no_improvement_rounds)
+    assert summary["rounds_run"] == 3
+    assert len(calls) == 3
     assert summary["awaiting_gate"] == []
 
 

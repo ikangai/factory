@@ -532,6 +532,87 @@ def cmd_report(store: Blackboard, mission: Optional[str] = None) -> str:
     return out_path
 
 
+# --- the 09:00 daily update -------------------------------------------------
+# "Larger" daily run (operator choice): several rounds + a generous-but-bounded
+# token ceiling so the unattended run makes real headway without runaway spend.
+# Overridable via config.autonomy.{daily_max_rounds,daily_token_budget}.
+DAILY_MAX_ROUNDS = 8
+DAILY_TOKEN_BUDGET = 500_000
+DEFAULT_MISSION = ("Improve the target harness so it completes real tasks more "
+                   "reliably and efficiently. Change only the open config "
+                   "(system prompt, toolset, observation/recovery policy, skills); "
+                   "never the frozen safety block.")
+
+
+def cmd_daily(store: Blackboard) -> dict:
+    """The 09:00 daily update. Runs a bounded autonomous session toward MISSION.md's
+    mission (LARGER budget — several rounds), which ends by presenting + saving the
+    executive summary (Discoveries / Decisions / Proposed next steps) for the human.
+
+    The human STEERS by editing files: MISSION.md's `## Mission`/`## Research focus`
+    and `## Material from the human`, plus config.autonomy.* for the budget. NEVER
+    promotes — cmd_autonomous guarantees the only stage transitions are the roles'
+    own (… → awaiting_gate for the human)."""
+    from . import autonomy
+    from ..research.focus import read_mission
+
+    acfg = config.load_config().get("autonomy", {})
+    max_rounds = int(acfg.get("daily_max_rounds", DAILY_MAX_ROUNDS))
+    tb = acfg.get("daily_token_budget", DAILY_TOKEN_BUDGET)
+    token_budget = int(tb) if tb is not None else None
+
+    mission = read_mission(paths.factory("MISSION.md")) or DEFAULT_MISSION
+    print(f"[daily] mission: {mission!r}")
+    print(f"[daily] budget: max_rounds={max_rounds} token_budget="
+          f"{token_budget if token_budget is not None else '∞'}")
+    return autonomy.cmd_autonomous(store, mission, max_rounds=max_rounds,
+                                   token_budget=token_budget, do_research=True)
+
+
+def cmd_schedule_install() -> None:
+    """Install + load the launchd agent that fires `factory daily` at 09:00 daily.
+    Per-user, no sudo; reversible via `factory schedule-uninstall`."""
+    import subprocess
+    from . import scheduling
+
+    python_bin = sys.executable or "python3"
+    xml = scheduling.launchd_plist(paths.FACTORY_ROOT, python_bin)
+    path = scheduling.plist_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(paths.LOGS_DIR, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    # unload first so a re-install reloads cleanly (ignore "not loaded").
+    subprocess.run(["launchctl", "unload", path], capture_output=True)
+    res = subprocess.run(["launchctl", "load", path], capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"[schedule] launchctl load failed: {res.stderr.strip()}", file=sys.stderr)
+        print(f"[schedule] plist written to {path} — load manually: "
+              f"launchctl load {path}", file=sys.stderr)
+        return
+    print(f"[schedule] installed {scheduling.PLIST_LABEL}: `factory daily` runs at "
+          "09:00 every day.")
+    print(f"[schedule] plist : {path}")
+    print(f"[schedule] python: {python_bin}")
+    print(f"[schedule] logs  : "
+          f"{os.path.join(paths.LOGS_DIR, 'daily-launchd.{out,err}.log')}")
+    print("[schedule] uninstall: factory schedule-uninstall")
+
+
+def cmd_schedule_uninstall() -> None:
+    """Unload + remove the launchd daily agent."""
+    import subprocess
+    from . import scheduling
+
+    path = scheduling.plist_path()
+    subprocess.run(["launchctl", "unload", path], capture_output=True)
+    existed = os.path.exists(path)
+    if existed:
+        os.remove(path)
+    print(f"[schedule] {'removed' if existed else 'no plist at'} {path}; "
+          f"{scheduling.PLIST_LABEL} unloaded.")
+
+
 def cmd_status(store: Blackboard) -> None:
     champ = store.get_champion()
     print("=== clive-harness-factory status ===")
@@ -587,6 +668,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     rep = sub.add_parser("report")
     rep.add_argument("--mission", default=None,
                      help="optional mission statement to frame the executive summary")
+    sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
+    sub.add_parser("schedule-install")  # install the launchd 09:00 agent
+    sub.add_parser("schedule-uninstall")
     sub.add_parser("demo")
     au = sub.add_parser("autonomous")
     au.add_argument("--mission", required=True,
@@ -610,6 +694,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         cmd_reset(keep_logs=False)
         with Blackboard() as store:
             cmd_demo(store)
+        return 0
+    # schedule (un)install touch launchd, not the store — handle before connecting.
+    if a.cmd == "schedule-install":
+        cmd_schedule_install()
+        return 0
+    if a.cmd == "schedule-uninstall":
+        cmd_schedule_uninstall()
         return 0
 
     with Blackboard() as store:
@@ -645,6 +736,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_status(store)
         elif a.cmd == "report":
             cmd_report(store, mission=a.mission)
+        elif a.cmd == "daily":
+            cmd_daily(store)
         elif a.cmd == "autonomous":
             from .autonomy import cmd_autonomous
             cmd_autonomous(store, a.mission, max_rounds=a.max_rounds,

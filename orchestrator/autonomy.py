@@ -57,13 +57,23 @@ def _mission_query(mission: str) -> str:
 
 def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                    token_budget: Optional[int] = None, do_research: bool = True,
-                   research_every: int = 3, dry_run: bool = False) -> dict:
+                   research_every: int = 3, dry_run: bool = False,
+                   base_max_papers: int = 8, base_max_repos: int = 6,
+                   max_research_breadth: int = 4,
+                   idle_research_rounds: Optional[int] = None) -> dict:
     """Run the optimisation loop unattended toward `mission`.
 
     Returns a summary dict: rounds run, tokens spent, and the candidate ids left
     at the human gate. NEVER promotes; honours `max_rounds`/`token_budget` as hard
     ceilings and the existing gain governor + no-improvement stop. `dry_run` prints
     the per-round PLAN without invoking any role/LLM/subprocess.
+
+    KEEP BUSY: when the gain governor isn't armed (the champion is robust, so no
+    candidate can be proposed) the loop does NOT idle-stop — it BROADENS the
+    research sweep each idle round (escalating breadth up to `max_research_breadth`x
+    over the base) to keep surfacing fresh discoveries for the daily update. It
+    only gives up when even the broadened sweep finds nothing new for
+    `idle_research_rounds` consecutive rounds (defaults to no_improvement_rounds).
     """
     # Imported here (not at module top) so monkeypatching the orchestrator's
     # cmd_* in tests is seen, and to keep the dependency direction one-way.
@@ -74,6 +84,8 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                                .get("no_improvement_rounds", 3))
     new_failures_threshold = int(cfg.get("triggers", {})
                                  .get("new_failures_to_propose", 3))
+    idle_limit = int(idle_research_rounds if idle_research_rounds is not None
+                     else no_improvement_limit)
 
     print("=" * 64)
     print(f"AUTONOMOUS LOOP — mission: {mission!r}")
@@ -89,6 +101,8 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
 
     rounds_run = 0
     consecutive_no_gate = 0
+    idle_streak = 0       # consecutive rounds the governor held (drives broadening)
+    dry_research = 0      # consecutive idle rounds the broadened sweep found nothing
     stop_reason = "max_rounds reached"
     cleared_this_loop: list[str] = []
 
@@ -101,8 +115,14 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                                "tokens) before round start")
                 break
 
+        # KEEP BUSY: once we go idle (governor holding), research EVERY round to
+        # keep finding work — not just on the scheduled cadence. Breadth escalates
+        # with the idle streak (capped) so each idle round casts a wider net.
+        broadening = idle_streak > 0
         do_research_this_round = bool(do_research) and (
-            rnd == 1 or (research_every > 0 and (rnd - 1) % research_every == 0))
+            rnd == 1 or broadening
+            or (research_every > 0 and (rnd - 1) % research_every == 0))
+        breadth = min(1 + idle_streak, max_research_breadth)
 
         print(f"\n----- ROUND {rnd}/{max_rounds} "
               f"(spent {_spend(store) if not dry_run else 0} tok) -----")
@@ -134,10 +154,14 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
 
         # --- 1. research (direction) -----------------------------------------
         if do_research_this_round:
-            print("  [1] research: deriving direction from the mission …")
+            label = "broadened " if broadening else ""
+            print(f"  [1] research ({label}breadth x{breadth}): deriving direction "
+                  "from the mission …")
             before = _research_count(store)
             try:
-                orch.cmd_research(store, query=_mission_query(mission))
+                orch.cmd_research(store, query=_mission_query(mission),
+                                  max_papers=base_max_papers * breadth,
+                                  max_repos=base_max_repos * breadth)
             except Exception as e:  # noqa: BLE001 — research is best-effort, never fatal
                 print(f"  [1] research failed (continuing): {e}", file=sys.stderr)
             research_staged = max(0, _research_count(store) - before)
@@ -188,23 +212,36 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
               f"{gate_ids if gate_ids else '(none)'}")
 
         # --- stop bookkeeping -------------------------------------------------
-        if cleared_gate:
-            consecutive_no_gate = 0
+        if fire:
+            # ACTIVE optimisation: the governor armed, so we attempted a proposal.
+            # Reset the keep-busy counters; track gate stagnation as before.
+            idle_streak = 0
+            dry_research = 0
+            if cleared_gate:
+                consecutive_no_gate = 0
+            else:
+                consecutive_no_gate += 1
+            # no-improvement: K consecutive armed rounds with nothing clearing.
+            if consecutive_no_gate >= no_improvement_limit:
+                stop_reason = (f"no improvement: {consecutive_no_gate} consecutive "
+                               f"rounds with no candidate clearing the gate "
+                               f"(>= no_improvement_rounds={no_improvement_limit})")
+                break
         else:
-            consecutive_no_gate += 1
-
-        # no-work: governor didn't arm AND research produced nothing new.
-        if not fire and (not do_research_this_round or research_staged == 0):
-            stop_reason = ("no work: gain governor not armed and research produced "
-                           "nothing new this round")
-            break
-
-        # no-improvement: K consecutive rounds with no candidate clearing the gate.
-        if consecutive_no_gate >= no_improvement_limit:
-            stop_reason = (f"no improvement: {consecutive_no_gate} consecutive rounds "
-                           f"with no candidate clearing the gate "
-                           f"(>= no_improvement_rounds={no_improvement_limit})")
-            break
+            # KEEP BUSY: governor not armed (champion robust). Don't idle-stop —
+            # we broadened the research sweep this round. Keep going while it finds
+            # NEW material; give up only after `idle_limit` dry idle rounds.
+            consecutive_no_gate = 0
+            idle_streak += 1
+            if research_staged > 0:
+                dry_research = 0
+            else:
+                dry_research += 1
+            if dry_research >= idle_limit:
+                stop_reason = (f"research exhausted: the broadened sweep produced "
+                               f"nothing new for {dry_research} consecutive idle "
+                               f"rounds (>= {idle_limit})")
+                break
 
         # token budget exhausted at end of round.
         if token_budget is not None and _spend(store) >= token_budget:
