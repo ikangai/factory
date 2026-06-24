@@ -11,12 +11,14 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 from typing import Optional
 
 import yaml
 
+from . import check_validate
 from ..common import config, paths, scoring, specs
 from ..common.store import Blackboard
 
@@ -344,15 +346,90 @@ def synth_check(store: Blackboard, staged_id: str) -> Optional[str]:
     code = _extract(reply, ("python", ""))
     if "def acceptance" not in code:
         return None
+
+    # Deterministic backstop (#64): a synthesized check must not gate the candidate
+    # on an LLM-guessed oracle literal. validate_synth_check exercises it against
+    # its own recomputed-correct and a perturbed end-state — a check that fails its
+    # own correct answer (the literal-first ordering bug) is REJECTED here, before
+    # the human gate, rather than silently steering the proposer toward a wrong
+    # answer. Unverifiable checks (shell-based, no evidence['expected']) pass.
+    ok, reason = check_validate.validate_synth_check(code, sc)
+
     rel = f"checks/scenarios/{staged_id.replace('-', '_')}_check.py"
     path = os.path.join(paths.FACTORY_ROOT, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(code if code.endswith("\n") else code + "\n")
-    # Point the staged scenario at the generated check (operator reviews, then promotes).
+
+    if not ok:
+        # Keep the file for human inspection but do NOT adopt it as the scenario's
+        # check — a wrong oracle is worse than no check (it poisons the proposer).
+        sc.pop("check", None)
+        sc["check_synth_rejected"] = reason
+        with open(staged, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(sc, fh, sort_keys=False, allow_unicode=True)
+        print(f"[check-synth] {staged_id}: generated check REJECTED — {reason}. "
+              f"Wrote {rel} for review; scenario NOT pointed at it.", file=sys.stderr)
+        return None
+
+    # Adopt the check (operator still reviews before promoting). Record whether it
+    # was deterministically validated or only passed the structural gate.
     sc["check"] = rel
+    sc["check_validation"] = reason
+    sc.pop("check_synth_rejected", None)
     with open(staged, "w", encoding="utf-8") as fh:
         yaml.safe_dump(sc, fh, sort_keys=False, allow_unicode=True)
     return path
+
+
+def research_cli_agents(store: Blackboard, query: Optional[str] = None,
+                        max_papers: int = 8) -> list[str]:
+    """Researcher role (mission: read papers on agents that drive a CLI, distill
+    GROUNDED technique briefs). Retrieval is deterministic Python (arXiv API); the
+    LLM only distills the fetched abstracts — so this role stays ISOLATED like every
+    other claude -p role (no web tools). Briefs are STAGED for operator vetting and
+    only FEED the Proposer; nothing is applied automatically. Degrades to [] on a
+    network/parse failure — never crashes the loop."""
+    from ..research.arxiv import search_arxiv, DEFAULT_QUERY
+    try:
+        papers = search_arxiv(query or DEFAULT_QUERY, max_results=max_papers)
+    except Exception as e:  # noqa: BLE001 — retrieval is best-effort
+        print(f"[researcher] arXiv retrieval failed: {e}")
+        return []
+    if not papers:
+        return []
+    fetched_ids = {re.sub(r"v\d+$", "", p.arxiv_id) for p in papers}
+
+    prompt = (_load_prompt("researcher") + "\n\n## RECENT PAPERS (arXiv)\n\n"
+              + "\n\n".join(p.brief() for p in papers) + "\n")
+    reply, tokens, cost = claude_p(prompt)
+    store.add_budget("researcher", tokens, cost, notes="research")
+
+    try:
+        parsed = yaml.safe_load(_extract(reply, ("yaml", "json", "")))
+    except Exception:
+        return []
+    briefs = parsed.get("briefs", []) if isinstance(parsed, dict) else parsed
+    if not isinstance(briefs, list):
+        return []
+
+    os.makedirs(paths.RESEARCH_STAGING_DIR, exist_ok=True)
+    written: list[str] = []
+    for b in briefs:
+        if not isinstance(b, dict) or not b.get("suggested_change"):
+            continue
+        # Grounding guard: a brief must cite a paper we actually fetched.
+        aid = re.sub(r"v\d+$", "", str(b.get("arxiv_id", "")).strip())
+        if aid not in fetched_ids:
+            b["provenance_warning"] = ("arxiv_id not among the fetched papers — "
+                                       "verify the citation before acting on this")
+        b["id"] = f"rb-{uuid.uuid4().hex[:6]}"
+        b["status"] = "staged"   # operator vetting required; feeds the Proposer
+        path = os.path.join(paths.RESEARCH_STAGING_DIR, f"{b['id']}.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(b, fh, sort_keys=False, allow_unicode=True)
+        written.append(path)
+    return written
 
 
 def run_role(name: str, store: Blackboard, **kw):
@@ -364,4 +441,6 @@ def run_role(name: str, store: Blackboard, **kw):
         return report(store, kw["candidate_id"])
     if name in ("scenario-miner", "scenario_miner", "miner"):
         return mine_scenarios(store, kw.get("limit", 10))
+    if name in ("researcher", "research"):
+        return research_cli_agents(store, kw.get("query"), kw.get("max_papers", 8))
     raise ValueError(f"unknown role {name!r}")

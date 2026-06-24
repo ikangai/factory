@@ -32,6 +32,9 @@ CHECKS_DIR = factory("checks")
 LOGS_DIR = factory("logs")
 RUNS_DIR = factory("logs", "runs")
 ROLES_DIR = factory("roles")
+# Researcher role: grounded literature briefs, staged for operator vetting.
+RESEARCH_DIR = factory("research")
+RESEARCH_STAGING_DIR = factory("research", "staging")
 
 
 def run_evidence_dir(run_id: str) -> str:

@@ -8,3 +8,5 @@
 # openai / libtmux / python-dotenv); see ../requirements.txt. The `claude` CLI
 # (Claude Code) must be on PATH for the claude -p roles.
 pyyaml>=6.0
+# safe XML parsing for the researcher role's arXiv retrieval (XXE / billion-laughs hardening)
+defusedxml>=0.7

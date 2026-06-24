@@ -309,6 +309,23 @@ def cmd_mine(store: Blackboard, limit: int = 10) -> None:
         print(" ", p)
 
 
+def cmd_research(store: Blackboard, query: Optional[str] = None,
+                 max_papers: int = 8) -> None:
+    """Researcher role: read recent arXiv papers on agents that drive a CLI and
+    stage GROUNDED, cited technique briefs for operator vetting. The briefs FEED
+    the Proposer; nothing is auto-applied (same human-gated discipline as mining)."""
+    from ..roles.common import research_cli_agents
+    written = research_cli_agents(store, query=query, max_papers=max_papers)
+    if not written:
+        print("research: no grounded briefs staged (no papers, no applicable "
+              "technique, or retrieval failed — see any message above).")
+        return
+    print(f"research: staged {len(written)} grounded technique brief(s) for "
+          f"operator vetting (these feed the Proposer, never auto-applied):")
+    for p in written:
+        print(" ", p)
+
+
 def cmd_reset(keep_logs: bool = False) -> None:
     """Wipe the blackboard, generated candidate specs, and run logs, then re-init
     to a clean slate. Run OUTSIDE an open store connection (it deletes the db)."""
@@ -529,6 +546,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     rp.add_argument("--scenario", action="append"); rp.add_argument("--model", action="append")
     hp = sub.add_parser("holdout-check"); hp.add_argument("cid")
     mp = sub.add_parser("mine"); mp.add_argument("--limit", type=int, default=10)
+    rch = sub.add_parser("research")
+    rch.add_argument("--query", default=None)
+    rch.add_argument("--max-papers", type=int, default=8)
     sub.add_parser("staging")
     sp = sub.add_parser("show-scenario"); sp.add_argument("id")
     yp = sub.add_parser("synth-check"); yp.add_argument("id")
@@ -567,6 +587,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_holdout_check(store, a.cid)
         elif a.cmd == "mine":
             cmd_mine(store, a.limit)
+        elif a.cmd == "research":
+            cmd_research(store, query=a.query, max_papers=a.max_papers)
         elif a.cmd == "staging":
             cmd_staging()
         elif a.cmd == "show-scenario":

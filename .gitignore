@@ -9,3 +9,5 @@ __pycache__/
 specs/candidates/*.yaml
 # transient mining output (vet -> promote into working/ or held-out/)
 scenarios/staging/*.yaml
+# transient researcher output (vet -> feed the proposer)
+research/staging/*.yaml
