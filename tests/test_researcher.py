@@ -13,6 +13,8 @@ def test_research_stages_briefs_and_flags_ungrounded_citations(tmp_path, monkeyp
                     url="http://arxiv.org/abs/2606.24820v1", published="2026-06-23",
                     authors=["A. Researcher"])]
     monkeypatch.setattr("factory.research.arxiv.search_arxiv", lambda *a, **k: papers)
+    # keep hermetic: the dual-source role also queries GitHub — stub it to empty.
+    monkeypatch.setattr("factory.research.git_repos.search_repos", lambda *a, **k: [])
 
     reply = """```yaml
 briefs:
@@ -51,6 +53,7 @@ def test_research_degrades_to_empty_on_retrieval_failure(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("network down")
     monkeypatch.setattr("factory.research.arxiv.search_arxiv", _boom)
+    monkeypatch.setattr("factory.research.git_repos.search_repos", _boom)
 
     class _Store:
         def add_budget(self, *a, **k):

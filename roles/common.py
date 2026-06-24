@@ -382,26 +382,120 @@ def synth_check(store: Blackboard, staged_id: str) -> Optional[str]:
     return path
 
 
-def research_cli_agents(store: Blackboard, query: Optional[str] = None,
-                        max_papers: int = 8) -> list[str]:
-    """Researcher role (mission: read papers on agents that drive a CLI, distill
-    GROUNDED technique briefs). Retrieval is deterministic Python (arXiv API); the
-    LLM only distills the fetched abstracts — so this role stays ISOLATED like every
-    other claude -p role (no web tools). Briefs are STAGED for operator vetting and
-    only FEED the Proposer; nothing is applied automatically. Degrades to [] on a
-    network/parse failure — never crashes the loop."""
-    from ..research.arxiv import search_arxiv, DEFAULT_QUERY
+def _research_focus(query: Optional[str], mission_file: Optional[str]) -> str:
+    """Resolve the research focus (genericity). Explicit `query` wins; else derive
+    it from MISSION.md's `## Research focus` (falling back to `## Mission`); else the
+    deterministic clive-default DEFAULT_QUERY. The topic is mission-driven."""
+    from ..research.arxiv import DEFAULT_QUERY
+    from ..research.focus import read_research_focus
+    if query:
+        return query
+    if mission_file:
+        focus = read_research_focus(mission_file)
+        if focus:
+            return focus
+    return DEFAULT_QUERY
+
+
+def _research_fetch(focus: str, max_papers: int, max_repos: int):
+    """Deterministically fetch papers (arXiv) and repos (GitHub) for `focus`. Each
+    source degrades independently — a network/parse failure yields [] for that
+    source so the role never crashes. Returns (papers, repos)."""
+    from ..research.arxiv import search_arxiv
+    from ..research.git_repos import search_repos
     try:
-        papers = search_arxiv(query or DEFAULT_QUERY, max_results=max_papers)
+        papers = search_arxiv(focus, max_results=max_papers) if max_papers > 0 else []
     except Exception as e:  # noqa: BLE001 — retrieval is best-effort
         print(f"[researcher] arXiv retrieval failed: {e}")
-        return []
-    if not papers:
-        return []
-    fetched_ids = {re.sub(r"v\d+$", "", p.arxiv_id) for p in papers}
+        papers = []
+    try:
+        repos = search_repos(focus, max_results=max_repos) if max_repos > 0 else []
+    except Exception as e:  # noqa: BLE001 — retrieval is best-effort
+        print(f"[researcher] GitHub retrieval failed: {e}")
+        repos = []
+    return papers, repos
 
-    prompt = (_load_prompt("researcher") + "\n\n## RECENT PAPERS (arXiv)\n\n"
-              + "\n\n".join(p.brief() for p in papers) + "\n")
+
+def _research_material_section(mission_file: Optional[str]):
+    """Fetch the human's MISSION.md material and render a HIGH-PRIORITY prompt
+    section for it. Returns (section_text, fetched_paper_ids, fetched_repo_names).
+    Degrades to ("", set(), set()) on any failure — never crashes the loop."""
+    if not mission_file:
+        return "", set(), set()
+    try:
+        from ..research.ingest import parse_material
+        material = parse_material(mission_file)
+    except Exception as e:  # noqa: BLE001 — ingestion is best-effort
+        print(f"[researcher] human-material ingestion failed: {e}")
+        return "", set(), set()
+    if not material:
+        return "", set(), set()
+
+    ids: set[str] = set()
+    names: set[str] = set()
+    blocks: list[str] = []
+    unfetched: list[str] = []
+    for m in material:
+        if m["kind"] == "arxiv" and m.get("paper") is not None:
+            p = m["paper"]
+            ids.add(re.sub(r"v\d+$", "", p.arxiv_id))
+            blocks.append(p.brief())
+        elif m["kind"] == "repo" and m.get("repo") is not None:
+            r = m["repo"]
+            names.add(r.full_name.lower())
+            blocks.append(r.brief())
+        elif m["kind"] == "unfetched":
+            unfetched.append(f"- {m.get('value', m.get('source', '?'))} "
+                             f"({m.get('reason', 'not fetched')})")
+        else:  # arxiv/repo that we tried but couldn't fetch
+            unfetched.append(f"- {m.get('source', '?')} "
+                             f"({m.get('error', 'fetch returned nothing')})")
+
+    if not blocks and not unfetched:
+        return "", ids, names
+    section = "\n\n## MATERIAL THE HUMAN ASKED YOU TO READ (HIGH PRIORITY)\n\n"
+    if blocks:
+        section += ("The operator explicitly dropped these into MISSION.md — give "
+                    "them precedence when distilling briefs.\n\n"
+                    + "\n\n".join(blocks) + "\n")
+    if unfetched:
+        section += ("\nNOTE — lines the operator listed but the factory did NOT "
+                    "fetch (cite only material shown above, never these):\n"
+                    + "\n".join(unfetched) + "\n")
+    return section, ids, names
+
+
+def research_cli_agents(store: Blackboard, query: Optional[str] = None,
+                        max_papers: int = 8, max_repos: int = 6,
+                        mission_file: Optional[str] = None) -> list[str]:
+    """Researcher role: distill GROUNDED technique briefs from recent literature.
+
+    Generic & mission-driven: the focus comes from `query`, else MISSION.md's
+    `## Research focus` (fallback `## Mission`), else the clive-default query.
+    Retrieval is deterministic Python from TWO sources — arXiv papers AND GitHub
+    repositories — plus any material the human dropped into MISSION.md. The LLM only
+    distills the fetched text, so the role stays ISOLATED like every other claude -p
+    role (no web tools). Briefs are STAGED for operator vetting and only FEED the
+    Proposer; nothing is applied automatically. Each source degrades independently —
+    never crashes the loop."""
+    focus = _research_focus(query, mission_file)
+    papers, repos = _research_fetch(focus, max_papers, max_repos)
+    material_section, human_ids, human_repos = _research_material_section(mission_file)
+
+    # Provenance corpus: a brief may cite a fetched paper id OR a fetched repo name.
+    fetched_ids = {re.sub(r"v\d+$", "", p.arxiv_id) for p in papers} | human_ids
+    fetched_repos = {r.full_name.lower() for r in repos} | human_repos
+    if not papers and not repos and not material_section:
+        return []
+
+    prompt = _load_prompt("researcher")
+    if papers:
+        prompt += ("\n\n## PAPERS (arXiv)\n\n"
+                   + "\n\n".join(p.brief() for p in papers) + "\n")
+    if repos:
+        prompt += ("\n\n## REPOSITORIES (GitHub)\n\n"
+                   + "\n\n".join(r.brief() for r in repos) + "\n")
+    prompt += material_section
     reply, tokens, cost = claude_p(prompt)
     store.add_budget("researcher", tokens, cost, notes="research")
 
@@ -418,11 +512,17 @@ def research_cli_agents(store: Blackboard, query: Optional[str] = None,
     for b in briefs:
         if not isinstance(b, dict) or not b.get("suggested_change"):
             continue
-        # Grounding guard: a brief must cite a paper we actually fetched.
+        # Grounding guard: a brief must cite EITHER a paper id OR a repo full_name
+        # that we actually fetched. Flag anything else for the operator to verify.
         aid = re.sub(r"v\d+$", "", str(b.get("arxiv_id", "")).strip())
-        if aid not in fetched_ids:
-            b["provenance_warning"] = ("arxiv_id not among the fetched papers — "
-                                       "verify the citation before acting on this")
+        repo_cite = str(b.get("repo", "")).strip()
+        repo_name = re.sub(r"^https?://(?:www\.)?github\.com/", "",
+                           repo_cite, flags=re.IGNORECASE).rstrip("/").lower()
+        grounded = (aid and aid in fetched_ids) or (repo_name and repo_name in fetched_repos)
+        if not grounded:
+            b["provenance_warning"] = (
+                "citation (arxiv_id/repo) not among the fetched papers or repos — "
+                "verify before acting on this")
         b["id"] = f"rb-{uuid.uuid4().hex[:6]}"
         b["status"] = "staged"   # operator vetting required; feeds the Proposer
         path = os.path.join(paths.RESEARCH_STAGING_DIR, f"{b['id']}.yaml")
@@ -442,5 +542,6 @@ def run_role(name: str, store: Blackboard, **kw):
     if name in ("scenario-miner", "scenario_miner", "miner"):
         return mine_scenarios(store, kw.get("limit", 10))
     if name in ("researcher", "research"):
-        return research_cli_agents(store, kw.get("query"), kw.get("max_papers", 8))
+        return research_cli_agents(store, kw.get("query"), kw.get("max_papers", 8),
+                                   kw.get("max_repos", 6), kw.get("mission_file"))
     raise ValueError(f"unknown role {name!r}")

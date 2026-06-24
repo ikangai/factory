@@ -311,12 +311,16 @@ def cmd_mine(store: Blackboard, limit: int = 10) -> None:
 
 
 def cmd_research(store: Blackboard, query: Optional[str] = None,
-                 max_papers: int = 8) -> None:
-    """Researcher role: read recent arXiv papers on agents that drive a CLI and
-    stage GROUNDED, cited technique briefs for operator vetting. The briefs FEED
-    the Proposer; nothing is auto-applied (same human-gated discipline as mining)."""
+                 max_papers: int = 8, max_repos: int = 6) -> None:
+    """Researcher role: read recent arXiv papers AND GitHub repos (plus any material
+    the human dropped into MISSION.md) on the mission-driven focus, and stage
+    GROUNDED, cited technique briefs for operator vetting. The briefs FEED the
+    Proposer; nothing is auto-applied (same human-gated discipline as mining). The
+    focus defaults to MISSION.md's `## Research focus` when --query is unset."""
     from ..roles.common import research_cli_agents
-    written = research_cli_agents(store, query=query, max_papers=max_papers)
+    written = research_cli_agents(store, query=query, max_papers=max_papers,
+                                  max_repos=max_repos,
+                                  mission_file=paths.factory("MISSION.md"))
     if not written:
         print("research: no grounded briefs staged (no papers, no applicable "
               "technique, or retrieval failed — see any message above).")
@@ -573,6 +577,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     rch = sub.add_parser("research")
     rch.add_argument("--query", default=None)
     rch.add_argument("--max-papers", type=int, default=8)
+    rch.add_argument("--max-repos", type=int, default=6)
     sub.add_parser("staging")
     sp = sub.add_parser("show-scenario"); sp.add_argument("id")
     yp = sub.add_parser("synth-check"); yp.add_argument("id")
@@ -626,7 +631,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "mine":
             cmd_mine(store, a.limit)
         elif a.cmd == "research":
-            cmd_research(store, query=a.query, max_papers=a.max_papers)
+            cmd_research(store, query=a.query, max_papers=a.max_papers,
+                         max_repos=a.max_repos)
         elif a.cmd == "staging":
             cmd_staging()
         elif a.cmd == "show-scenario":
