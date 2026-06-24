@@ -1,0 +1,17 @@
+id: hard-utf8-charcount
+class: single
+snapshot: local-sandbox
+goal: >
+  Count the number of Unicode characters (code points) — NOT bytes — in
+  {workdir}/text.txt, excluding a single trailing newline if present, and write
+  just that integer to {workdir}/charcount.txt.
+seed_files:
+  text.txt: "Café ☕ Zürich 北京\n"
+check: checks/scenarios/hard_utf8_charcount_check.py
+rationale: >
+  Gap-hunt: the classic `wc -c` (bytes) vs `wc -m`/code-point (characters) slip.
+  The seed mixes multibyte UTF-8 (é, ☕, ü, 北, 京), so a byte count (24) differs from
+  the code-point count (16). Proposer-fixable via a system_prompt convention.
+source: seed
+partition: working
+leakage_count: 0

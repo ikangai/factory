@@ -1,0 +1,33 @@
+id: mined-vtt-to-clean-transcript
+class: single
+snapshot: local-sandbox
+goal: 'In {workdir}, convert captions.vtt into a clean plain-text transcript: strip
+  the WEBVTT header, all timestamp/cue lines, and blank lines, leaving only the spoken
+  text with one caption per line, written to {workdir}/transcript.txt'
+seed_files:
+  captions.vtt: 'WEBVTT
+
+
+    00:00:00.000 --> 00:00:02.000
+
+    Hello and welcome to the show.
+
+
+    00:00:02.000 --> 00:00:05.500
+
+    Today we cover deterministic testing.
+
+
+    00:00:05.500 --> 00:00:08.000
+
+    Thanks for watching.
+
+    '
+check: checks/scenarios/mined_vtt_to_clean_transcript_check.py
+rationale: Mined from the costly (28k-token) YouTube-transcript session. The fetch
+  is network-bound and the original translate follow-up was free-text; this re-casts
+  the transcript-processing core over a shipped VTT file so the output is a fixed,
+  line-exact artifact.
+source: mined
+partition: working
+leakage_count: 0

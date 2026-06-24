@@ -1,0 +1,17 @@
+id: hard-nonblank-lines
+class: single
+snapshot: local-sandbox
+goal: >
+  Count the lines in {workdir}/lines.txt that are NOT empty and NOT whitespace-only
+  (a line containing only spaces or tabs counts as empty). Write just that integer
+  to {workdir}/count.txt.
+seed_files:
+  lines.txt: "hello\n   \n\nworld\n\t\n  foo  \n"
+check: checks/scenarios/hard_nonblank_lines_check.py
+rationale: >
+  Gap-hunt: `grep -c .` counts whitespace-only lines as non-empty (they contain
+  characters), over-counting; only stripping each line (or grep -cvE '^[[:space:]]*$')
+  gives the true 3. Proposer-fixable via a system_prompt convention.
+source: seed
+partition: working
+leakage_count: 0

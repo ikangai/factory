@@ -1,0 +1,26 @@
+id: hard-csv-quoted-sum
+class: single
+snapshot: local-sandbox
+goal: >
+  Read {workdir}/data.csv (header: id,vendor,amount,status). Some vendor fields are
+  quoted and contain commas. Sum the amount column over ONLY the rows whose status is
+  exactly 'paid', and write the total formatted to exactly two decimal places (e.g.
+  225.75) to {workdir}/total.txt — nothing else.
+seed_files:
+  data.csv: |
+    id,vendor,amount,status
+    1,"Acme, Inc.",100.00,paid
+    2,"Globex",200.00,unpaid
+    3,"Initech, LLC",50.50,paid
+    4,"Stark, Industries, Ltd",75.25,paid
+    5,"Wayne",300.00,unpaid
+check: checks/scenarios/hard_csv_quoted_sum_check.py
+rationale: >
+  Crafted gap-hunt: quoted vendor fields contain commas, so naive comma-splitting
+  (cut -d, / awk -F,) shifts the amount/status columns on rows 1,3,4 and yields a
+  wrong sum. Only an RFC-4180-aware parse recovers the correct paid-total (225.75).
+  Tests whether the champion reaches for a real CSV parser under a deceptively simple
+  task. Proposer-fixable via a one-key open change (system_prompt or toolset).
+source: seed
+partition: working
+leakage_count: 0

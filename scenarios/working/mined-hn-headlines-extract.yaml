@@ -1,0 +1,30 @@
+id: mined-hn-headlines-extract
+class: single
+snapshot: local-sandbox
+goal: In {workdir}, read frontpage.html and write the text of every story headline,
+  one per line in document order, to {workdir}/headlines.txt
+seed_files:
+  frontpage.html: '<html><body><table>
+
+    <tr class="athing"><td><span class="titleline"><a href="https://a.example/1">Rust
+    2.0 ships ownership-free mode</a></span></td></tr>
+
+    <tr class="athing"><td><span class="titleline"><a href="https://b.example/2">Show
+    HN: A deterministic test harness</a></span></td></tr>
+
+    <tr class="athing"><td><span class="titleline"><a href="https://c.example/3">The
+    case against microservices</a></span></td></tr>
+
+    <tr class="athing"><td><span class="titleline"><a href="https://d.example/4">SQLite
+    is faster than you think</a></span></td></tr>
+
+    </table></body></html>
+
+    '
+check: checks/scenarios/mined_hn_headlines_extract_check.py
+rationale: Mined from the 'check the headlines from hackernews' session (network-bound,
+  free-text). Re-cast as hermetic parsing of a shipped HN-style HTML file so the extracted
+  set and order are fixed and deterministically gradeable.
+source: mined
+partition: working
+leakage_count: 0

@@ -1,0 +1,27 @@
+id: mined-derstandard-headlines-count
+class: single
+snapshot: local-sandbox
+goal: In {workdir}, parse news.html, extract each article teaser title (the <h2 class="teaser-title">
+  elements), write them one per line in document order to {workdir}/headlines.txt,
+  and write the integer count of headlines to {workdir}/count.txt
+seed_files:
+  news.html: '<html><body>
+
+    <article><h2 class="teaser-title">Nationalrat beschliesst neues Budget</h2></article>
+
+    <article><h2 class="teaser-title">Wetter: Hitzewelle erreicht Wien</h2></article>
+
+    <aside><h2 class="sidebar-title">Werbung</h2></aside>
+
+    <article><h2 class="teaser-title">Champions League: Auslosung am Freitag</h2></article>
+
+    </body></html>
+
+    '
+check: checks/scenarios/mined_derstandard_headlines_count_check.py
+rationale: Mined from 'give me the headlines from derstandard.at'. Re-cast as local
+  HTML parsing with a distractor element (sidebar-title) so a correct selector is
+  required; both the list and the count are extralinguistic and deterministic.
+source: mined
+partition: working
+leakage_count: 0

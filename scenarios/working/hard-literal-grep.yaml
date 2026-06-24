@@ -1,0 +1,23 @@
+id: hard-literal-grep
+class: single
+snapshot: local-sandbox
+goal: >
+  Count the lines in {workdir}/log.txt that contain the literal three-character
+  substring "a.b" (the letter a, a literal period, the letter b) — a literal dot,
+  NOT a regex wildcard. Write just that integer to {workdir}/count.txt.
+seed_files:
+  log.txt: |
+    xa.by
+    aXb here
+    a.b
+    no match
+    aab
+    za.bz
+check: checks/scenarios/hard_literal_grep_check.py
+rationale: >
+  Gap-hunt: `grep 'a.b'` treats the dot as a wildcard and over-counts (matches
+  'aXb' and 'aab'); only a fixed-string match (grep -F / a\.b / Python 'in')
+  counts the 3 literal lines. Proposer-fixable via a system_prompt convention.
+source: seed
+partition: working
+leakage_count: 0

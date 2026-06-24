@@ -1,0 +1,32 @@
+id: mined-transcript-wordcount
+class: single
+snapshot: local-sandbox
+goal: In {workdir}, count the total number of whitespace-separated words across all
+  spoken caption text in captions.vtt (excluding the WEBVTT header and all timestamp
+  lines) and write the integer to {workdir}/wordcount.txt
+seed_files:
+  captions.vtt: 'WEBVTT
+
+
+    00:00:00.000 --> 00:00:02.000
+
+    Hello and welcome to the show.
+
+
+    00:00:02.000 --> 00:00:05.500
+
+    Today we cover deterministic testing.
+
+
+    00:00:05.500 --> 00:00:08.000
+
+    Thanks for watching.
+
+    '
+check: checks/scenarios/mined_transcript_wordcount_check.py
+rationale: Companion to the transcript flow — captures the common 'do something with
+  the transcript' follow-up as a deterministic numeric outcome instead of a free-text
+  summary, so the shell can grade it.
+source: mined
+partition: working
+leakage_count: 0
