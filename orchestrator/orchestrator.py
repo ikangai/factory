@@ -556,6 +556,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     pp.add_argument("--partition", choices=["working", "held-out"], default="working")
     sub.add_parser("status")
     sub.add_parser("demo")
+    au = sub.add_parser("autonomous")
+    au.add_argument("--mission", required=True,
+                    help="mission statement that steers the unattended loop")
+    au.add_argument("--max-rounds", type=int, default=5,
+                    help="hard ceiling on rounds (default 5)")
+    au.add_argument("--token-budget", type=int, default=None,
+                    help="hard ceiling on cumulative tokens (budget_ledger); unset = no cap")
+    au.add_argument("--no-research", action="store_true",
+                    help="skip the researcher step (no grounded briefs staged)")
+    au.add_argument("--dry-run", action="store_true",
+                    help="print the per-round PLAN without invoking any role/LLM/subprocess")
     a = ap.parse_args(argv)
 
     # reset deletes the db file, so it must run BEFORE a store connection is opened.
@@ -599,6 +610,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_promote_scenario(store, a.id, a.partition)
         elif a.cmd == "status":
             cmd_status(store)
+        elif a.cmd == "autonomous":
+            from .autonomy import cmd_autonomous
+            cmd_autonomous(store, a.mission, max_rounds=a.max_rounds,
+                           token_budget=a.token_budget,
+                           do_research=not a.no_research, dry_run=a.dry_run)
     return 0
 
 

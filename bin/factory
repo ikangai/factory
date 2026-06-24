@@ -4,6 +4,7 @@
 # (The target repo being optimised is set by clive.root in config.yaml.)
 #
 #   factory init | baseline | propose | evaluate <cid> | round <cid> | mine | status
+#   factory autonomous --mission "..."   # run the loop UNATTENDED (never promotes)
 #   factory board        # start the operator's board
 #   factory smoke        # end-to-end smoke test on the single example scenario
 set -euo pipefail
@@ -18,6 +19,7 @@ case "${1:-}" in
   "")     cat >&2 <<'USAGE'
 usage: factory <command>
   loop     : init | reset | baseline | propose | evaluate <cid> | round <cid> | holdout-check <cid>
+  autonomy : autonomous --mission "..." [--max-rounds N] [--token-budget T] [--no-research] [--dry-run]
   corpus   : mine | staging | show-scenario <id> | synth-check <id> | promote-scenario <id> [--partition working|held-out]
   inspect  : status | board
   demos    : smoke | demo
