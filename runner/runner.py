@@ -18,7 +18,8 @@ import uuid
 from dataclasses import asdict
 from typing import Optional
 
-from ..common import clive_invoke, config, paths, specs, spec_applier
+from ..common import config, paths, specs
+from ..common.config import get_adapter
 from ..common.store import Blackboard
 from ..checks import check_base, safety
 from ..envs import get_provider
@@ -160,7 +161,7 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
     budget_cfg = cfg.get("budget", {})
     max_tokens = int(budget_cfg.get("per_run_max_tokens", 8000))
     timeout_s = int(budget_cfg.get("per_run_timeout_s", 240))
-    default_toolset = cfg.get("clive", {}).get("default_toolset", "minimal")
+    default_toolset = config.target_config().get("default_toolset", "minimal")
 
     model_name = model_entry.get("name", model_entry.get("model", "model"))
     run_id = _new_run_id(candidate_id, scenario["id"], model_name)
@@ -169,6 +170,7 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
     own_store = store is None
     store = store or Blackboard()
     provider = provider or get_provider()
+    adapter = get_adapter(cfg)
 
     if scenario.get("class") == "multi-clive":
         from .multi_clive import run_multi_clive
@@ -181,21 +183,21 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
     try:
         handle = provider.provision(scenario, run_id)
         spec = specs.load_spec(candidate_spec_path)
-        applied = spec_applier.apply_spec(spec, evidence_dir, default_toolset)
+        applied = adapter.actuate(spec, evidence_dir, default_toolset)
 
         goal = (scenario.get("goal") or "").format(workdir=handle.workdir,
                                                     home=handle.home)
 
         env_vars = dict(handle.clive_env)
         start = time.time()
-        cres = clive_invoke.run(
+        cres = adapter.run(
             goal, applied_env=applied.env, applied_flags=applied.flags,
             env_vars=env_vars, model_entry=model_entry,
             max_tokens=max_tokens, timeout_s=timeout_s)
 
         # --- assemble evidence -------------------------------------------
         sess_text, tokens_used, claim = _read_session_log(handle.home)
-        session_dirs = clive_invoke.parse_session_dirs(cres.stderr)
+        session_dirs = adapter.parse_session_dirs(cres.stderr)
         art_text, _kept = _collect_session_artifacts(session_dirs, start,
                                                      handle.workdir, evidence_dir)
         workdir_text = _read_workdir_files(handle.workdir)

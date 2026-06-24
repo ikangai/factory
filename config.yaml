@@ -1,13 +1,25 @@
 # clive-harness-factory configuration (Phase 0).
 # Everything is files + a SQLite store, for inspectability. No hidden state.
 
-# --- clive under test -------------------------------------------------------
-clive:
-  # Repo root of the TARGET being optimised. The factory is now standalone
-  # (/Development/factory), so this points at the sibling clive repo. To point
-  # the factory at a DIFFERENT repo, change this (relative to factory/, or absolute).
+# --- target under test ------------------------------------------------------
+# The factory is REPO-AGNOSTIC: it optimises whatever TARGET this section names.
+# `provider` selects the adapter (factory/adapters/<provider>.py) that knows how
+# to actuate a spec into, and invoke, that target. `clive` is the default and the
+# reference adapter. Pointing the factory at a DIFFERENT repo = (1) write a new
+# adapter under factory/adapters/, (2) register it in common.config.get_adapter,
+# (3) set `provider` here + the target's root/entry/interpreter below.
+#
+# BACKWARD COMPAT: a legacy top-level `clive:` block (the previous layout) is
+# still honoured — common.config.target_config() treats it as the clive target,
+# so older configs keep working unchanged. Where both exist, `target:` wins and
+# `clive:` fills in any keys it omits.
+target:
+  provider: "clive"        # which adapter drives the target (default: clive)
+  # Repo root of the TARGET being optimised. The factory is standalone
+  # (/Development/factory), so this points at the sibling clive repo. Relative to
+  # factory/, or absolute.
   root: "../clive"
-  # Interpreter used to run the candidate clive. CLAUDE.md: "no virtualenv is
+  # Interpreter used to run the candidate target. CLAUDE.md: "no virtualenv is
   # active" — clive runs under system python3. Override to ".venv/bin/python"
   # if you keep deps in a venv.
   python: "python3"

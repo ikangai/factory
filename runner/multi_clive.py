@@ -18,7 +18,8 @@ import time
 from dataclasses import asdict
 from typing import Optional
 
-from ..common import clive_invoke, config, paths, specs, spec_applier
+from ..common import config, paths, specs
+from ..common.config import get_adapter
 from ..common.store import Blackboard
 from ..checks import check_base, safety
 from ..envs.base import EnvProvider, EnvHandle
@@ -43,10 +44,11 @@ def _sum_session_tokens(home: str) -> int:
     return total
 
 
-def _spawn(argv: list[str], env: dict, logpath: str) -> tuple[subprocess.Popen, object]:
+def _spawn(argv: list[str], env: dict, logpath: str,
+           cwd: str) -> tuple[subprocess.Popen, object]:
     fh = open(logpath, "w", encoding="utf-8")
     proc = subprocess.Popen(argv, env=env, stdout=fh, stderr=subprocess.STDOUT,
-                            cwd=config.clive_entry()[0], start_new_session=True)
+                            cwd=cwd, start_new_session=True)
     return proc, fh
 
 
@@ -82,11 +84,12 @@ def run_multi_clive(candidate_id: str, candidate_spec_path: str, scenario: dict,
     budget_cfg = cfg.get("budget", {})
     max_tokens = int(budget_cfg.get("per_run_max_tokens", 8000))
     timeout_s = int(budget_cfg.get("per_run_timeout_s", 240))
-    default_toolset = cfg.get("clive", {}).get("default_toolset", "minimal")
+    default_toolset = config.target_config().get("default_toolset", "minimal")
     model_name = model_entry.get("name", "model")
 
-    _, clive_py = config.clive_entry()
-    py = config.clive_python()
+    adapter = get_adapter(cfg)
+    clive_root, clive_py = adapter.entry()
+    py = adapter.interpreter()
     lobby = f"factoryL{run_id[-6:]}"
     room = scenario.get("room", "factory-relay")
 
@@ -97,13 +100,13 @@ def run_multi_clive(candidate_id: str, candidate_spec_path: str, scenario: dict,
         handle = provider.provision(scenario, run_id)
         sock = os.path.join(handle.home, "lobby.sock")
         spec = specs.load_spec(candidate_spec_path)
-        applied = spec_applier.apply_spec(spec, evidence_dir, default_toolset)
+        applied = adapter.actuate(spec, evidence_dir, default_toolset)
 
         base_env = dict(os.environ)
-        clive_invoke._scrub_env(base_env)   # drop non-LLM host creds + dangerous flags
+        adapter.scrub_env(base_env)   # drop non-LLM host creds + dangerous flags
         base_env.update(handle.clive_env)
         base_env.update(applied.env)
-        base_env.update(clive_invoke.panel_env(model_entry))
+        base_env.update(adapter.panel_env(model_entry))
         base_env["CLIVE_KEEP_SESSION"] = "1"
         base_env["CLIVE_EXPERIMENTAL_SELFMOD"] = "0"   # never reach real clive source
         # Members run isolated (--setting-sources ""); auth is the subscription
@@ -115,7 +118,8 @@ def run_multi_clive(candidate_id: str, candidate_spec_path: str, scenario: dict,
         # --- broker -------------------------------------------------------
         broker_log = os.path.join(evidence_dir, "broker.log")
         bproc, bfh = _spawn([py, clive_py, "--role", "broker", "--name", lobby,
-                             "--lobby-socket", sock, "--safe-mode"], base_env, broker_log)
+                             "--lobby-socket", sock, "--safe-mode"], base_env,
+                            broker_log, clive_root)
         procs.append(bproc); files.append(bfh)
         # wait for the lobby socket to appear (bounded)
         for _ in range(40):
@@ -133,7 +137,7 @@ def run_multi_clive(candidate_id: str, candidate_spec_path: str, scenario: dict,
             argv = [py, clive_py, "--name", member["name"], "--conversational",
                     "--join", f"{room}@{lobby}", "--lobby-socket", sock, "--safe-mode",
                     "--max-tokens", str(max_tokens)] + list(applied.flags) + [mgoal]
-            mproc, mfh = _spawn(argv, base_env, mlog)
+            mproc, mfh = _spawn(argv, base_env, mlog, clive_root)
             procs.append(mproc); files.append(mfh)
 
         # --- wait for the WORLD result (relayed.txt) ----------------------
@@ -182,7 +186,7 @@ def run_multi_clive(candidate_id: str, candidate_spec_path: str, scenario: dict,
     # these; the relay path must too). Member session dirs are recovered from the
     # `Session:` lines in the member logs, attributed by this run's unique workdir.
     from .runner import _collect_session_artifacts, _read_workdir_files
-    session_dirs = clive_invoke.parse_session_dirs(room_transcript)
+    session_dirs = adapter.parse_session_dirs(room_transcript)
     art_text, _ = _collect_session_artifacts(session_dirs, 0.0, handle.workdir, evidence_dir)
     scan_text = room_transcript + art_text + _read_workdir_files(handle.workdir)
 
