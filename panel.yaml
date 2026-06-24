@@ -23,9 +23,11 @@ panel:
 
 # Held-out model: NEVER used during optimisation; scored only to detect overfit
 # to the panel. Actuated on operator cadence via `factory holdout-check <cid>`.
-# Uses a DIFFERENT provider/model from the panel so it's a genuine cross-check.
+# Also on `claude -p` (the subscription, no API spend) but a DIFFERENT model from
+# the sonnet panel (opus) so it's still a genuine cross-check — a candidate that
+# only works because it overfit the sonnet panel should slip against opus.
 held_out:
-  - name: or-flash
-    provider: openrouter           # OPENROUTER_API_KEY from clive/.env
-    model: google/gemini-3-flash-preview
-    tier: fast
+  - name: claude-cli-opus
+    provider: claude-cli           # subscription via `claude -p`; no API key
+    model: opus
+    tier: gold
