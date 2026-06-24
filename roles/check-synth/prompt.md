@@ -24,6 +24,43 @@ def acceptance(ctx: CheckContext) -> CheckResult:
 - `ctx.scenario` — the scenario dict (e.g. `ctx.scenario.get("seed_files")`).
 - `CheckResult(passed: bool, detail: str, evidence: dict)`.
 
+## Oracle — RECOMPUTE it, NEVER trust a guessed literal (CRITICAL)
+
+The scenario's goal/check description may STATE an expected answer (e.g. "equals
+exactly '15'"). That number was guessed and **may be wrong** — do not hard-code it
+as the gate. If the answer is computable from the seed artifact, **recompute it
+from that artifact and compare the candidate's output to the recomputed value.**
+The recomputation is the primary gate; the description's literal is, at most, a
+cross-check.
+
+- **Derive `expected` FIRST**, from the seed file(s), before comparing anything.
+- Compare the candidate's output to `expected` — that comparison decides pass/fail.
+- **Return `evidence["expected"]` (the recomputed value) on EVERY return path**,
+  including the missing/empty/error paths. (The harness exercises your check
+  against `evidence["expected"]`; a check that omits it cannot be validated.)
+- Do **not** order a literal-equality gate before the recompute — a wrong literal
+  would then fail a correct candidate, and the recompute could never catch it.
+- If the answer is genuinely not computable from the seed, say so in `detail` and
+  gate on the most direct observable property instead.
+
+```python
+from factory.checks.check_base import CheckContext, CheckResult
+
+def acceptance(ctx: CheckContext) -> CheckResult:
+    src = ctx.read_file("captions.vtt") or ""
+    expected = sum(len(l.split()) for l in src.splitlines()
+                   if l.strip() and not l.startswith("WEBVTT") and "-->" not in l)
+    raw = ctx.read_file("wordcount.txt")
+    if raw is None or raw.strip() == "":
+        return CheckResult(False, "wordcount.txt absent/empty", evidence={"expected": expected})
+    got = raw.strip()
+    if got != str(expected):
+        return CheckResult(False, f"wordcount.txt is {got!r}, recomputed expected {expected}",
+                           evidence={"expected": expected, "got": got})
+    return CheckResult(True, f"wordcount.txt == {expected} (recomputed from captions.vtt)",
+                       evidence={"expected": expected, "got": got})
+```
+
 ## Rules
 - **Deterministic and total**: the same end-state always yields the same verdict.
   Handle the missing/empty/malformed cases first and return a clear `False`.
