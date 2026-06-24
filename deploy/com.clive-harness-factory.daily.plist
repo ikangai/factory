@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Daily 09:00 factory update (macOS launchd). Activate:
+       cp deploy/com.clive-harness-factory.daily.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.clive-harness-factory.daily.plist
+     This runs a BOUNDED autonomous loop each morning and leaves an executive
+     summary in updates/. It NEVER promotes — promotion stays a human action.
+     NOTE: it spends Claude-subscription tokens each run; unload to stop. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.clive-harness-factory.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/martintreiber/Documents/Development/factory/scripts/daily_update.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/martintreiber/Documents/Development/factory/logs/daily_update.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/martintreiber/Documents/Development/factory/logs/daily_update.err.log</string>
+</dict>
+</plist>
