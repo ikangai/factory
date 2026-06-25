@@ -85,6 +85,21 @@ roles:
   # e.g. ["proposer"] or "*" for all. Empty = every role stays isolated (default).
   super_workers: []
 
+# --- the Guest House: where a DEVELOPER super-worker runs (the fleet) -------
+# A developer super-worker (which edits the target's CODE) runs as a separate macOS
+# Standard User — a HARD, OS-enforced boundary protecting the operator's files/creds,
+# so Bash is safe. Headless operation needs TWO one-time operator setups:
+#   1. that user's OWN claude (a binary THAT user can execute — NOT the operator's
+#      ~/.local/bin/claude, which is unreadable to them). Find it:
+#        sudo -u Agent -i bash -lc 'command -v claude'
+#   2. a passwordless sudoers grant so the headless factory never hits a password prompt:
+#        sudo visudo -f /etc/sudoers.d/clive-factory
+#        <operator> ALL=(Agent) NOPASSWD: <that claude path>
+# Leave `user` empty to keep developer workers OFF until the Guest House is wired.
+super_worker:
+  user: "Agent"
+  claude_bin: ""        # e.g. /Users/Agent/.local/bin/claude — set once you locate it (step 1)
+
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:
   # Retire a held-out scenario once it has influenced this many promotion

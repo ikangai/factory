@@ -74,11 +74,12 @@ def test_claude_super_env_is_allowlisted(monkeypatch):
     assert "--add-dir" in captured["argv"]
 
 
-def test_super_argv_runs_as_guest_house_user_with_bash():
-    argv = common._super_worker_argv("/ws", common.DEVELOPER_TOOLS, as_user="clive-worker")
-    assert argv[:4] == ["sudo", "-u", "clive-worker", "--"]   # spawned as the Guest-House user
-    assert "claude" in argv and "--add-dir" in argv
-    assert "Bash" in argv                                     # safe under the OS user boundary
+def test_super_argv_runs_as_guest_house_user_with_its_own_claude_and_bash():
+    argv = common._super_worker_argv("/ws", common.DEVELOPER_TOOLS, as_user="Agent",
+                                     claude_bin="/Users/Agent/.local/bin/claude")
+    assert argv[:5] == ["sudo", "-H", "-u", "Agent", "--"]    # -H → Agent's HOME/auth
+    assert argv[5] == "/Users/Agent/.local/bin/claude"        # Agent's OWN claude, by path
+    assert "--add-dir" in argv and "Bash" in argv             # Bash safe under the OS boundary
 
 
 def test_claude_super_as_user_defers_env_to_the_target_user(monkeypatch):
@@ -90,9 +91,10 @@ def test_claude_super_as_user_defers_env_to_the_target_user(monkeypatch):
             {"result": "ok", "usage": {}, "total_cost_usd": 0.0}))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    common.claude_super("do", workdir="/ws", allowed_tools=["Bash"], as_user="clive-worker")
-    assert seen["argv"][:4] == ["sudo", "-u", "clive-worker", "--"]
-    assert seen["env"] is None     # under sudo -u, the TARGET user's own env (their ~/.claude auth)
+    common.claude_super("do", workdir="/ws", allowed_tools=["Bash"], as_user="Agent",
+                        claude_bin="/Users/Agent/.local/bin/claude")
+    assert seen["argv"][:5] == ["sudo", "-H", "-u", "Agent", "--"]
+    assert seen["env"] is None     # under sudo -H -u, the TARGET user's own env (their ~/.claude)
     assert seen["cwd"] == "/ws"
 
 

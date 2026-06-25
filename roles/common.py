@@ -137,15 +137,19 @@ def _super_worker_env() -> dict:
 
 
 def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
-                       as_user: Optional[str] = None, json_output: bool = True) -> list[str]:
+                       as_user: Optional[str] = None, claude_bin: str = "claude",
+                       json_output: bool = True) -> list[str]:
     argv: list[str] = []
     if as_user:
         # Run the worker as the Guest-House Standard User — OS-enforced isolation of the
-        # operator's files/creds (docs/plans/2026-06-25). Needs a passwordless
-        # `sudo -u <user>` grant for the claude command. With this HARD boundary, Bash
-        # in the toolset is safe.
-        argv += ["sudo", "-u", as_user, "--"]
-    argv += ["claude", "-p"]
+        # operator's files/creds (docs/plans/2026-06-25). `-H` sets HOME to the target
+        # user's home so claude finds THAT user's ~/.claude login (not the operator's).
+        # `claude_bin` MUST be the target user's own claude (a path THAT user can
+        # execute — the operator's ~/.local/bin/claude is unreadable to them). Needs a
+        # passwordless `sudo -u <user>` grant for that binary. With this HARD boundary,
+        # Bash in the toolset is safe.
+        argv += ["sudo", "-H", "-u", as_user, "--"]
+    argv += [claude_bin, "-p"]
     if json_output:
         argv += ["--output-format", "json"]
     argv += ["--setting-sources", "",            # no plugins/hooks → no team-barrier hang
@@ -169,8 +173,8 @@ def super_worker_workspace(prefix: str = "role"):
 
 
 def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS,
-                 as_user: Optional[str] = None, max_turns: int = 24,
-                 timeout: int = 900) -> tuple[str, int, float]:
+                 as_user: Optional[str] = None, claude_bin: str = "claude",
+                 max_turns: int = 24, timeout: int = 900) -> tuple[str, int, float]:
     """Run a FULL-CAPABILITY `claude -p` super-worker in `workdir` with a curated
     toolset + acceptEdits and a turn cap. Returns (text, tokens, cost). Never crashes —
     a transport error yields the `[claude -p …]` sentinel callers fall back on.
@@ -183,7 +187,8 @@ def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS
     env = None if as_user else _super_worker_env()
     try:
         p = subprocess.run(_super_worker_argv(workdir, allowed_tools, max_turns=max_turns,
-                                              as_user=as_user, json_output=True),
+                                              as_user=as_user, claude_bin=claude_bin,
+                                              json_output=True),
                            input=prompt, capture_output=True, text=True,
                            timeout=timeout, cwd=workdir, env=env)
         if p.returncode == 0 and p.stdout.strip():
