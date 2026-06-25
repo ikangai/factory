@@ -369,3 +369,10 @@ class Blackboard:
         if r:
             r["metrics"] = json.loads(r.pop("metrics_json"))
         return r
+
+    def mission_status_history(self, limit: int = 5) -> list[dict]:
+        """The last `limit` statuses, newest first — for steady-state/plateau detection."""
+        rows = self._all("SELECT * FROM mission_status ORDER BY id DESC LIMIT ?", (limit,))
+        for r in rows:
+            r["metrics"] = json.loads(r.pop("metrics_json"))
+        return rows
