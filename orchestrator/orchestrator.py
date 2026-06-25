@@ -639,7 +639,8 @@ def cmd_blog(store: Blackboard, mission: Optional[str] = None) -> str:
     return path
 
 
-def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False) -> dict:
+def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
+                     keep: bool = False) -> dict:
     """ONE develop→grade→auto-merge turn against a THROWAWAY clone of the target — the
     dev-account smoke test of the autonomous code loop. A developer super-worker makes a
     bounded code change toward `task`, the round grades it (frozen-check + the target's
@@ -675,9 +676,16 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False) -> dic
                                 champion_scores=champion_scores, grade_fn=grade_fn,
                                 as_user=as_user, claude_bin=claude_bin)
         print(f"[develop-once] result: {json.dumps(res, indent=2, default=str)}")
+        if keep and res.get("action") == "merged":
+            print(f"\n[develop-once] --keep: inspect the candidate the worker produced:")
+            print(f"    cd {main} && git show {res.get('merge_sha','HEAD')}   # the merge")
+            print(f"    cd {main} && git log --oneline -5")
         return res
     finally:
-        shutil.rmtree(work, ignore_errors=True)   # the throwaway clone never touches the real target
+        if keep:
+            print(f"[develop-once] --keep: champion clone left at {main}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)   # throwaway clone never touches the real target
 
 
 # --- the 09:00 daily update -------------------------------------------------
@@ -827,6 +835,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     dev1.add_argument("--task", required=True, help="what the developer should change/build")
     dev1.add_argument("--prod", action="store_true",
                       help="run the developer in the Guest-House user (default: dev-mode, same-user)")
+    dev1.add_argument("--keep", action="store_true",
+                      help="keep the throwaway clone so you can inspect the merged candidate diff")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sub.add_parser("schedule-uninstall")
@@ -906,7 +916,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "blog":
             cmd_blog(store, mission=a.mission)
         elif a.cmd == "develop-once":
-            cmd_develop_once(store, a.task, prod=a.prod)
+            cmd_develop_once(store, a.task, prod=a.prod, keep=a.keep)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":
