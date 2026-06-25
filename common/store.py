@@ -235,3 +235,95 @@ class Blackboard:
         return self._all(
             "SELECT sf.*, r.candidate_id, r.scenario_id, r.model FROM safety_flags sf "
             "JOIN runs r ON sf.run_id = r.id ORDER BY sf.id DESC")
+
+    # =======================================================================
+    # The conductor loop (design: docs/plans/2026-06-25-conductor-loop-design.md)
+    # =======================================================================
+
+    # -- mission: the human's single steer ----------------------------------
+    def set_mission(self, statement: str, target_repo: str = "") -> int:
+        """Set the active mission; any prior active mission steps down. Returns its id."""
+        self._exec("UPDATE mission SET active = 0 WHERE active = 1")
+        cur = self._exec(
+            "INSERT INTO mission(statement, target_repo, created_at, active) VALUES (?,?,?,1)",
+            (statement, target_repo, now_iso()))
+        return cur.lastrowid
+
+    def active_mission(self) -> Optional[dict]:
+        return self._one("SELECT * FROM mission WHERE active = 1 ORDER BY id DESC LIMIT 1")
+
+    # -- tasks: the backlog -------------------------------------------------
+    def add_task(self, id: str, title: str, *, source: str, detail: str = "",
+                 source_ref: str = "") -> None:
+        ts = now_iso()
+        self._exec(
+            "INSERT INTO tasks(id, title, detail, source, source_ref, status, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,'open',?,?)",
+            (id, title, detail, source, source_ref, ts, ts))
+
+    def get_task(self, id: str) -> Optional[dict]:
+        return self._one("SELECT * FROM tasks WHERE id = ?", (id,))
+
+    def list_tasks(self, status: Optional[str] = None) -> list[dict]:
+        if status:
+            return self._all("SELECT * FROM tasks WHERE status = ? ORDER BY created_at",
+                             (status,))
+        return self._all("SELECT * FROM tasks ORDER BY created_at")
+
+    def set_task_status(self, id: str, status: str, *, result: Optional[str] = None,
+                        shift_id: Optional[int] = None) -> None:
+        sets, params = ["status = ?", "updated_at = ?"], [status, now_iso()]
+        if result is not None:
+            sets.append("result = ?"); params.append(result)
+        if shift_id is not None:
+            sets.append("shift_id = ?"); params.append(shift_id)
+        params.append(id)
+        self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+
+    # -- shifts: bounded sessions that resume -------------------------------
+    def start_shift(self, *, token_budget: int, mission_id: Optional[int] = None) -> int:
+        cur = self._exec(
+            "INSERT INTO shifts(mission_id, token_budget, status, started_at) "
+            "VALUES (?,?,'running',?)", (mission_id, token_budget, now_iso()))
+        return cur.lastrowid
+
+    def end_shift(self, shift_id: int, *, status: str, report: str = "",
+                  resume_note: str = "", tokens_used: int = 0) -> None:
+        self._exec(
+            "UPDATE shifts SET status = ?, report = ?, resume_note = ?, tokens_used = ?, "
+            "ended_at = ? WHERE id = ?",
+            (status, report, resume_note, tokens_used, now_iso(), shift_id))
+
+    def last_shift(self) -> Optional[dict]:
+        return self._one("SELECT * FROM shifts ORDER BY id DESC LIMIT 1")
+
+    # -- digests: the research<->dev feedback loop --------------------------
+    def add_digest(self, *, shift_id: Optional[int], shipped: list,
+                   summary: str = "") -> int:
+        cur = self._exec(
+            "INSERT INTO digests(shift_id, shipped_json, summary, consumed, created_at) "
+            "VALUES (?,?,?,0,?)", (shift_id, json.dumps(shipped or []), summary, now_iso()))
+        return cur.lastrowid
+
+    def unconsumed_digests(self) -> list[dict]:
+        rows = self._all("SELECT * FROM digests WHERE consumed = 0 ORDER BY id")
+        for r in rows:
+            r["shipped"] = json.loads(r.pop("shipped_json"))
+        return rows
+
+    def mark_digest_consumed(self, id: int) -> None:
+        self._exec("UPDATE digests SET consumed = 1 WHERE id = ?", (id,))
+
+    # -- mission status: the advancing / steady_state / blocked timeline ----
+    def record_mission_status(self, *, shift_id: Optional[int], status: str,
+                              rationale: str = "", metrics: dict | None = None) -> None:
+        self._exec(
+            "INSERT INTO mission_status(shift_id, status, rationale, metrics_json, at) "
+            "VALUES (?,?,?,?,?)",
+            (shift_id, status, rationale, json.dumps(metrics or {}), now_iso()))
+
+    def latest_mission_status(self) -> Optional[dict]:
+        r = self._one("SELECT * FROM mission_status ORDER BY id DESC LIMIT 1")
+        if r:
+            r["metrics"] = json.loads(r.pop("metrics_json"))
+        return r

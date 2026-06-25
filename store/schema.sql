@@ -115,3 +115,71 @@ CREATE INDEX IF NOT EXISTS idx_runs_candidate ON runs(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_runs_scenario  ON runs(scenario_id);
 CREATE INDEX IF NOT EXISTS idx_safety_run     ON safety_flags(run_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage);
+
+-- ===========================================================================
+-- The conductor loop (design: docs/plans/2026-06-25-conductor-loop-design.md).
+-- Five tables make bounded shifts RESUMABLE and the MISSION the terminator.
+-- ===========================================================================
+
+-- The human's single steer. Only one row is active (re-steering deactivates the
+-- prior mission). The factory runs until this is reached — not until a queue empties.
+CREATE TABLE IF NOT EXISTS mission (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement   TEXT NOT NULL,
+    target_repo TEXT NOT NULL DEFAULT '',     -- optional: a repo with issues to work
+    created_at  TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1
+);
+
+-- The backlog. Work comes from the target's issues, the researchers, the workers
+-- themselves (found-but-not-fixed), or the human/mission.
+CREATE TABLE IF NOT EXISTS tasks (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL,
+    detail     TEXT NOT NULL DEFAULT '',
+    source     TEXT NOT NULL CHECK (source IN ('issue','research','worker','human','mission')),
+    source_ref TEXT NOT NULL DEFAULT '',       -- github issue number, research brief id, …
+    status     TEXT NOT NULL DEFAULT 'open'
+                 CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
+    result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
+    shift_id   INTEGER,                          -- the shift that last worked it
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Each bounded conductor session. State persists here so the next shift resumes.
+CREATE TABLE IF NOT EXISTS shifts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id   INTEGER,
+    token_budget INTEGER NOT NULL DEFAULT 0,
+    tokens_used  INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'running'
+                   CHECK (status IN ('running','completed','halted','timed_out','budget_exhausted','error')),
+    report       TEXT NOT NULL DEFAULT '',      -- the daily report text / path
+    resume_note  TEXT NOT NULL DEFAULT '',      -- what the next shift should pick up
+    started_at   TEXT NOT NULL,
+    ended_at     TEXT
+);
+
+-- What shipped each shift, handed to the researchers (the research<->dev loop).
+CREATE TABLE IF NOT EXISTS digests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id     INTEGER,
+    shipped_json TEXT NOT NULL DEFAULT '[]',    -- task ids / shas merged this shift
+    summary      TEXT NOT NULL DEFAULT '',      -- prose digest for the researchers
+    consumed     INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
+
+-- The mission-progress timeline: never a silent binary "done".
+CREATE TABLE IF NOT EXISTS mission_status (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id     INTEGER,
+    status       TEXT NOT NULL CHECK (status IN ('advancing','steady_state','blocked','reached')),
+    rationale    TEXT NOT NULL DEFAULT '',
+    metrics_json TEXT NOT NULL DEFAULT '{}',    -- backlog size, research-dry streak, score deltas
+    at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_mission_active ON mission(active);
