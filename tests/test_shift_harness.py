@@ -106,6 +106,37 @@ def test_run_shift_timeout_is_recorded(tmp_path, monkeypatch):
         assert res["action"] == "timed_out" and s.last_shift()["status"] == "timed_out"
 
 
+def test_run_shift_requeues_claimed_work_when_the_conductor_errors(tmp_path, monkeypatch):
+    """A conductor that claims a task then dies must not strand it in_progress — the next
+    shift would never pick it up (this shift is 'error', not 'running', so reap skips it)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.add_task("t1", "x", source="issue")
+
+        def claims_then_blows_up(store, *, shift_id, mission, token_budget, wall_clock_s):
+            store.set_task_status("t1", "in_progress", shift_id=shift_id)
+            raise RuntimeError("boom")
+
+        res = shiftmod.run_shift(s, token_budget=1, conductor=claims_then_blows_up)
+        assert res["action"] == "error"
+        assert s.get_task("t1")["status"] == "open"      # claimed work returned to the backlog
+
+
+def test_run_shift_requeues_on_a_returned_error_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.add_task("t1", "x", source="issue")
+
+        def claims_then_returns_error(store, *, shift_id, mission, token_budget, wall_clock_s):
+            store.set_task_status("t1", "in_progress", shift_id=shift_id)
+            return {"status": "error", "resume_note": "spawn failed"}   # e.g. the sentinel path
+
+        res = shiftmod.run_shift(s, token_budget=1, conductor=claims_then_returns_error)
+        assert res["action"] == "error" and s.get_task("t1")["status"] == "open"
+
+
 def test_run_shift_post_completion_halt_overrides(tmp_path, monkeypatch):
     """STOP appearing DURING the shift → the post-check downgrades 'completed' to 'halted'."""
     state = {"halted": False}

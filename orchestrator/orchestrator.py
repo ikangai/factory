@@ -691,7 +691,9 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
              source: str = "human", result: str = "", status: Optional[str] = None) -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
-    `task add "<title>"`, `task done <id> [--result <sha>]`."""
+    `task add "<title>"`, `task claim <id>`, `task done <id> [--result <sha>]`,
+    `task block <id> [--result why]`. claim/done STAMP the running shift, so the loop can
+    tell what a shift shipped (the basis for mission-progress)."""
     if action == "list":
         for t in store.list_tasks(status=status):
             print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
@@ -700,9 +702,15 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         tid = f"task-{uuid.uuid4().hex[:8]}"
         store.add_task(tid, rest or "(untitled)", source=source)
         print(f"[task] added {tid}: {rest}")
+    elif action == "claim":
+        store.set_task_status(rest, "in_progress", shift_id=store.current_shift_id())
+        print(f"[task] claimed {rest}")
     elif action == "done":
-        store.set_task_status(rest, "done", result=result)
+        store.set_task_status(rest, "done", result=result, shift_id=store.current_shift_id())
         print(f"[task] done {rest}")
+    elif action == "block":
+        store.set_task_status(rest, "blocked", result=result)
+        print(f"[task] blocked {rest}")
 
 
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
@@ -720,10 +728,22 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     wall_clock_s = wall_clock_s or int(auton.get("shift_wall_clock_s", 1800))
     sw = cfg.get("super_worker", {}) or {}
 
+    # IDLE short-circuit: if the loop has been steady for K shifts with an empty backlog and
+    # the operator isn't re-steering, DON'T spawn a conductor — surface and wait. This is
+    # what makes 'recommend_stop' real (otherwise a scheduled loop spawns forever).
+    if mission is None and _should_idle(store, plateau_k):
+        print(f"[run] idle: steady state for {plateau_k}+ shifts, backlog empty — nothing to "
+              f"do toward the mission. Awaiting a revision (factory run --mission \"…\").")
+        return {"action": "idle", "shift_id": None}
+
     if conductor is None:                              # live: the claude conductor (dev/prod user)
         from ..roles.conductor import run_conductor
         as_user = (sw.get("user") or None) if prod else None
         claude_bin = sw.get("claude_bin") or "claude"
+        if not prod:
+            print("[run] ⚠ DEV mode: the conductor runs as YOU (same-user) with Bash + your "
+                  "MCP loaded — supervised only; do not schedule unattended. Use --prod for the "
+                  "Guest-House boundary.")
         conductor = lambda st, **kw: run_conductor(st, as_user=as_user, claude_bin=claude_bin, **kw)
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor,
@@ -732,14 +752,28 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
           f"(reaped {res.get('reaped', 0)} crashed shift(s))")
 
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
-        shipped = len([t for t in store.list_tasks(status="done")
-                       if t.get("shift_id") == res["shift_id"]])
-        m = assess(store, shift_id=res["shift_id"], shipped_count=shipped, plateau_k=plateau_k)
+        shipped_tasks = [t for t in store.list_tasks(status="done")
+                         if t.get("shift_id") == res["shift_id"]]
+        m = assess(store, shift_id=res["shift_id"], shipped_count=len(shipped_tasks),
+                   plateau_k=plateau_k)
+        if shipped_tasks:                              # auto-emit the digest — don't trust the LLM to
+            store.add_digest(shift_id=res["shift_id"],
+                             shipped=[t["id"] for t in shipped_tasks],
+                             summary="shipped: " + "; ".join(t["title"] for t in shipped_tasks))
         print(f"[run] mission status: {m['status']} — {m['rationale']}")
         if m["recommend_stop"]:
             print(f"[run] ⏸  STEADY STATE for {plateau_k} shifts — nothing left toward the "
                   f"mission. Awaiting a mission revision (re-steer: factory run --mission \"…\").")
     return res
+
+
+def _should_idle(store: Blackboard, plateau_k: int) -> bool:
+    """True when the last K mission statuses are all steady_state AND the backlog is empty —
+    the conductor has already run research K times and found nothing, so don't spawn again."""
+    recent = store.mission_status_history(plateau_k)
+    return (len(recent) >= plateau_k
+            and all(r["status"] == "steady_state" for r in recent)
+            and len(store.list_tasks(status="open")) == 0)
 
 
 def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
@@ -918,8 +952,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--wall-clock", type=int, default=None, help="hard wall-clock seconds for the shift")
     run.add_argument("--prod", action="store_true", help="run the conductor in the Guest-House user")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
-    tsk.add_argument("action", choices=["list", "add", "done"])
-    tsk.add_argument("rest", nargs="?", help='title (add) or task id (done)')
+    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
+    tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")

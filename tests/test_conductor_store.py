@@ -144,6 +144,20 @@ def test_crashed_shift_is_reconciled_on_resume(tmp_path):
 
 
 # -- digests: the research<->dev feedback loop -------------------------------
+def test_current_shift_id_and_requeue_in_flight_tasks(tmp_path):
+    with _store(tmp_path) as s:
+        assert s.current_shift_id() is None
+        sh = s.start_shift(token_budget=1)
+        assert s.current_shift_id() == sh                  # the running shift, for task stamping
+        s.add_task("a", "x", source="issue")
+        s.set_task_status("a", "in_progress", shift_id=sh)
+        s.add_task("b", "y", source="issue")               # stays open
+        assert s.requeue_shift_tasks(sh) == 1              # only the in-flight one
+        assert s.get_task("a")["status"] == "open"
+        s.end_shift(sh, status="completed")
+        assert s.current_shift_id() is None                # no running shift now
+
+
 def test_prior_shift_is_the_resume_anchor(tmp_path):
     """The conductor resumes from the PRIOR shift's note, not the current (just-started) one."""
     with _store(tmp_path) as s:

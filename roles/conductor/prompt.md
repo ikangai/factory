@@ -28,24 +28,29 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
    If the backlog is thin, **refresh it**: `./bin/factory research-feed` runs a web
    researcher that proposes new bounded directions toward the mission (and ingests what
    shipped). The mission is the terminator — keep generating work toward it until it's met.
-2. **Plan** — pick a *small* set of bounded tasks (each "one bounded change"), newest
-   evidence first. Prefer finishing blocked/in-flight work from the resume note.
-3. **Dispatch** — for each task, run the gated pipeline:
-   `./bin/factory develop-once --task "<one bounded change>"`
-   It clones the target, runs a developer worker (its own TDD loop), and **only merges if
-   the frozen-safety surface is untouched, the target's tests pass, and the gate clears**
-   — with auto-revert on regression. You cannot merge unsafe code; don't try to bypass it.
-   Run tasks sequentially by default; fan out a parallel agora squad only when the work
-   genuinely warrants it.
-4. **Monitor / intervene** — read each result. On `no_candidate`/`discarded`, refine the
-   task and retry once, split it, or file an issue (`gh issue create`) and move on.
-5. **Test / expand** — workers do TDD; file new issues for found-but-not-fixed problems so
-   the backlog reflects reality.
-6. **Reflect** — narrate the shift with `/diary`, and summarize what shipped for the
-   researchers.
-7. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
-   "done": if the backlog is empty AND research is dry AND nothing is improving, say so —
-   don't invent busywork. **The mission, not an empty queue, is the terminator.**
+2. **Plan** — pick a *small* set of open backlog tasks (each "one bounded change"), newest
+   evidence first. Prefer finishing blocked/in-flight work from the resume note. The
+   backlog lines below show each task's **id** — you MUST work tasks by id.
+3. **Dispatch — and CLOSE THE LOOP** (critical: the backlog only drains if you do this):
+   For each task `<id>`:
+   - `./bin/factory task claim <id>`  — mark it in-progress on this shift.
+   - `./bin/factory develop-once --task "<the task's one bounded change>"`  — the gated
+     pipeline: it clones the target, runs a developer worker (its own TDD loop), and
+     **only merges if the frozen-safety surface is untouched, the target's tests pass, and
+     the gate clears** (auto-revert on regression). You cannot merge unsafe code.
+   - On a `"merged"` result: `./bin/factory task done <id> --result <merge_sha>`.
+   - On `no_candidate`/`discarded`/`auto_reverted`: refine + retry once; if it still
+     won't land, `./bin/factory task block <id> --result "<why>"` (or file an issue) and
+     move on. **Never leave a dispatched task `in_progress`.**
+   Run tasks sequentially by default; fan out a parallel agora squad only when warranted.
+4. **Expand** — file new issues (`gh issue create`) and add backlog tasks
+   (`./bin/factory task add "<title>" --source worker`) for found-but-not-fixed problems,
+   so the backlog reflects reality.
+5. **Reflect** — narrate the shift with `/diary`. (The factory records what shipped for the
+   researchers automatically from the tasks you closed — you don't need to.)
+6. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
+   "done": if the backlog is empty AND research is dry AND nothing is improving, say so in
+   the report — don't invent busywork. **The mission, not an empty queue, is the terminator.**
 
 ## Hard rules
 - Work in bounded steps and leave a clear **resume note** — you may be stopped at any time
@@ -55,7 +60,10 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
 - Be honest in the report — surface failures, reverts, and blocks plainly.
 
 ## Final message (REQUIRED)
-End with exactly one fenced JSON block — the factory reads it as your shift result:
+End with exactly one fenced JSON block — the factory reads it as your shift result. `status`
+is the SHIFT outcome: use `"completed"` for a normal shift (whether or not everything
+landed) or `"error"` if you genuinely couldn't operate. Blockers and mission progress go in
+the report/resume_note, NOT in status.
 ```json
-{"status": "completed | blocked", "report": "<2-4 sentences: what you dispatched, what shipped, what failed, mission progress>", "resume_note": "<what the next shift should pick up first>"}
+{"status": "completed", "report": "<2-4 sentences: what you dispatched, what shipped (by task id), what failed/blocked, mission progress>", "resume_note": "<what the next shift should pick up first>"}
 ```

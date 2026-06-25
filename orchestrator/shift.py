@@ -36,14 +36,18 @@ def run_shift(store, *, token_budget: int, conductor: Callable, mission: Optiona
         outcome = conductor(store, shift_id=sh, mission=m,
                             token_budget=token_budget, wall_clock_s=wall_clock_s) or {}
     except TimeoutError:                            # ceiling: wall-clock — killed from outside
+        store.requeue_shift_tasks(sh)               # return claimed work to the backlog
         store.end_shift(sh, status="timed_out", resume_note="conductor exceeded wall-clock")
         return {"action": "timed_out", "shift_id": sh, "reaped": len(reaped)}
     except Exception as e:                           # noqa: BLE001 — contain a conductor blow-up
+        store.requeue_shift_tasks(sh)
         store.end_shift(sh, status="error", resume_note=f"conductor error: {e}")
         return {"action": "error", "shift_id": sh, "reaped": len(reaped)}
 
     # A STOP that tripped DURING the shift overrides the conductor's own status.
     status = "halted" if killswitch.is_halted() else outcome.get("status", "completed")
+    if status != "completed":                        # abnormal end (error/timed_out/halted) →
+        store.requeue_shift_tasks(sh)                # don't strand the tasks it had claimed
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
                     tokens_used=outcome.get("tokens_used", 0))

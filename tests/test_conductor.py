@@ -67,6 +67,32 @@ def test_run_conductor_falls_back_when_reply_has_no_json(tmp_path, monkeypatch):
     assert out["tokens_used"] == 5
 
 
+def test_run_conductor_coerces_an_invalid_shift_status(tmp_path, monkeypatch):
+    """The conductor emitting status='blocked' would violate the shifts CHECK constraint —
+    coerce any non-harness status to 'completed' (blockers live in the report)."""
+    monkeypatch.setattr(common, "claude_super", lambda prompt, **k: (
+        '```json\n{"status":"blocked","report":"r","resume_note":"n"}\n```', 1, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        out = conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                      token_budget=1, wall_clock_s=1)
+    assert out["status"] == "completed"
+
+
+def test_run_conductor_surfaces_a_failed_spawn_as_error_not_completed(tmp_path, monkeypatch):
+    """A timed-out/crashed spawn returns the transport sentinel — it must NOT be recorded as
+    a clean 'completed' with a blank resume note (that would make the wall-clock ceiling dead)."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: ("[claude -p unavailable: timeout]", 0, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        out = conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                      token_budget=1, wall_clock_s=1)
+    assert out["status"] == "error" and "wall-clock" in out["resume_note"]   # honest, not a fake success
+
+
 def test_run_conductor_is_dev_mode_same_user_by_default(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(common, "claude_super",

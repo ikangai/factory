@@ -55,8 +55,13 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
         max_turns=int(sw.get("research_max_turns", 40)),
         timeout=int(sw.get("research_timeout_s", 900)))
 
+    if reply.startswith("[claude -p"):    # transport failed/timed out — DON'T consume the
+        return []                          # digests (they'd be lost); leave them for a retry
+
     obj = common._parse_obj(reply)
-    directions = obj.get("directions", []) if isinstance(obj, dict) else []
+    if not isinstance(obj, dict):          # junk reply → no well-formed result; don't consume
+        return []
+    directions = obj.get("directions", [])
 
     added: list[dict] = []
     for d in directions[:limit]:
@@ -68,6 +73,6 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
         existing.add(title.lower())
         added.append({"id": tid, "title": title})
 
-    for dg in digests:                                    # close the research<->dev loop
+    for dg in digests:                                    # well-formed result → close the loop
         store.mark_digest_consumed(dg["id"])
     return added

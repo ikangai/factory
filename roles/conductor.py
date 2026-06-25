@@ -20,6 +20,11 @@ from . import common
 # diary via Skill, web). It does NOT edit the target's code itself — no Write/Edit.
 CONDUCTOR_TOOLS = ("Read", "Bash", "Grep", "Glob", "Task", "Workflow", "Skill") + common.WEB_TOOLS
 
+# The shift-status vocabulary the harness/schema accept. The conductor's free-text JSON
+# status is coerced into this set — 'blocked' etc. are MISSION-level (recorded by assess),
+# not shift-level, and would violate the shifts.status CHECK constraint.
+_VALID_SHIFT_STATUS = {"completed", "halted", "timed_out", "budget_exhausted", "error"}
+
 
 def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
@@ -60,10 +65,20 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor")},
         max_turns=int(sw.get("conductor_max_turns", 60)),  # it loops internally across the shift
         timeout=wall_clock_s)
+    if reply.startswith("[claude -p"):    # transport sentinel: the spawn failed / timed out /
+        # crashed — claude_super never raises, so WITHOUT this the shift would be mislabeled a
+        # clean 'completed' with a blank resume note (the wall-clock ceiling would be dead).
+        return {"status": "error", "report": reply[:2000],
+                "resume_note": f"conductor spawn failed or hit the wall-clock: {reply[:200]}",
+                "tokens_used": tokens}
+
     obj = common._parse_obj(reply)
     if not isinstance(obj, dict):     # prose with no fenced JSON parses to a bare string/None
         obj = {}
-    return {"status": obj.get("status", "completed"),
+    status = obj.get("status", "completed")
+    if status not in _VALID_SHIFT_STATUS:   # coerce 'blocked'/anything → a legal shift status
+        status = "completed"                 # (blockers live in the report + mission_status)
+    return {"status": status,
             "report": obj.get("report") or reply[:2000],
             "resume_note": obj.get("resume_note", ""),
             "tokens_used": tokens}

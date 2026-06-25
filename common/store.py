@@ -325,6 +325,22 @@ class Blackboard:
         return self._all(
             "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') ORDER BY created_at")
 
+    def requeue_shift_tasks(self, shift_id: int) -> int:
+        """Return a shift's in-flight (claimed/in_progress) tasks to 'open' so the next
+        shift re-picks them. Used by crash-reap AND by abnormal shift ends (a conductor
+        that times out or errors after claiming work). Returns how many were requeued."""
+        n = 0
+        for t in self.tasks_in_flight(shift_id):
+            self.set_task_status(t["id"], "open")
+            n += 1
+        return n
+
+    def current_shift_id(self) -> Optional[int]:
+        """The id of the shift currently running (for the conductor's `task` CLI to stamp
+        onto the work it claims/finishes), or None if no shift is in progress."""
+        sh = self.last_shift()
+        return sh["id"] if sh and sh["status"] == "running" else None
+
     def reap_orphaned_shifts(self, *, reason: str = "killed before a clean end") -> list[dict]:
         """Crash recovery, called on startup before a new shift. Any shift still 'running'
         was killed from outside (a ceiling trip): close it 'error' with a synthetic resume
@@ -332,8 +348,7 @@ class Blackboard:
         Returns the reaped shift rows (as they were, for the report)."""
         orphans = self.running_shifts()
         for sh in orphans:
-            for t in self.tasks_in_flight(sh["id"]):
-                self.set_task_status(t["id"], "open")
+            self.requeue_shift_tasks(sh["id"])
             note = sh["resume_note"] or f"shift {sh['id']} {reason}; reconciled on resume"
             self.end_shift(sh["id"], status="error", resume_note=note,
                            tokens_used=sh["tokens_used"])
