@@ -113,6 +113,10 @@ import shutil
 # Bash and NO web. Bash escapes --add-dir and web is an exfil surface; both require the
 # docker hard boundary and must be opted in per role, never defaulted on.
 DEFAULT_SUPER_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Task", "Workflow")
+# A DEVELOPER super-worker runs in the Guest House (a separate OS user, via `as_user`),
+# so the OS boundary protects the operator and Bash is SAFE to grant — the worker needs
+# it to run the target's tests, edit code, and git-commit a candidate branch.
+DEVELOPER_TOOLS = ("Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task", "Workflow")
 
 # Deny-by-default child env: only claude's runtime + auth/config families pass through,
 # so host secrets in the environment (known AND unknown) never reach the worker.
@@ -133,13 +137,20 @@ def _super_worker_env() -> dict:
 
 
 def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
-                       json_output: bool = True) -> list[str]:
-    argv = ["claude", "-p"]
+                       as_user: Optional[str] = None, json_output: bool = True) -> list[str]:
+    argv: list[str] = []
+    if as_user:
+        # Run the worker as the Guest-House Standard User — OS-enforced isolation of the
+        # operator's files/creds (docs/plans/2026-06-25). Needs a passwordless
+        # `sudo -u <user>` grant for the claude command. With this HARD boundary, Bash
+        # in the toolset is safe.
+        argv += ["sudo", "-u", as_user, "--"]
+    argv += ["claude", "-p"]
     if json_output:
         argv += ["--output-format", "json"]
     argv += ["--setting-sources", "",            # no plugins/hooks → no team-barrier hang
              "--permission-mode", "acceptEdits",  # act without approval prompts…
-             "--add-dir", workdir,                # …file tools steered into the sandbox (soft)
+             "--add-dir", workdir,                # …file tools steered into the workspace
              "--max-turns", str(max_turns),       # bound the agentic loop (not just wall-clock)
              "--allowedTools", *list(allowed_tools)]
     return argv
@@ -158,16 +169,21 @@ def super_worker_workspace(prefix: str = "role"):
 
 
 def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS,
-                 max_turns: int = 24, timeout: int = 900) -> tuple[str, int, float]:
+                 as_user: Optional[str] = None, max_turns: int = 24,
+                 timeout: int = 900) -> tuple[str, int, float]:
     """Run a FULL-CAPABILITY `claude -p` super-worker in `workdir` with a curated
-    toolset + acceptEdits, a deny-by-default env (host secrets withheld; subscription
-    auth kept via ~/.claude), and a turn cap. Returns (text, tokens, cost). Never
-    crashes — a transport error yields the `[claude -p …]` sentinel callers fall back
-    on. SOFT boundary: do not pass Bash/web here without a docker hard boundary."""
-    env = _super_worker_env()   # deny-by-default; host secrets never reach the worker
+    toolset + acceptEdits and a turn cap. Returns (text, tokens, cost). Never crashes —
+    a transport error yields the `[claude -p …]` sentinel callers fall back on.
+
+    Boundary: WITHOUT `as_user` it's a SOFT boundary (same OS user; keep Bash/web off, a
+    deny-by-default env withholds host secrets). WITH `as_user` it runs as the Guest-
+    House Standard User — a HARD, OS-enforced boundary that protects the operator's
+    files/creds, so Bash is safe; the target user's own env/`~/.claude` auth is used
+    (we don't impose the operator's env)."""
+    env = None if as_user else _super_worker_env()
     try:
         p = subprocess.run(_super_worker_argv(workdir, allowed_tools, max_turns=max_turns,
-                                              json_output=True),
+                                              as_user=as_user, json_output=True),
                            input=prompt, capture_output=True, text=True,
                            timeout=timeout, cwd=workdir, env=env)
         if p.returncode == 0 and p.stdout.strip():

@@ -74,6 +74,28 @@ def test_claude_super_env_is_allowlisted(monkeypatch):
     assert "--add-dir" in captured["argv"]
 
 
+def test_super_argv_runs_as_guest_house_user_with_bash():
+    argv = common._super_worker_argv("/ws", common.DEVELOPER_TOOLS, as_user="clive-worker")
+    assert argv[:4] == ["sudo", "-u", "clive-worker", "--"]   # spawned as the Guest-House user
+    assert "claude" in argv and "--add-dir" in argv
+    assert "Bash" in argv                                     # safe under the OS user boundary
+
+
+def test_claude_super_as_user_defers_env_to_the_target_user(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(argv=argv, env=kw.get("env"), cwd=kw.get("cwd"))
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"result": "ok", "usage": {}, "total_cost_usd": 0.0}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    common.claude_super("do", workdir="/ws", allowed_tools=["Bash"], as_user="clive-worker")
+    assert seen["argv"][:4] == ["sudo", "-u", "clive-worker", "--"]
+    assert seen["env"] is None     # under sudo -u, the TARGET user's own env (their ~/.claude auth)
+    assert seen["cwd"] == "/ws"
+
+
 def test_claude_super_never_crashes_on_timeout(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
