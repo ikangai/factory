@@ -25,6 +25,9 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
 ## How you work this shift
 1. **Orient** — read the mission, the resume note, the backlog, and the target's open
    issues (`gh issue list -R {TARGET_REPO}` if a repo is set). Don't re-derive what's above.
+   If the backlog is thin, **refresh it**: `./bin/factory research-feed` runs a web
+   researcher that proposes new bounded directions toward the mission (and ingests what
+   shipped). The mission is the terminator — keep generating work toward it until it's met.
 2. **Plan** — pick a *small* set of bounded tasks (each "one bounded change"), newest
    evidence first. Prefer finishing blocked/in-flight work from the resume note.
 3. **Dispatch** — for each task, run the gated pipeline:

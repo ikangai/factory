@@ -688,6 +688,22 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
             shutil.rmtree(work, ignore_errors=True)   # throwaway clone never touches the real target
 
 
+def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
+    """The conductor-loop research feed (distinct from the spec-side `research`): a web
+    researcher proposes bounded directions toward the active mission — outcome-informed by
+    the shipped digests, de-duped against the backlog — landing as research tasks. The
+    conductor invokes this when the backlog runs low (the generative loop)."""
+    from ..roles import research_feed
+    sw = config.load_config().get("super_worker", {}) or {}
+    as_user = (sw.get("user") or None) if prod else None
+    claude_bin = sw.get("claude_bin") or "claude"
+    added = research_feed.propose_directions(store, as_user=as_user, claude_bin=claude_bin)
+    print(f"[research-feed] proposed {len(added)} new direction(s):")
+    for a in added:
+        print(f"  + {a['id']}: {a['title']}")
+    return added
+
+
 # --- the 09:00 daily update -------------------------------------------------
 # "Larger" daily run (operator choice): several rounds + a generous-but-bounded
 # token ceiling so the unattended run makes real headway without runaway spend.
@@ -837,6 +853,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="run the developer in the Guest-House user (default: dev-mode, same-user)")
     dev1.add_argument("--keep", action="store_true",
                       help="keep the throwaway clone so you can inspect the merged candidate diff")
+    rfe = sub.add_parser("research-feed")   # propose backlog directions toward the mission
+    rfe.add_argument("--prod", action="store_true",
+                     help="run the researcher in the Guest-House user (default: dev-mode, same-user)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sub.add_parser("schedule-uninstall")
@@ -917,6 +936,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_blog(store, mission=a.mission)
         elif a.cmd == "develop-once":
             cmd_develop_once(store, a.task, prod=a.prod, keep=a.keep)
+        elif a.cmd == "research-feed":
+            cmd_research_feed(store, prod=a.prod)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":
