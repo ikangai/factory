@@ -30,31 +30,62 @@ def _smoke_grade(repo_dir: str) -> dict:
             "divergence_alarm": False, "safety_flag": False}
 
 
+def factory_worktree(adapter, *, branch: str = "factory/auto") -> str:
+    """Ensure a persistent WORKTREE of the REAL target at `branch` exists, and return its
+    path (`<target>.factory-auto`). The branch is created off the target's current HEAD if
+    missing; the worktree is a separate checkout, so the operator's own working tree/branch
+    is never touched. Merges accumulate on `branch` in the real repo — reviewable
+    (`git -C <target> log <branch>`) and fully reversible (revert the commit / delete the
+    branch). NOT throwaway: the work persists here."""
+    import subprocess
+    root = os.path.abspath(adapter.entry()[0])
+    wt = root.rstrip("/") + ".factory-auto"
+    if os.path.exists(os.path.join(wt, ".git")):   # already a worktree → reuse it
+        return wt
+    have = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "--quiet", branch],
+                          capture_output=True, text=True)
+    if have.returncode != 0:                        # create the branch off current HEAD
+        subprocess.run(["git", "-C", root, "branch", branch], check=True,
+                       capture_output=True, text=True)
+    subprocess.run(["git", "-C", root, "worktree", "add", "--quiet", wt, branch],
+                   check=True, capture_output=True, text=True)
+    return wt
+
+
 def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
-                 grade_fn: Optional[Callable] = None,
+                 real: bool = False, grade_fn: Optional[Callable] = None,
                  champion_scores: Optional[dict] = None) -> dict:
-    """Run ONE task through the gated pipeline against a THROWAWAY champion clone; return
-    the round result. This is the deterministic execution the conductor's claimed work goes
-    through — the conductor NEVER runs this itself (a headless `claude -p` can't reliably
-    block on a long sub-command; it backgrounds it and orphans it at shift end)."""
+    """Run ONE task through the gated pipeline and return the round result. The conductor
+    NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
+    `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
+    `real=True`: merge into the persistent `factory/auto` worktree of the REAL target — the
+    work persists, git-reversible, on a branch that never disturbs the operator's checkout."""
     adapter = config.get_adapter()
+    cs = champion_scores or {"working": 0.0, "held_out": 0.0}
+    gf = grade_fn or _smoke_grade
+    if real:
+        main = factory_worktree(adapter)            # persistent — do NOT delete
+        return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
+                                 champion_scores=cs, grade_fn=gf,
+                                 as_user=as_user, claude_bin=claude_bin)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")
     main = os.path.join(work, "champion")
     try:
         adapter.clone(main)
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
-                                 champion_scores=champion_scores or {"working": 0.0, "held_out": 0.0},
-                                 grade_fn=grade_fn or _smoke_grade,
+                                 champion_scores=cs, grade_fn=gf,
                                  as_user=as_user, claude_bin=claude_bin)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
 
 def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None,
-                          claude_bin: str = "claude", develop_fn: Optional[Callable] = None) -> int:
+                          claude_bin: str = "claude", real: bool = False,
+                          develop_fn: Optional[Callable] = None) -> int:
     """Deterministically run EVERY task the conductor claimed this shift through the gated
     pipeline and CLOSE it: merged → done(sha), anything else → blocked(reason, for the
-    conductor to reopen/refine next shift). Returns the count shipped. `develop_fn` is
+    conductor to reopen/refine next shift). Returns the count shipped. `real` merges into
+    the real target's factory/auto branch; default is throwaway clones. `develop_fn` is
     injectable for tests so no live worker spawns."""
     run = develop_fn or develop_task
     claimed = store.tasks_in_flight(shift_id)        # the in_progress tasks claimed this shift
@@ -65,7 +96,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
               f"suite; a few minutes, no live output)…", flush=True)
         text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
         try:
-            res = run(text, as_user=as_user, claude_bin=claude_bin)
+            res = run(text, as_user=as_user, claude_bin=claude_bin, real=real)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             res = {"action": "error", "error": str(e)}
         if res.get("action") == "merged":

@@ -3,6 +3,9 @@ autonomous code loop. Hermetic — a fake adapter (no real git) + an injected
 develop_candidate + grade_fn exercise the WHOLE chain (clone → develop → fetch →
 worktree → run_code_round → cleanup) without a live worker or real repos.
 """
+import os
+import types
+
 from factory.orchestrator import develop
 from factory.roles import common
 
@@ -111,6 +114,55 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     assert s.get_task("m")["status"] == "done" and s.get_task("m")["result"] == "sha1"
     assert s.get_task("b")["status"] == "blocked" and s.get_task("b")["result"] == "no_candidate"
     assert s.get_task("o")["status"] == "open"               # untouched (never claimed)
+    s.close()
+
+
+def test_factory_worktree_creates_branch_and_is_idempotent(tmp_path):
+    """Real-clive graduation: a persistent factory/auto worktree of the REAL target, created
+    off HEAD, leaving the operator's checkout untouched."""
+    import subprocess
+    repo = str(tmp_path / "target")
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+    (tmp_path / "target" / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", repo, "commit", "-qm", "init"], check=True)
+
+    class A:
+        def entry(self):
+            return (repo, "x")
+
+    wt = develop.factory_worktree(A(), branch="factory/auto")
+    assert wt == repo + ".factory-auto" and os.path.exists(os.path.join(wt, ".git"))
+    branches = subprocess.run(["git", "-C", repo, "branch", "--list", "factory/auto"],
+                              capture_output=True, text=True).stdout
+    assert "factory/auto" in branches
+    assert develop.factory_worktree(A()) == wt          # idempotent — reuses the worktree
+
+
+def test_develop_task_real_merges_into_the_persistent_worktree(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(develop, "factory_worktree", lambda adapter, **k: "/wt/factory-auto")
+    monkeypatch.setattr(develop, "config", types.SimpleNamespace(get_adapter=lambda: object()))
+    monkeypatch.setattr(develop, "develop_and_merge",
+                        lambda **k: seen.update(k) or {"action": "merged", "merge_sha": "s"})
+    res = develop.develop_task("do x", real=True)
+    assert seen["main_repo"] == "/wt/factory-auto"      # merged into the REAL worktree, not a throwaway
+    assert res["action"] == "merged"
+
+
+def test_execute_claimed_tasks_passes_real_through(tmp_path):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "x", source="issue")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    seen = {}
+    develop.execute_claimed_tasks(s, sh, real=True,
+                                  develop_fn=lambda text, **k: seen.update(k) or {"action": "merged", "merge_sha": "z"})
+    assert seen["real"] is True
     s.close()
 
 
