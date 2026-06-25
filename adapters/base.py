@@ -120,3 +120,32 @@ class TargetAdapter(abc.ABC):
         subprocess.run(["git", "clone", "--quiet", root, dest],
                        check=True, capture_output=True, text=True)
         return dest
+
+    # -- auto-merge actuation + auto-revert self-heal (full-auto loop) -------
+    def current_commit(self, repo: str) -> str:
+        """The repo's current HEAD sha (recorded around a merge so it can be reverted)."""
+        p = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, check=True)
+        return p.stdout.strip()
+
+    def merge_branch(self, repo: str, branch: str, *,
+                     message: str = "factory: merge candidate") -> str:
+        """Auto-merge a candidate `branch` into `repo`'s current branch (a real merge
+        commit, --no-ff, so every factory merge is one revertible commit). Returns the
+        new HEAD sha."""
+        subprocess.run(["git", "-C", repo, "merge", "--no-ff", "-m", message, branch],
+                       check=True, capture_output=True, text=True)
+        return self.current_commit(repo)
+
+    def revert_commit(self, repo: str, sha: str) -> str:
+        """Self-heal: revert `sha` (e.g. a merge that regressed). Returns the new HEAD.
+        Detects whether `sha` is a merge and passes `-m 1` only then — so it's correct
+        for both a plain commit and a `--no-ff` merge across git versions."""
+        parents = subprocess.run(["git", "-C", repo, "rev-list", "--parents", "-n", "1", sha],
+                                 capture_output=True, text=True, check=True).stdout.split()
+        cmd = ["git", "-C", repo, "revert", "--no-edit"]
+        if len(parents) > 2:        # sha + 2+ parents → a merge commit
+            cmd += ["-m", "1"]
+        cmd.append(sha)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return self.current_commit(repo)
