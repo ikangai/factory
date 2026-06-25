@@ -144,6 +144,17 @@ def test_crashed_shift_is_reconciled_on_resume(tmp_path):
 
 
 # -- digests: the research<->dev feedback loop -------------------------------
+def test_prior_shift_is_the_resume_anchor(tmp_path):
+    """The conductor resumes from the PRIOR shift's note, not the current (just-started) one."""
+    with _store(tmp_path) as s:
+        assert s.prior_shift(1) is None
+        a = s.start_shift(token_budget=1)
+        s.end_shift(a, status="completed", resume_note="from A")
+        b = s.start_shift(token_budget=1)          # the current shift
+        prior = s.prior_shift(b)
+        assert prior["id"] == a and prior["resume_note"] == "from A"   # the one before, not b
+
+
 def test_digest_feeds_research_then_is_consumed(tmp_path):
     with _store(tmp_path) as s:
         sh = s.start_shift(token_budget=1)

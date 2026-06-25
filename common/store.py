@@ -300,6 +300,12 @@ class Blackboard:
     def last_shift(self) -> Optional[dict]:
         return self._one("SELECT * FROM shifts ORDER BY id DESC LIMIT 1")
 
+    def prior_shift(self, before_id: int) -> Optional[dict]:
+        """The most recent shift BEFORE before_id — the conductor's resume anchor (the
+        current shift, just started by the harness, isn't where the resume note lives)."""
+        return self._one("SELECT * FROM shifts WHERE id < ? ORDER BY id DESC LIMIT 1",
+                         (before_id,))
+
     def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
         """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
         skips end_shift) still leaves a usable figure for the next shift's resume math."""
