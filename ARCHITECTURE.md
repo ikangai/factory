@@ -389,6 +389,17 @@ All roles are **stateless**: each invocation assembles a context slice from the
 store, calls `claude -p` (`roles/common.py:claude_p`), and writes the result back.
 Durable instructions live in `roles/<role>/prompt.md`; the engine is `roles/common.py`.
 
+**Transport (one decision, everywhere).** Every role — and the panel models that drive
+candidate clive, and the presentation layer — runs on the operator's Claude
+**subscription** via `claude -p`, **isolated** (`--setting-sources "" --tools ""
+--strict-mcp-config` → no plugins, hooks, MCP, skills, or chat leakage; a role is
+bounded reasoning over a context slice, never a Claude Code agent). This is deliberate:
+there is **no API key and no local model** to provision — the factory needs only a
+logged-in `claude` CLI, and all inference is billed to the subscription. The diary and
+blog are generated the same way (not a separate local-model backend), so a single
+transport — and a single failure mode, handled by the deterministic fallbacks — covers
+the whole system.
+
 | Role | Reads | Writes | Blindness |
 |------|-------|--------|-----------|
 | **Proposer** | champion `open`, recent **champion** failures, redacted tried-history, **grounded research briefs** (`research/staging`, ungrounded excluded) | one candidate (`proposed`) | never sees grader internals or held-out (incl. held-out score fields, via `scoring.proposer_safe_scores`) |
