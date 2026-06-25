@@ -142,7 +142,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     status     TEXT NOT NULL DEFAULT 'open'
                  CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
     result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
-    shift_id   INTEGER,                          -- the shift that last worked it
+    -- the shift that last worked it. NULL until a shift picks it up; FK is safe because
+    -- shifts are never DELETEd (a killed shift is UPDATEd to 'error', so it still exists).
+    shift_id   INTEGER REFERENCES shifts(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -150,10 +152,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- Each bounded conductor session. State persists here so the next shift resumes.
 CREATE TABLE IF NOT EXISTS shifts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    mission_id   INTEGER,
+    mission_id   INTEGER REFERENCES mission(id),  -- missions are never deleted, so this is safe
     token_budget INTEGER NOT NULL DEFAULT 0,
-    tokens_used  INTEGER NOT NULL DEFAULT 0,
-    status       TEXT NOT NULL DEFAULT 'running'
+    tokens_used  INTEGER NOT NULL DEFAULT 0,       -- kept current via set_shift_tokens (not only at end)
+    status       TEXT NOT NULL DEFAULT 'running'   -- 'running' + no ended_at after startup = a CRASHED shift
                    CHECK (status IN ('running','completed','halted','timed_out','budget_exhausted','error')),
     report       TEXT NOT NULL DEFAULT '',      -- the daily report text / path
     resume_note  TEXT NOT NULL DEFAULT '',      -- what the next shift should pick up
@@ -164,7 +166,7 @@ CREATE TABLE IF NOT EXISTS shifts (
 -- What shipped each shift, handed to the researchers (the research<->dev loop).
 CREATE TABLE IF NOT EXISTS digests (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    shift_id     INTEGER,
+    shift_id     INTEGER REFERENCES shifts(id),
     shipped_json TEXT NOT NULL DEFAULT '[]',    -- task ids / shas merged this shift
     summary      TEXT NOT NULL DEFAULT '',      -- prose digest for the researchers
     consumed     INTEGER NOT NULL DEFAULT 0,
@@ -174,7 +176,7 @@ CREATE TABLE IF NOT EXISTS digests (
 -- The mission-progress timeline: never a silent binary "done".
 CREATE TABLE IF NOT EXISTS mission_status (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    shift_id     INTEGER,
+    shift_id     INTEGER REFERENCES shifts(id),
     status       TEXT NOT NULL CHECK (status IN ('advancing','steady_state','blocked','reached')),
     rationale    TEXT NOT NULL DEFAULT '',
     metrics_json TEXT NOT NULL DEFAULT '{}',    -- backlog size, research-dry streak, score deltas
@@ -182,4 +184,9 @@ CREATE TABLE IF NOT EXISTS mission_status (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
+CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume
 CREATE INDEX IF NOT EXISTS idx_mission_active ON mission(active);
+-- The single-active-mission invariant as a SCHEMA guarantee (not just app code):
+-- a double-activation raises IntegrityError instead of being silently masked.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mission_active ON mission(active) WHERE active = 1;

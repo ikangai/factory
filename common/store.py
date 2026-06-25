@@ -242,11 +242,14 @@ class Blackboard:
 
     # -- mission: the human's single steer ----------------------------------
     def set_mission(self, statement: str, target_repo: str = "") -> int:
-        """Set the active mission; any prior active mission steps down. Returns its id."""
-        self._exec("UPDATE mission SET active = 0 WHERE active = 1")
-        cur = self._exec(
+        """Set the active mission; any prior active mission steps down. Returns its id.
+        ATOMIC: deactivate + insert commit together, so a concurrent reader never sees a
+        window with zero active missions (the conductor reads active_mission() every shift)."""
+        self.conn.execute("UPDATE mission SET active = 0 WHERE active = 1")
+        cur = self.conn.execute(
             "INSERT INTO mission(statement, target_repo, created_at, active) VALUES (?,?,?,1)",
             (statement, target_repo, now_iso()))
+        self.conn.commit()
         return cur.lastrowid
 
     def active_mission(self) -> Optional[dict]:
@@ -296,6 +299,39 @@ class Blackboard:
 
     def last_shift(self) -> Optional[dict]:
         return self._one("SELECT * FROM shifts ORDER BY id DESC LIMIT 1")
+
+    def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
+        """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
+        skips end_shift) still leaves a usable figure for the next shift's resume math."""
+        self._exec("UPDATE shifts SET tokens_used = ? WHERE id = ?", (tokens_used, shift_id))
+
+    def running_shifts(self) -> list[dict]:
+        """Shifts still marked 'running'. At startup (shifts run one-at-a-time) any such
+        row is a CRASHED shift — the harness kills from outside, so end_shift never ran."""
+        return self._all("SELECT * FROM shifts WHERE status = 'running' ORDER BY id")
+
+    def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
+        """Tasks a shift had claimed/started (and would orphan if it died)."""
+        if shift_id is not None:
+            return self._all(
+                "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') "
+                "AND shift_id = ? ORDER BY created_at", (shift_id,))
+        return self._all(
+            "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') ORDER BY created_at")
+
+    def reap_orphaned_shifts(self, *, reason: str = "killed before a clean end") -> list[dict]:
+        """Crash recovery, called on startup before a new shift. Any shift still 'running'
+        was killed from outside (a ceiling trip): close it 'error' with a synthetic resume
+        note and return its in-flight tasks to 'open' so the next shift re-picks them.
+        Returns the reaped shift rows (as they were, for the report)."""
+        orphans = self.running_shifts()
+        for sh in orphans:
+            for t in self.tasks_in_flight(sh["id"]):
+                self.set_task_status(t["id"], "open")
+            note = sh["resume_note"] or f"shift {sh['id']} {reason}; reconciled on resume"
+            self.end_shift(sh["id"], status="error", resume_note=note,
+                           tokens_used=sh["tokens_used"])
+        return orphans
 
     # -- digests: the research<->dev feedback loop --------------------------
     def add_digest(self, *, shift_id: Optional[int], shipped: list,
