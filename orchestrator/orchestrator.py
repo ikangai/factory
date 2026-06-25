@@ -310,6 +310,75 @@ def cmd_mine(store: Blackboard, limit: int = 10) -> None:
         print(" ", p)
 
 
+def cmd_intake(store: Blackboard, limit: int = 10, max_new: int = 3,
+               auto_promote: bool = True) -> dict:
+    """Unattended corpus INTAKE (#2): mine candidate scenarios from recent
+    production sessions, synthesize + #64-VALIDATE a deterministic oracle for each,
+    and AUTO-PROMOTE to the WORKING set ONLY those whose oracle the validator
+    PROVES correct.
+
+    This is what keeps the loop self-sustaining: new working scenarios → new
+    champion failures → the gain governor re-arms → real optimisation, instead of
+    a static corpus stalling the governor.
+
+    SAFETY (operator's decision): a scenario auto-promotes ONLY when
+    `check_validation` starts with 'validated:' (the validator exercised the oracle
+    against its own recomputed-correct + a perturbation and both held). Oracles that
+    are merely structural/unverifiable ('unverified: …' — shell-based, no recomputed
+    expected) or rejected stay STAGED for human review. HELD-OUT is NEVER auto-grown
+    — overfit hygiene stays a human action at `promote-scenario --partition held-out`.
+
+    `max_new` bounds synth/validate calls per intake (token governor); any surplus
+    mined scenarios stay staged for a later round / the human. Returns a stats dict.
+    """
+    from ..roles.common import mine_scenarios, synth_check  # local: test-monkeypatchable
+
+    written = mine_scenarios(store, limit)
+    staged_ids = [os.path.splitext(os.path.basename(p))[0] for p in written]
+    to_process, leftover = staged_ids[:max_new], staged_ids[max_new:]
+
+    promoted: list[str] = []
+    validated: list[str] = []
+    unverified: list[str] = []
+    rejected: list[str] = []
+    errored: list[str] = []
+    for sid in to_process:
+        chk = synth_check(store, sid)
+        if not chk:                       # oracle rejected/unparseable → human reviews
+            rejected.append(sid)
+            continue
+        staged_path = os.path.join(paths.STAGING_DIR, f"{sid}.yaml")
+        try:
+            with open(staged_path, "r", encoding="utf-8") as fh:
+                sc = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError) as e:
+            # Re-read of the just-written staged file failed (transient FS fault):
+            # surface it instead of silently dropping the sid from the tally. The
+            # file (if any) stays staged — nothing wrong reaches the working set.
+            print(f"[intake] {sid}: staged YAML unreadable after synth ({e}); "
+                  f"left staged for next round / human.", file=sys.stderr)
+            errored.append(sid)
+            continue
+        if str(sc.get("check_validation", "")).startswith("validated:"):
+            validated.append(sid)
+            if auto_promote:
+                cmd_promote_scenario(store, sid, "working")
+                if not os.path.exists(staged_path):   # promotion removes the staging file
+                    promoted.append(sid)
+        else:                             # adopted but only structurally verified → human reviews
+            unverified.append(sid)
+
+    print(f"intake: mined {len(staged_ids)}, validated {len(validated)}, "
+          f"auto-promoted {len(promoted)} → working, {len(unverified)} staged "
+          f"(unverified), {len(rejected)} rejected, {len(errored)} errored. "
+          f"Held-out is never auto-grown.")
+    if leftover:
+        print(f"intake: capped at max_new={max_new} this round; {len(leftover)} "
+              f"mined scenario(s) left staged for a later round / the human.")
+    return {"mined": staged_ids, "validated": validated, "promoted": promoted,
+            "unverified": unverified, "rejected": rejected, "errored": errored}
+
+
 def cmd_research(store: Blackboard, query: Optional[str] = None,
                  max_papers: int = 8, max_repos: int = 6) -> None:
     """Researcher role: read recent arXiv papers AND GitHub repos (plus any material
@@ -681,6 +750,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="hard ceiling on cumulative tokens (budget_ledger); unset = no cap")
     au.add_argument("--no-research", action="store_true",
                     help="skip the researcher step (no grounded briefs staged)")
+    au.add_argument("--no-intake", action="store_true",
+                    help="skip the intake step (no mining/auto-promotion of scenarios)")
     au.add_argument("--dry-run", action="store_true",
                     help="print the per-round PLAN without invoking any role/LLM/subprocess")
     a = ap.parse_args(argv)
@@ -742,7 +813,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             from .autonomy import cmd_autonomous
             cmd_autonomous(store, a.mission, max_rounds=a.max_rounds,
                            token_budget=a.token_budget,
-                           do_research=not a.no_research, dry_run=a.dry_run)
+                           do_research=not a.no_research,
+                           do_intake=not a.no_intake, dry_run=a.dry_run)
     return 0
 
 

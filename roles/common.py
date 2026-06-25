@@ -153,6 +153,47 @@ def _parse_obj(reply: str):
 # ---------------------------------------------------------------------------
 # Proposer (generation) — emits ONE bounded change to `open`. Blind.
 # ---------------------------------------------------------------------------
+def _staged_research_briefs(limit: int = 8) -> list[dict]:
+    """GROUNDED staged technique briefs (research/staging) as compact DIRECTION for
+    the Proposer — this is the 'research → proposal' arrow.
+
+    Ungrounded briefs (those the researcher flagged with `provenance_warning` — a
+    citation NOT among the papers/repos we actually fetched) are EXCLUDED, so the
+    proposer is fed only briefs whose source the factory really retrieved. Newest
+    first (by mtime), capped. The proposer stays blind to held-out: a public-paper
+    technique carries no held-out signal. Best-effort — any error yields [] so the
+    proposer never crashes on bookkeeping."""
+    import glob
+
+    scored: list[tuple[float, dict]] = []
+    try:
+        for path in glob.glob(os.path.join(paths.RESEARCH_STAGING_DIR, "*.yaml")):
+            # Per-file skip: a single unreadable, deleted-mid-read, or malformed brief
+            # (e.g. an operator hand-edit during vetting) must drop only ITSELF, not
+            # collapse every valid brief. getmtime shares this try — same FS race.
+            try:
+                mtime = os.path.getmtime(path)
+                with open(path, "r", encoding="utf-8") as fh:
+                    b = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(b, dict) or not b.get("suggested_change"):
+                continue
+            if b.get("provenance_warning"):   # ungrounded → keep it from the proposer
+                continue
+            scored.append((mtime, {
+                "applies_to": b.get("applies_to"),
+                "technique": b.get("technique"),
+                "suggested_change": b.get("suggested_change"),
+                "rationale": b.get("rationale"),
+                "cite": b.get("arxiv_id") or b.get("repo") or b.get("url"),
+            }))
+    except Exception:  # noqa: BLE001 — direction is best-effort, never fatal
+        return []
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [b for _, b in scored[:limit]]
+
+
 def propose(store: Blackboard) -> Optional[str]:
     champ_row = store.get_champion()
     champ_path = champ_row["spec_path"] if champ_row else paths.CHAMPION_YAML
@@ -177,6 +218,9 @@ def propose(store: Blackboard) -> Optional[str]:
              "detail": json.loads(f.get("check_json", "{}") or "{}").get("detail", "")}
             for f in failures],
         "changes_already_tried": tried,
+        # Grounded literature DIRECTION (the 'research → proposal' arrow). Optional:
+        # the recorded failures still take priority; a brief is a hint, not an order.
+        "research_briefs": _staged_research_briefs(),
     }
     prompt = _load_prompt("proposer") + "\n\n## CONTEXT (JSON)\n```json\n" \
         + json.dumps(ctx, indent=2, default=str) + "\n```\n"
@@ -210,6 +254,12 @@ def propose(store: Blackboard) -> Optional[str]:
     os.makedirs(paths.CANDIDATES_DIR, exist_ok=True)
     specs.dump_spec(candidate, spec_path)
     summary = patch.get("summary") or specs.change_summary(res.diff)
+    # Provenance: if this change was grounded in a research brief, record the
+    # citation on the candidate so a research-driven proposal is traceable to its
+    # source (axis B: every research proposal cites where it came from).
+    cite = str(patch.get("cite", "")).strip()
+    if cite:
+        summary = f"{summary} [cite: {cite}]"
     store.add_candidate(cid, candidate["meta"]["parent"], spec_path,
                         change_summary=summary, diff=res.diff, stage="proposed")
     return cid

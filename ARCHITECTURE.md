@@ -1,6 +1,9 @@
 # clive-harness-factory — Architecture
 
-Status: Phase 0 (scaffolding + operator board, verified end-to-end, human-gated).
+Status: Phase 0 spine (deterministic runner + grader + operator board, verified
+end-to-end) **plus** an unattended *operate*-loop added in later phases — a
+mission-driven autonomy sequencer (§8a) that researches, mines, proposes, and rounds
+on its own. Promotion stays a human action; nothing promotes automatically.
 Scope: how the system is structured and how control and data flow through it.
 Companion docs: `README.md` (usage), `../docs/plans/2026-06-23-clive-harness-factory-phase0-design.md` (build decisions + grounding).
 
@@ -13,7 +16,10 @@ bring-your-own-intelligence harness ("computer use for the CLI") in which an LLM
 drives a real shell through `tmux` toward a goal. The factory changes clive's
 behaviour, measures whether the change actually helped against the **real end-state
 of a real shell**, and surfaces a cleared candidate to a **human** for promotion.
-Nothing promotes automatically; nothing runs autonomously.
+Nothing promotes automatically. The *operate* side now runs **unattended** — an
+autonomy sequencer (§8a) drives research → intake → propose → round toward a
+human-set mission — but the *promote* side is always a human action, the one
+intentional checkpoint.
 
 The hard part is **measurement**, not generation. The architecture spends its
 complexity on the grader and keeps the proposer a thin wrapper.
@@ -70,7 +76,9 @@ communicate only through the blackboard, sequenced by the orchestrator.
 ## 4. The three planes
 
 - **Generation** — the **Proposer** (`roles/proposer`, a `claude -p` worker) emits
-  one bounded change to the *open* part of the clive spec.
+  one bounded change to the *open* part of the clive spec, optionally **grounded in a
+  cited research brief** distilled by the **Researcher** (`roles/researcher`) from real
+  papers/repos (`research/staging/`).
 - **Measurement** — the deterministic **runner** (`runner/`) provisions a disposable
   environment, drives the candidate clive under each panel model, and grades the
   resulting shell state with hidden **acceptance checks** + a **negative safety
@@ -110,11 +118,18 @@ factory/
     multi_clive.py   run_multi_clive: the Rooms (clive-to-clive) path
   roles/         stateless claude -p workers (§12)
     common.py        the engine: assemble context slice → claude -p → write back
-    proposer/ judge/ reporter/ scenario-miner/   (prompt.md + run.py each)
+    proposer/ judge/ reporter/ scenario-miner/ researcher/ check-synth/  (prompt.md + run.py)
+  research/      literature retrieval for the Researcher role (§12)
+    arxiv.py git_repos.py focus.py ingest.py   arXiv + GitHub + MISSION.md material
+    staging/         grounded, cited technique briefs (vetting-staged; feed the Proposer)
   orchestrator/  sequencing + governors (§9)
-    orchestrator.py  CLI: init/baseline/propose/evaluate/round/holdout-check/mine/status
+    orchestrator.py  CLI: init/baseline/propose/evaluate/round/holdout-check/mine/
+                     research/report/status + autonomous/daily/schedule-(un)install
+    autonomy.py      the unattended operate-loop sequencer (cmd_autonomous) (§8a); each
+                     cadence round calls cmd_intake (mine→synth→#64-validate→auto-promote)
     triggers.py      the gain governor (N new champion failures)
     concurrency.py   the worker cap (run_capped)
+    scheduling.py    launchd plist for the 09:00 `factory daily` run
   dashboard/     the operator's board (§10)
     server.py        stdlib http.server: read endpoints + one write (promote)
     static/          index.html + app.js + style.css (single-page board)
@@ -216,9 +231,54 @@ factory propose         loop ③: fire iff ≥N new champion failures → 1 cand
 factory evaluate <cid>  loop ②: candidate × working × panel (capped)
 factory round <cid>     loop ②+gate: evaluate (+held-out sample) → reporter → awaiting_gate|rejected
 factory holdout-check   arbitration probe: candidate under the held-out MODEL (overfit signal)
-factory mine            scenario-miner → staging/ (operator vetting)
+factory mine            scenario-miner → scenarios/staging/ (operator vetting)
+factory research        researcher → grounded cited briefs → research/staging/ ── feeds ③
+factory autonomous      §8a: unattended sequencer — research+intake+propose+round per round
+factory daily           the 09:00 launchd run: a larger bounded autonomous session + summary
 factory status | board  inspect
 ```
+
+---
+
+## 8a. The unattended operate-loop (autonomy)
+
+`orchestrator/autonomy.py:cmd_autonomous` is a thin **sequencer** over the existing,
+gain-limited roles — it adds no new authority, only a cadence. Given a **mission**
+(read from `MISSION.md`, human-editable), each round runs, in order:
+
+```
+ 1.  research   researcher → stage grounded, cited technique briefs       (direction)
+ 1b. intake     mine → check-synth → #64-VALIDATE → AUTO-PROMOTE to working (corpus growth)
+ 2.  baseline   evaluate the reigning champion → surface ground-truth failures
+ 3.  propose    gain-governed; if it fires, the Proposer emits one candidate
+                (now also fed the staged research briefs from step 1)
+ 3'. round      evaluate (+held-out sample) → reporter → awaiting_gate | rejected
+ 4.  report     list any candidate now at awaiting_gate (the HUMAN's queue)
+```
+
+The loop is **self-sustaining by design**: two intake funnels keep the gain
+governor fed so it doesn't stall on a static corpus. *Research* (step 1) stages
+briefs that step 3's Proposer can ground a change in; *intake* (step 1b) grows the
+working set, which surfaces new champion failures that re-arm the governor. Without
+them the governor trends to zero new failures and the loop would broaden research,
+then stop.
+
+**Intake is the one place the system mutates its own grading corpus unattended**, so
+it is gated hard (see §17.8): a mined scenario auto-promotes to **working** only when
+its synthesised oracle passes the **#64 deterministic validator** (`check_validation`
+starts with `validated:`); unverified/rejected oracles stay staged for the human, and
+the **held-out partition is never auto-grown**.
+
+**Stops** on any of: `max_rounds`, cumulative `token_budget`, `no_improvement_rounds`
+consecutive armed rounds with nothing clearing the gate, or *research+intake
+exhausted* (consecutive idle rounds that surfaced neither a new brief nor a promotion).
+It **never promotes** — there is no promote call in this module; every guardrail (gain
+governor, per-round BudgetGuard + circuit breakers, held-out leakage retirement,
+divergence/Goodhart checks, role isolation) is the same one the manual commands use.
+It ends by writing a plain-language executive summary (Discoveries / Decisions / Next
+steps) to `updates/YYYY-MM-DD-HHMM.md`. `factory daily` is this loop on a launchd 09:00
+schedule with a larger bounded budget; `--dry-run` prints the per-round plan, invoking
+nothing.
 
 ---
 
@@ -326,13 +386,17 @@ Durable instructions live in `roles/<role>/prompt.md`; the engine is `roles/comm
 
 | Role | Reads | Writes | Blindness |
 |------|-------|--------|-----------|
-| **Proposer** | champion `open`, recent **champion** failures, redacted tried-history | one candidate (`proposed`) | never sees grader internals or held-out (incl. held-out score fields, via `scoring.proposer_safe_scores`) |
+| **Proposer** | champion `open`, recent **champion** failures, redacted tried-history, **grounded research briefs** (`research/staging`, ungrounded excluded) | one candidate (`proposed`) | never sees grader internals or held-out (incl. held-out score fields, via `scoring.proposer_safe_scores`) |
 | **Judge** | a run's transcript + goal, **after** grading | `judge_notes` flags | does not set pass/fail |
 | **Reporter** | a finished round's runs + computed signals | a promotion digest | does not decide; divergence is computed deterministically, not by the LLM |
-| **Scenario Miner** | `~/.clive_session_log.jsonl` | candidate scenarios → `staging/` | never enters corpus/held-out without operator vetting |
+| **Scenario Miner** | `~/.clive_session_log.jsonl` | candidate scenarios → `scenarios/staging/` | never enters corpus/held-out without vetting (intake auto-promotes to **working** only after #64 validation; §17.8) |
+| **Researcher** | fetched arXiv papers + GitHub repos + `MISSION.md` material | cited technique briefs → `research/staging/` | distils only fetched text (no web tools); briefs *feed* the Proposer, never auto-applied |
+| **Check-Synth** | a staged scenario's goal + seed files | a deterministic `acceptance()` module, #64-validated | a wrong/guessed oracle is rejected before it can grade (Goodhart backstop) |
 
-The Proposer is a thin wrapper by construction (one field patch). The Reporter's
-numbers are computed in Python; `claude -p` only writes the prose around them.
+The Proposer is a thin wrapper by construction (one field patch); a brief only
+supplies optional, cited direction — recorded failures still take priority and a
+brief never overrides the frozen block. The Reporter's numbers are computed in
+Python; `claude -p` only writes the prose around them.
 
 ---
 
@@ -431,6 +495,11 @@ Held by construction, and each enforced in more than one place:
    concurrency + budget capped; circuit breakers on runaway cost/errors.
 7. **Everything is logged + inspectable** — files + a single SQLite store, no hidden
    state.
+8. **Unattended corpus growth is gated.** The autonomy loop's intake step (§8a) may
+   auto-promote a mined scenario into the **working** set only when its synthesised
+   oracle passes the **#64 deterministic validator**; the **held-out** partition is
+   never auto-grown (overfit hygiene stays a human action), and held-out promotion
+   stays a manual `promote-scenario --partition held-out`.
 
 ---
 
@@ -451,19 +520,30 @@ Held by construction, and each enforced in more than one place:
 
 ---
 
-## 19. Phase 0 boundaries (and the Phase 1 seams)
+## 19. What's built vs still deferred
 
-Phase 0 is **hand-cranked scaffolding**, verified end-to-end and stopping at the
-human gate. It enables **no** autonomous promotion and wires **no** real-system
-credentials. Deliberately deferred:
+The Phase 0 **spine** is hand-cranked scaffolding, verified end-to-end and stopping
+at the human gate; it wires **no** real-system credentials and enables **no**
+autonomous promotion. Built on top of that spine since:
 
-- An **autonomous driver** that fires the optimisation loop on a cadence (the trigger
-  + governors already exist; Phase 1 wires the loop, promotion still human).
-- **Production failure ingestion** beyond the Scenario Miner staging path.
+- The **autonomous operate-loop** (§8a — `autonomy.py`/`cmd_autonomous`, plus
+  `factory daily` on a launchd 09:00 schedule). Promotion is still human.
+- **Research integration** (`research/`, the Researcher role) and the **briefs →
+  Proposer** arrow.
+- **Corpus intake** (`cmd_intake`): mine → check-synth → #64-validate → auto-promote
+  to working (held-out stays human-only).
+
+Still deferred / known gaps:
+
+- **Held-out gate-hardening.** `evaluate_promotion`'s held-out check can pass
+  vacuously when no held-out cells are shared, and the held-out-**model** overfit probe
+  (`holdout-check`) is not yet run inside `round`/the loop — it remains on demand.
+- **Held-out replenishment.** Leakage retirement is automatic, but a retired held-out
+  scenario is replaced only by a human-vetted promotion (the set can go empty).
+- **The board is not a standing service** — `factory board` must be started manually
+  to act on the gate.
 - Full actuation of `open` fields that are clive source constants today (e.g.
   `recovery_policy.max_turns`) — currently recorded as `pending`.
-- The held-out **model** overfit probe runs on demand (`holdout-check`); Phase 1 may
-  schedule it on the arbitration cadence.
 
 ---
 

@@ -40,11 +40,18 @@ def _stub_exec_summary(tmp_path, monkeypatch):
     monkeypatch.setattr("factory.common.paths.FACTORY_ROOT", str(tmp_path))
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
-    # Isolate the research staging dir to tmp so the loop's brief-counting (and the
-    # fake research step's marker files) never touch the real repo.
+    # Isolate EVERY filesystem location the loop could write into to tmp, so a test
+    # can never touch the real repo corpus. Belt-and-suspenders: the round steps are
+    # stubbed, but if a future test forgets to stub cmd_intake the real intake must
+    # still be unable to mine/promote into the actual scenarios/ dirs (this exact
+    # gap once auto-promoted unvetted scenarios into the live working set).
     staging = tmp_path / "research_staging"
     staging.mkdir()
     monkeypatch.setattr("factory.common.paths.RESEARCH_STAGING_DIR", str(staging))
+    for name in ("WORKING_DIR", "HELD_OUT_DIR", "STAGING_DIR"):
+        d = tmp_path / name.lower()
+        d.mkdir()
+        monkeypatch.setattr(f"factory.common.paths.{name}", str(d))
     db = str(tmp_path / "factory.db")
     with Blackboard(db) as bb:
         bb.init_db()
@@ -121,10 +128,17 @@ def _patch_steps(monkeypatch, *, propose_returns, gate_clears, calls,
         s.set_stage(cid, "awaiting_gate" if clears else "rejected")
         s.add_budget("reporter", 50, 0.0, notes="test")
 
+    def fake_intake(s, *a, **k):
+        # default: intake fires but promotes nothing (no new working scenarios) and
+        # spends nothing — keeps the existing sequencing/budget assertions intact.
+        return {"mined": [], "validated": [], "promoted": [],
+                "unverified": [], "rejected": []}
+
     monkeypatch.setattr(orch, "cmd_research", fake_research)
     monkeypatch.setattr(orch, "cmd_baseline", fake_baseline)
     monkeypatch.setattr(orch, "cmd_propose", fake_propose)
     monkeypatch.setattr(orch, "cmd_round", fake_round)
+    monkeypatch.setattr(orch, "cmd_intake", fake_intake)
 
 
 def _arm_governor(store, monkeypatch):
@@ -208,6 +222,7 @@ def test_idle_broadens_research_and_keeps_working(store, monkeypatch):
     monkeypatch.setattr(orch, "cmd_baseline", lambda s, *a, **k: None)
     monkeypatch.setattr(orch, "cmd_propose", lambda s, *a, **k: None)
     monkeypatch.setattr(orch, "cmd_round", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_intake", lambda s, *a, **k: {"promoted": []})
 
     summary = autonomy.cmd_autonomous(store, "mission", max_rounds=4,
                                       do_research=True)
@@ -239,6 +254,9 @@ def test_stops_when_idle_research_exhausted(store, monkeypatch):
     monkeypatch.setattr(orch, "cmd_baseline", lambda s, *a, **k: None)
     monkeypatch.setattr(orch, "cmd_propose", lambda s, *a, **k: None)
     monkeypatch.setattr(orch, "cmd_round", lambda s, *a, **k: None)
+    # intake is ALSO dry (promotes nothing) → with research dry too, the loop must
+    # give up on 'research exhausted' rather than spin.
+    monkeypatch.setattr(orch, "cmd_intake", lambda s, *a, **k: {"promoted": []})
 
     summary = autonomy.cmd_autonomous(store, "mission", max_rounds=10,
                                       do_research=True)
@@ -248,6 +266,67 @@ def test_stops_when_idle_research_exhausted(store, monkeypatch):
     assert summary["rounds_run"] == 3
     assert len(calls) == 3
     assert summary["awaiting_gate"] == []
+
+
+# ---------------------------------------------------------------------------
+# (#2) INTAKE is wired into the loop: each research-cadence round the loop mines +
+#      #64-validates + auto-promotes new working scenarios (the self-sustaining
+#      arrow). Hermetic: cmd_intake is stubbed; we only assert the SEQUENCING.
+# ---------------------------------------------------------------------------
+def test_autonomous_runs_intake_on_research_cadence(store, monkeypatch):
+    _install_promotion_spy(monkeypatch, store)
+    _arm_governor(store, monkeypatch)
+    calls: list = []
+    _patch_steps(monkeypatch, propose_returns=["cand-0", "cand-1", "cand-2"],
+                 gate_clears=[True, True, True], calls=calls)
+    intake_calls: list = []
+
+    def fake_intake(s, *a, **k):
+        intake_calls.append(1)
+        return {"mined": [], "validated": [], "promoted": [],
+                "unverified": [], "rejected": []}
+
+    monkeypatch.setattr(orch, "cmd_intake", fake_intake)
+    autonomy.cmd_autonomous(store, "mission", max_rounds=3, do_research=True)
+    assert len(intake_calls) >= 1   # intake actually fires inside the loop
+
+
+def test_intake_promotions_keep_loop_busy_when_research_dry(store, monkeypatch):
+    """Governor holds and research is DRY (no briefs), but intake promotes a fresh
+    working scenario each idle round → that is NEW WORK, so the loop must NOT stop
+    on 'research exhausted'; it runs to the hard ceiling."""
+    _install_promotion_spy(monkeypatch, store)
+    _hold_governor(monkeypatch)
+    monkeypatch.setattr(orch, "cmd_research", lambda s, **k: None)   # dry: stages nothing
+    monkeypatch.setattr(orch, "cmd_baseline", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_propose", lambda s, *a, **k: None)
+    monkeypatch.setattr(orch, "cmd_round", lambda s, *a, **k: None)
+    n = {"i": 0}
+
+    def fake_intake(s, *a, **k):
+        n["i"] += 1
+        return {"mined": ["m"], "validated": ["m"], "promoted": [f"m{n['i']}"],
+                "unverified": [], "rejected": []}
+
+    monkeypatch.setattr(orch, "cmd_intake", fake_intake)
+    summary = autonomy.cmd_autonomous(store, "mission", max_rounds=4, do_research=True)
+
+    assert summary["rounds_run"] == 4
+    assert summary["stop_reason"] == "max_rounds reached"
+    assert n["i"] >= 1   # intake kept producing work
+
+
+def test_no_intake_flag_skips_intake(store, monkeypatch):
+    _install_promotion_spy(monkeypatch, store)
+    _arm_governor(store, monkeypatch)
+    calls: list = []
+    _patch_steps(monkeypatch, propose_returns=["cand-0"], gate_clears=[True], calls=calls)
+    intake_calls: list = []
+    monkeypatch.setattr(orch, "cmd_intake",
+                        lambda s, *a, **k: intake_calls.append(1) or {"promoted": []})
+    autonomy.cmd_autonomous(store, "mission", max_rounds=2, do_research=True,
+                            do_intake=False)
+    assert intake_calls == []   # do_intake=False disables the intake arrow
 
 
 # ---------------------------------------------------------------------------

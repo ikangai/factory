@@ -57,6 +57,8 @@ def _mission_query(mission: str) -> str:
 
 def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                    token_budget: Optional[int] = None, do_research: bool = True,
+                   do_intake: bool = True, intake_limit: int = 10,
+                   intake_max_new: int = 3,
                    research_every: int = 3, dry_run: bool = False,
                    base_max_papers: int = 8, base_max_repos: int = 6,
                    max_research_breadth: int = 4,
@@ -119,9 +121,10 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
         # keep finding work — not just on the scheduled cadence. Breadth escalates
         # with the idle streak (capped) so each idle round casts a wider net.
         broadening = idle_streak > 0
-        do_research_this_round = bool(do_research) and (
-            rnd == 1 or broadening
-            or (research_every > 0 and (rnd - 1) % research_every == 0))
+        cadence_round = (rnd == 1 or broadening
+                         or (research_every > 0 and (rnd - 1) % research_every == 0))
+        do_research_this_round = bool(do_research) and cadence_round
+        do_intake_this_round = bool(do_intake) and cadence_round
         breadth = min(1 + idle_streak, max_research_breadth)
 
         print(f"\n----- ROUND {rnd}/{max_rounds} "
@@ -135,6 +138,11 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                       "-> stage grounded technique briefs")
             else:
                 print("    1. (skip research this round)")
+            if do_intake_this_round:
+                print("    1b. cmd_intake()                 -> mine + #64-validate + "
+                      "auto-promote new working scenarios (held-out stays human-gated)")
+            else:
+                print("    1b. (skip intake this round)")
             print("    2. cmd_baseline()                 -> surface champion failures")
             print(f"    3. cmd_propose()                  -> self-gates on >= "
                   f"{new_failures_threshold} new champion failures; if it proposes a "
@@ -149,6 +157,7 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
 
         rounds_run = rnd
         research_staged = 0
+        intake_promoted = 0
         proposed_cid: Optional[str] = None
         cleared_gate = False
 
@@ -167,6 +176,23 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
             research_staged = max(0, _research_count(store) - before)
         else:
             print("  [1] research: skipped this round")
+
+        # --- 1b. intake (grow the working corpus) ----------------------------
+        # The self-sustaining arrow: mine + #64-validate + auto-promote VALIDATED
+        # scenarios into the working set. New working scenarios → new champion
+        # failures → the gain governor re-arms (so propose() runs and the briefs
+        # above actually get used). Held-out is never auto-grown.
+        if do_intake_this_round:
+            print("  [1b] intake: mining + #64-validating new scenarios "
+                  "(auto-promote validated → working) …")
+            try:
+                res = orch.cmd_intake(store, limit=intake_limit,
+                                      max_new=intake_max_new)
+                intake_promoted = len(res.get("promoted", []) if res else [])
+            except Exception as e:  # noqa: BLE001 — intake is best-effort, never fatal
+                print(f"  [1b] intake failed (continuing): {e}", file=sys.stderr)
+        else:
+            print("  [1b] intake: skipped this round")
 
         # --- token ceiling re-check after a (potentially) expensive step ------
         if token_budget is not None and _spend(store) >= token_budget:
@@ -204,6 +230,7 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
         gate_ids = _awaiting_gate_ids(store)
         print(f"  [4] round {rnd} report:")
         print(f"        research briefs staged this round : {research_staged}")
+        print(f"        scenarios auto-promoted (intake)  : {intake_promoted}")
         print(f"        candidate proposed                : "
               f"{proposed_cid or '(none — governor held or no valid candidate)'}")
         print(f"        cleared the gate this round       : "
@@ -229,18 +256,19 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                 break
         else:
             # KEEP BUSY: governor not armed (champion robust). Don't idle-stop —
-            # we broadened the research sweep this round. Keep going while it finds
-            # NEW material; give up only after `idle_limit` dry idle rounds.
+            # we broadened the research sweep this round. Keep going while EITHER
+            # intake (a new working scenario) OR research (a new brief) surfaced
+            # NEW work; give up only after `idle_limit` rounds that found neither.
             consecutive_no_gate = 0
             idle_streak += 1
-            if research_staged > 0:
+            if research_staged > 0 or intake_promoted > 0:
                 dry_research = 0
             else:
                 dry_research += 1
             if dry_research >= idle_limit:
-                stop_reason = (f"research exhausted: the broadened sweep produced "
-                               f"nothing new for {dry_research} consecutive idle "
-                               f"rounds (>= {idle_limit})")
+                stop_reason = (f"research exhausted: neither the broadened sweep nor "
+                               f"intake produced anything new for {dry_research} "
+                               f"consecutive idle rounds (>= {idle_limit})")
                 break
 
         # token budget exhausted at end of round.
