@@ -215,6 +215,26 @@ def run_super_worker(prompt: str, *, allowed_tools=DEFAULT_SUPER_TOOLS,
         return claude_super(prompt, workdir=wd, allowed_tools=allowed_tools, timeout=timeout)
 
 
+def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
+                      frozen, as_user: Optional[str] = None, claude_bin: str = "claude",
+                      timeout: int = 1800) -> dict:
+    """Run a DEVELOPER super-worker inside `clone_dir` (a clone of the target) toward
+    `task`: it makes a bounded code change, gets the target's tests green, and commits to
+    `branch`. With `as_user` it runs as the Guest-House user (HARD boundary); without, it
+    runs same-user (dev-mode SOFT boundary — supervised, scoped to the disposable clone).
+    Returns {branch, reply, tokens, cost}; the caller (the glue) verifies the branch was
+    actually produced and grades it."""
+    prompt = (_load_prompt("developer")
+              .replace("{TASK}", task)
+              .replace("{BRANCH}", branch)
+              .replace("{TEST_CMD}", test_cmd)
+              .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))
+    reply, tokens, cost = claude_super(
+        prompt, workdir=clone_dir, allowed_tools=DEVELOPER_TOOLS,
+        as_user=as_user, claude_bin=claude_bin, timeout=timeout)
+    return {"branch": branch, "reply": reply, "tokens": tokens, "cost": cost}
+
+
 def _load_prompt(role: str) -> str:
     with open(os.path.join(paths.ROLES_DIR, role, "prompt.md"), "r", encoding="utf-8") as fh:
         return fh.read()

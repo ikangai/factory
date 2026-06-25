@@ -639,6 +639,47 @@ def cmd_blog(store: Blackboard, mission: Optional[str] = None) -> str:
     return path
 
 
+def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False) -> dict:
+    """ONE develop→grade→auto-merge turn against a THROWAWAY clone of the target — the
+    dev-account smoke test of the autonomous code loop. A developer super-worker makes a
+    bounded code change toward `task`, the round grades it (frozen-check + the target's
+    own tests + scenario grade) and auto-merges into the throwaway clone (NEVER the real
+    target). Dev mode (default): same-user SOFT boundary. `--prod`: the Guest-House user.
+
+    The scenario grade here is a MECHANICS-smoke placeholder (do-no-harm) — the target's
+    own test suite is the live gate. Wiring the full scenario eval over a code-built
+    candidate is the next integration."""
+    import shutil
+    import tempfile
+    from .develop import develop_and_merge
+
+    adapter = config.get_adapter()
+    sw = config.load_config().get("super_worker", {}) or {}
+    as_user = (sw.get("user") or None) if prod else None
+    claude_bin = sw.get("claude_bin") or "claude"
+    print(f"[develop-once] task: {task!r}")
+    print(f"[develop-once] mode: {'PROD (Guest House user=' + str(as_user) + ')' if prod else 'DEV (same-user soft boundary)'}")
+
+    work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")
+    main = os.path.join(work, "champion")
+    champion_scores = {"working": 0.0, "held_out": 0.0}   # smoke baseline; tests are the live gate
+
+    def grade_fn(repo_dir):   # mechanics smoke: do-no-harm; the real signal is run_tests in the round
+        return {"working": 0.0, "held_out": 0.0, "held_out_measured": True,
+                "divergence_alarm": False, "safety_flag": False}
+
+    try:
+        adapter.clone(main)   # throwaway clone of the target = the test champion
+        print(f"[develop-once] champion clone: {main}")
+        res = develop_and_merge(adapter=adapter, main_repo=main, task=task,
+                                champion_scores=champion_scores, grade_fn=grade_fn,
+                                as_user=as_user, claude_bin=claude_bin)
+        print(f"[develop-once] result: {json.dumps(res, indent=2, default=str)}")
+        return res
+    finally:
+        shutil.rmtree(work, ignore_errors=True)   # the throwaway clone never touches the real target
+
+
 # --- the 09:00 daily update -------------------------------------------------
 # "Larger" daily run (operator choice): several rounds + a generous-but-bounded
 # token ceiling so the unattended run makes real headway without runaway spend.
@@ -782,6 +823,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     dia.add_argument("--mission", default=None)
     blg = sub.add_parser("blog")        # accessible Ars-Technica-style post → blog/
     blg.add_argument("--mission", default=None)
+    dev1 = sub.add_parser("develop-once")   # one develop→grade→auto-merge turn (code loop)
+    dev1.add_argument("--task", required=True, help="what the developer should change/build")
+    dev1.add_argument("--prod", action="store_true",
+                      help="run the developer in the Guest-House user (default: dev-mode, same-user)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sub.add_parser("schedule-uninstall")
@@ -860,6 +905,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_diary(store, mission=a.mission)
         elif a.cmd == "blog":
             cmd_blog(store, mission=a.mission)
+        elif a.cmd == "develop-once":
+            cmd_develop_once(store, a.task, prod=a.prod)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":
