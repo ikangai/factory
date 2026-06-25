@@ -28,32 +28,24 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
    If the backlog is thin, **refresh it**: `./bin/factory research-feed` runs a web
    researcher that proposes new bounded directions toward the mission (and ingests what
    shipped). The mission is the terminator — keep generating work toward it until it's met.
-2. **Plan** — pick a *small* set of open backlog tasks (each "one bounded change"), newest
-   evidence first. Prefer finishing blocked/in-flight work from the resume note. The
-   backlog lines below show each task's **id** — you MUST work tasks by id.
-3. **Dispatch — and CLOSE THE LOOP** (critical: the backlog only drains if you do this):
-   For each task `<id>`:
-   - `./bin/factory task claim <id>`  — mark it in-progress on this shift.
-   - `./bin/factory develop-once --task "<the task's one bounded change>"`  — the gated
-     pipeline: it clones the target, runs a developer worker (its own TDD loop), and
-     **only merges if the frozen-safety surface is untouched, the target's tests pass, and
-     the gate clears** (auto-revert on regression). You cannot merge unsafe code.
-     ‼️ **Run it in the FOREGROUND and WAIT for it to return.** It blocks for several
-     minutes (clone + the developer's TDD loop + the target's full test suite) — that is
-     EXPECTED, not a hang. **NEVER background it (`&`, run_in_background) or expect to be
-     re-invoked when it finishes** — you are ONE headless session, and any dispatch still
-     running when your shift ends is KILLED and its work is LOST. Dispatch one task, wait
-     for its result, close it, then move to the next.
-   - On a `"merged"` result: `./bin/factory task done <id> --result <merge_sha>`.
-   - On `no_candidate`/`discarded`/`auto_reverted`: refine + retry once; if it still
-     won't land, `./bin/factory task block <id> --result "<why>"` (or file an issue) and
-     move on. **Never leave a dispatched task `in_progress`.**
-   Run tasks sequentially by default; fan out a parallel agora squad only when warranted.
-4. **Expand** — file new issues (`gh issue create`) and add backlog tasks
-   (`./bin/factory task add "<title>" --source worker`) for found-but-not-fixed problems,
-   so the backlog reflects reality.
-5. **Reflect** — narrate the shift with `/diary`. (The factory records what shipped for the
-   researchers automatically from the tasks you closed — you don't need to.)
+2. **Plan** — pick a *small* set (1–3) of open backlog tasks to work THIS shift, each "one
+   bounded change", newest evidence first. The backlog lines below show each task's **id**.
+   Prefer reopening/refining tasks that were `blocked` last shift (check `./bin/factory
+   task list`). If the backlog is too thin, `./bin/factory research-feed` (and/or add tasks
+   with `./bin/factory task add "<title>" --source worker`).
+3. **Claim the tasks to work** — `./bin/factory task claim <id>` for each. **That is all you
+   do to dispatch.** ‼️ **You do NOT run `develop-once` yourself — do not call it, do not
+   background anything, do not wait.** After you finish this shift, the factory
+   AUTOMATICALLY runs each claimed task through the gated pipeline (clone → developer TDD →
+   frozen-check + the target's tests + auto-merge + auto-revert) and records the outcome.
+   You are a headless session; if you tried to run the dispatch yourself it would be killed
+   when your shift ends. **Just claim — the rail executes.** (Make each task's title +
+   detail a clear, bounded change description, since that's what the developer receives.)
+4. **React to last shift** — at the top of the backlog you'll see tasks `done` (with the
+   merge sha) or `blocked` (with a reason) from the prior shift's execution. Build on what
+   shipped; reopen + refine what blocked if it's still worth doing; drop what isn't.
+5. **Expand** — file issues (`gh issue create`) and add backlog tasks for found-but-not-fixed
+   problems, so the backlog reflects reality. Narrate with `/diary`.
 6. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
    "done": if the backlog is empty AND research is dry AND nothing is improving, say so in
    the report — don't invent busywork. **The mission, not an empty queue, is the terminator.**

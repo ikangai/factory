@@ -18,8 +18,60 @@ import tempfile
 import uuid
 from typing import Callable, Optional
 
-from ..common import killswitch
+from ..common import config, killswitch
 from . import code_round
+
+
+def _smoke_grade(repo_dir: str) -> dict:
+    """Mechanics-smoke grade — do-no-harm; the target's own test suite (run inside the
+    round) is the live gate. The full scenario eval over a code-built candidate is the
+    next integration."""
+    return {"working": 0.0, "held_out": 0.0, "held_out_measured": True,
+            "divergence_alarm": False, "safety_flag": False}
+
+
+def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
+                 grade_fn: Optional[Callable] = None,
+                 champion_scores: Optional[dict] = None) -> dict:
+    """Run ONE task through the gated pipeline against a THROWAWAY champion clone; return
+    the round result. This is the deterministic execution the conductor's claimed work goes
+    through — the conductor NEVER runs this itself (a headless `claude -p` can't reliably
+    block on a long sub-command; it backgrounds it and orphans it at shift end)."""
+    adapter = config.get_adapter()
+    work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")
+    main = os.path.join(work, "champion")
+    try:
+        adapter.clone(main)
+        return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
+                                 champion_scores=champion_scores or {"working": 0.0, "held_out": 0.0},
+                                 grade_fn=grade_fn or _smoke_grade,
+                                 as_user=as_user, claude_bin=claude_bin)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
+
+
+def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None,
+                          claude_bin: str = "claude", develop_fn: Optional[Callable] = None) -> int:
+    """Deterministically run EVERY task the conductor claimed this shift through the gated
+    pipeline and CLOSE it: merged → done(sha), anything else → blocked(reason, for the
+    conductor to reopen/refine next shift). Returns the count shipped. `develop_fn` is
+    injectable for tests so no live worker spawns."""
+    run = develop_fn or develop_task
+    shipped = 0
+    for task in store.tasks_in_flight(shift_id):     # the in_progress tasks claimed this shift
+        text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
+        try:
+            res = run(text, as_user=as_user, claude_bin=claude_bin)
+        except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
+            res = {"action": "error", "error": str(e)}
+        if res.get("action") == "merged":
+            store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
+                                  shift_id=shift_id)
+            shipped += 1
+        else:                                         # no_candidate/discarded/auto_reverted/error
+            store.set_task_status(task["id"], "blocked", result=res.get("action", "no result"),
+                                  shift_id=shift_id)
+    return shipped
 
 
 def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: dict,

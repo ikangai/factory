@@ -715,7 +715,7 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
 
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
-            conductor=None) -> dict:
+            conductor=None, executor=None) -> dict:
     """The conductor loop entry point (design step 6): run ONE bounded shift, then assess
     the mission and surface the status. State persists in the store, so each `run` resumes
     where the last left off — schedule it (launchd) for the unattended daily cadence."""
@@ -736,25 +736,29 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
               f"do toward the mission. Awaiting a revision (factory run --mission \"…\").")
         return {"action": "idle", "shift_id": None}
 
-    if conductor is None:                              # live: the claude conductor (dev/prod user)
+    as_user = (sw.get("user") or None) if prod else None
+    claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
+    if conductor is None:                              # live: the claude conductor (PLANS only)
         from ..roles.conductor import run_conductor
-        as_user = (sw.get("user") or None) if prod else None
-        claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
         if not prod:
-            print("[run] ⚠ DEV mode: the conductor runs as YOU (same-user) with Bash + your "
-                  "MCP loaded — supervised only; do not schedule unattended. Use --prod for the "
-                  "Guest-House boundary.")
+            print("[run] ⚠ DEV mode: the conductor + workers run as YOU (same-user) with Bash + "
+                  "your MCP loaded — supervised only; do not schedule unattended. Use --prod for "
+                  "the Guest-House boundary.")
         conductor = lambda st, **kw: run_conductor(st, as_user=as_user, claude_bin=claude_bin, **kw)
+    if executor is None:                               # the deterministic rail EXECUTES claimed tasks
+        from .develop import execute_claimed_tasks
+        executor = lambda st, *, shift_id: execute_claimed_tasks(
+            st, shift_id, as_user=as_user, claude_bin=claude_bin)
 
-    res = run_shift(store, token_budget=token_budget, conductor=conductor,
+    res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
                     mission=mission, wall_clock_s=wall_clock_s)
     print(f"[run] shift {res.get('shift_id')}: {res['action']} "
-          f"(reaped {res.get('reaped', 0)} crashed shift(s))")
+          f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
 
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
         shipped_tasks = [t for t in store.list_tasks(status="done")
                          if t.get("shift_id") == res["shift_id"]]
-        m = assess(store, shift_id=res["shift_id"], shipped_count=len(shipped_tasks),
+        m = assess(store, shift_id=res["shift_id"], shipped_count=res.get("shipped", len(shipped_tasks)),
                    plateau_k=plateau_k)
         if shipped_tasks:                              # auto-emit the digest — don't trust the LLM to
             store.add_digest(shift_id=res["shift_id"],

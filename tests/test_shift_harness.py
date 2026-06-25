@@ -137,6 +137,26 @@ def test_run_shift_requeues_on_a_returned_error_status(tmp_path, monkeypatch):
         assert res["action"] == "error" and s.get_task("t1")["status"] == "open"
 
 
+def test_run_shift_runs_the_executor_for_the_shift_and_returns_shipped(tmp_path, monkeypatch):
+    """The conductor PLANS; the rail's executor runs the claimed work. run_shift invokes the
+    executor for the just-run shift and surfaces its shipped count."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        seen = {}
+
+        def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+            seen["shift"] = shift_id
+            return {"status": "completed"}
+
+        def executor(store, *, shift_id):
+            seen["exec_shift"] = shift_id
+            return 3
+
+        res = shiftmod.run_shift(s, token_budget=1, conductor=conductor, executor=executor)
+        assert res["shipped"] == 3 and seen["exec_shift"] == seen["shift"]   # executor ran for THIS shift
+
+
 def test_run_shift_requeues_unclosed_work_even_on_clean_completion(tmp_path, monkeypatch):
     """Live-smoke regression: the conductor claimed a task, backgrounded its dispatch, and
     ended the shift 'completed' without closing it — reap only rescues 'running' shifts, so

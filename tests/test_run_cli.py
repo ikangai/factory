@@ -59,21 +59,26 @@ def test_cmd_task_add_list_done(tmp_path, capsys):
 def test_full_lifecycle_drains_backlog_counts_shipped_and_emits_digest(tmp_path, monkeypatch):
     """The bug the review caught: nothing closed tasks or counted shipments, so the loop
     could never drain or terminate. This pins the contract that fixes it."""
+    from factory.orchestrator.develop import execute_claimed_tasks
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
     with _store(tmp_path) as s:
         s.set_mission("ship it")
         s.add_task("t1", "fix a thing", source="research")
 
         def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
-            # what the real conductor does via `./bin/factory task ...` (here in-process):
-            orchestrator.cmd_task(store, "claim", rest="t1")
-            orchestrator.cmd_task(store, "done", rest="t1", result="abc123")
+            orchestrator.cmd_task(store, "claim", rest="t1")     # the conductor only PLANS + claims
             return {"status": "completed", "tokens_used": 5}
 
-        res = orchestrator.cmd_run(s, conductor=conductor, token_budget=100, wall_clock_s=5)
+        def executor(store, *, shift_id):                         # the RAIL executes (worker injected)
+            return execute_claimed_tasks(store, shift_id,
+                                         develop_fn=lambda text, **k: {"action": "merged", "merge_sha": "abc123"})
+
+        res = orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                                   token_budget=100, wall_clock_s=5)
 
         t1 = s.get_task("t1")
         assert t1["status"] == "done" and t1["shift_id"] == res["shift_id"]   # stamped to this shift
+        assert t1["result"] == "abc123"
         assert s.list_tasks(status="open") == []                              # backlog DRAINED
         latest = s.latest_mission_status()
         assert latest["status"] == "advancing" and latest["metrics"]["shipped"] == 1  # shipped COUNTED

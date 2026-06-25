@@ -92,6 +92,28 @@ def test_frozen_violation_discards_before_merge(monkeypatch, tmp_path):
     assert "merge" not in [c[0] for c in ad.calls]    # never merged a frozen-touching change
 
 
+def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
+    """The deterministic executor (replaces the conductor running develop-once via Bash):
+    each claimed task → merged→done(sha), else→blocked(reason). Worker injected, no spawn."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("m", "merge me", source="issue"); s.set_task_status("m", "in_progress", shift_id=sh)
+    s.add_task("b", "fails", source="issue"); s.set_task_status("b", "in_progress", shift_id=sh)
+    s.add_task("o", "open, not claimed", source="issue")     # not in-flight → executor ignores it
+
+    results = iter([{"action": "merged", "merge_sha": "sha1"}, {"action": "no_candidate"}])
+    shipped = execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: next(results))
+
+    assert shipped == 1
+    assert s.get_task("m")["status"] == "done" and s.get_task("m")["result"] == "sha1"
+    assert s.get_task("b")["status"] == "blocked" and s.get_task("b")["result"] == "no_candidate"
+    assert s.get_task("o")["status"] == "open"               # untouched (never claimed)
+    s.close()
+
+
 def test_halted_kill_switch(monkeypatch, tmp_path):
     monkeypatch.setattr(develop.killswitch, "is_halted", lambda: True)
     ad = FakeAdapter()

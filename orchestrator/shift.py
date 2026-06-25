@@ -14,22 +14,24 @@ from typing import Callable, Optional
 from ..common import killswitch
 
 
-def run_shift(store, *, token_budget: int, conductor: Callable, mission: Optional[str] = None,
-              wall_clock_s: int = 1800) -> dict:
-    """Run one bounded conductor shift. Returns {action, shift_id, reaped}, where action
-    ∈ {halted, no_mission, completed, timed_out, error, ...}. Always leaves the store in a
-    clean state: a crashed shift is reaped first, and whatever happens to the conductor,
-    the shift row is closed with a status + resume note (never left dangling)."""
+def run_shift(store, *, token_budget: int, conductor: Callable, executor: Optional[Callable] = None,
+              mission: Optional[str] = None, wall_clock_s: int = 1800) -> dict:
+    """Run one bounded conductor shift. The conductor PLANS (orients, claims the tasks to
+    work); then the `executor` (deterministic, no LLM-driven Bash) runs each claimed task
+    through the gated pipeline and closes it — keeping the long-running, backgroundable
+    dispatch OUT of the headless conductor's hands. Returns {action, shift_id, reaped,
+    shipped}. Always leaves the store clean: a crashed shift is reaped first, and the shift
+    row is always closed."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
 
     if killswitch.is_halted():                     # the brake: don't even start
-        return {"action": "halted", "shift_id": None, "reaped": len(reaped)}
+        return {"action": "halted", "shift_id": None, "reaped": len(reaped), "shipped": 0}
 
     if mission and not store.active_mission():
         store.set_mission(mission)
     m = store.active_mission()
     if not m:                                       # nothing to steer toward
-        return {"action": "no_mission", "shift_id": None, "reaped": len(reaped)}
+        return {"action": "no_mission", "shift_id": None, "reaped": len(reaped), "shipped": 0}
 
     sh = store.start_shift(token_budget=token_budget, mission_id=m["id"])
     try:
@@ -38,20 +40,27 @@ def run_shift(store, *, token_budget: int, conductor: Callable, mission: Optiona
     except TimeoutError:                            # ceiling: wall-clock — killed from outside
         store.requeue_shift_tasks(sh)               # return claimed work to the backlog
         store.end_shift(sh, status="timed_out", resume_note="conductor exceeded wall-clock")
-        return {"action": "timed_out", "shift_id": sh, "reaped": len(reaped)}
+        return {"action": "timed_out", "shift_id": sh, "reaped": len(reaped), "shipped": 0}
     except Exception as e:                           # noqa: BLE001 — contain a conductor blow-up
         store.requeue_shift_tasks(sh)
         store.end_shift(sh, status="error", resume_note=f"conductor error: {e}")
-        return {"action": "error", "shift_id": sh, "reaped": len(reaped)}
+        return {"action": "error", "shift_id": sh, "reaped": len(reaped), "shipped": 0}
+
+    # EXECUTE the tasks the conductor claimed — deterministically, here, not via the
+    # conductor's Bash (which would background + orphan the long dispatch in a headless -p).
+    shipped = 0
+    if executor is not None and not killswitch.is_halted():
+        try:
+            shipped = executor(store, shift_id=sh) or 0
+        except Exception:  # noqa: BLE001 — a dispatch failure mustn't sink the shift record
+            shipped = 0
 
     # A STOP that tripped DURING the shift overrides the conductor's own status.
     status = "halted" if killswitch.is_halted() else outcome.get("status", "completed")
-    # ALWAYS requeue work still in-flight at shift end — in this loop a task should be
-    # done/blocked/open by the time the conductor stops; anything left claimed/in_progress
-    # means it wasn't closed (a backgrounded dispatch, a bug, a kill), so a 'completed'
-    # shift would otherwise STRAND it (reap only rescues 'running' shifts).
+    # Requeue anything STILL in-flight (the executor closes what it ran; this rescues a task
+    # the conductor claimed but the executor didn't reach / a crash left dangling).
     store.requeue_shift_tasks(sh)
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
                     tokens_used=outcome.get("tokens_used", 0))
-    return {"action": status, "shift_id": sh, "reaped": len(reaped)}
+    return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped}
