@@ -29,6 +29,21 @@ def test_develop_candidate_builds_a_task_specific_prompt_with_bash(monkeypatch):
     assert "Bash" in captured["allowed_tools"]                # a developer needs the shell
 
 
+def test_develop_candidate_is_a_full_instance_with_web_and_own_squad(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: captured.update(k) or ("done", 1, 0.0))
+    monkeypatch.setattr(common.config, "load_config",
+                        lambda: {"super_worker": {"settings": "user",
+                                                  "extra_tools": ["mcp__chrome-devtools"],
+                                                  "squad": "factory-workers"}})
+    common.develop_candidate("/clone", task="t", branch="b", test_cmd="pytest", frozen=[])
+    assert captured["settings"] == "user"                     # full instance (agora/diary/MCP)
+    assert "WebSearch" in captured["allowed_tools"]            # web search
+    assert "mcp__chrome-devtools" in captured["allowed_tools"]  # chrome-devtools (config extra)
+    assert captured["extra_env"]["AGORA_SQUAD"] == "factory-workers"   # own squad → no barrier hang
+
+
 def test_develop_candidate_runs_as_guest_house_user_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(common, "claude_super",

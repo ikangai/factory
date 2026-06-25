@@ -113,10 +113,18 @@ import shutil
 # Bash and NO web. Bash escapes --add-dir and web is an exfil surface; both require the
 # docker hard boundary and must be opted in per role, never defaulted on.
 DEFAULT_SUPER_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Task", "Workflow")
-# A DEVELOPER super-worker runs in the Guest House (a separate OS user, via `as_user`),
-# so the OS boundary protects the operator and Bash is SAFE to grant — the worker needs
-# it to run the target's tests, edit code, and git-commit a candidate branch.
-DEVELOPER_TOOLS = ("Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task", "Workflow")
+# Web: built-in, work headless even when MCP is off. `Skill` lets a worker invoke skills
+# (e.g. /diary) so it narrates like any claude instance.
+WEB_TOOLS = ("WebSearch", "WebFetch")
+# A RESEARCHER super-worker investigates (web + repos) and PROPOSES — read + search +
+# fan-out, no shell/edits (it returns briefs, it doesn't change code).
+RESEARCHER_TOOLS = ("Read", "Grep", "Glob", "Task", "Workflow", "Skill") + WEB_TOOLS
+# A DEVELOPER super-worker (Guest House = separate user, so Bash is safe) edits code,
+# runs the target's tests, searches the web, and drives a browser via chrome-devtools to
+# test web things. chrome-devtools is an MCP server, granted via config.super_worker
+# .extra_tools (its exact allow-string is operator-set; see config.yaml).
+DEVELOPER_TOOLS = ("Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task", "Workflow",
+                   "Skill") + WEB_TOOLS
 
 # Deny-by-default child env: only claude's runtime + auth/config families pass through,
 # so host secrets in the environment (known AND unknown) never reach the worker.
@@ -138,7 +146,13 @@ def _super_worker_env() -> dict:
 
 def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
                        as_user: Optional[str] = None, claude_bin: str = "claude",
+                       settings: str = "", permission_mode: str = "acceptEdits",
                        json_output: bool = True) -> list[str]:
+    """`settings=""` → isolated (no plugins/hooks/MCP/skills — the restricted posture).
+    `settings="user"` → load the worker's USER plugins/skills/MCP so it can use the agora
+    plugin, the diary skill, and MCP servers (e.g. chrome-devtools) like any claude
+    instance. acceptEdits + the curated `allowed_tools` keep non-listed tools (e.g. the
+    operator's Gmail/Drive MCP) out of reach even when loaded."""
     argv: list[str] = []
     if as_user:
         # Run the worker as the Guest-House Standard User — OS-enforced isolation of the
@@ -152,10 +166,10 @@ def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
     argv += [claude_bin, "-p"]
     if json_output:
         argv += ["--output-format", "json"]
-    argv += ["--setting-sources", "",            # no plugins/hooks → no team-barrier hang
-             "--permission-mode", "acceptEdits",  # act without approval prompts…
-             "--add-dir", workdir,                # …file tools steered into the workspace
-             "--max-turns", str(max_turns),       # bound the agentic loop (not just wall-clock)
+    argv += ["--setting-sources", settings,        # "" isolated | "user" → plugins/skills/MCP
+             "--permission-mode", permission_mode,  # act without approval prompts…
+             "--add-dir", workdir,                  # …file tools steered into the workspace
+             "--max-turns", str(max_turns),         # bound the agentic loop (not just wall-clock)
              "--allowedTools", *list(allowed_tools)]
     return argv
 
@@ -174,7 +188,9 @@ def super_worker_workspace(prefix: str = "role"):
 
 def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS,
                  as_user: Optional[str] = None, claude_bin: str = "claude",
-                 max_turns: int = 24, timeout: int = 900) -> tuple[str, int, float]:
+                 settings: str = "", permission_mode: str = "acceptEdits",
+                 extra_env: Optional[dict] = None, max_turns: int = 24,
+                 timeout: int = 900) -> tuple[str, int, float]:
     """Run a FULL-CAPABILITY `claude -p` super-worker in `workdir` with a curated
     toolset + acceptEdits and a turn cap. Returns (text, tokens, cost). Never crashes —
     a transport error yields the `[claude -p …]` sentinel callers fall back on.
@@ -184,10 +200,16 @@ def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS
     House Standard User — a HARD, OS-enforced boundary that protects the operator's
     files/creds, so Bash is safe; the target user's own env/`~/.claude` auth is used
     (we don't impose the operator's env)."""
-    env = None if as_user else _super_worker_env()
+    if as_user:
+        env = None   # sudo -H -u manages the target user's env (extra_env can't survive sudo's reset)
+    else:
+        env = _super_worker_env()
+        if extra_env:
+            env.update(extra_env)   # e.g. AGORA_SQUAD — added AFTER the deny-by-default allowlist
     try:
         p = subprocess.run(_super_worker_argv(workdir, allowed_tools, max_turns=max_turns,
                                               as_user=as_user, claude_bin=claude_bin,
+                                              settings=settings, permission_mode=permission_mode,
                                               json_output=True),
                            input=prompt, capture_output=True, text=True,
                            timeout=timeout, cwd=workdir, env=env)
@@ -224,14 +246,20 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
     runs same-user (dev-mode SOFT boundary — supervised, scoped to the disposable clone).
     Returns {branch, reply, tokens, cost}; the caller (the glue) verifies the branch was
     actually produced and grades it."""
+    sw = config.load_config().get("super_worker", {}) or {}
+    settings = sw.get("settings", "user")            # full instance: agora + diary + MCP loaded
+    tools = DEVELOPER_TOOLS + tuple(sw.get("extra_tools") or ())   # + chrome-devtools (config)
+    # Own agora squad: a headless one-shot worker must not wait at the OPERATOR's team
+    # barrier — solo in its own squad it can use the bus without blocking on us.
+    extra_env = {"AGORA_SQUAD": sw.get("squad", "factory-workers")}
     prompt = (_load_prompt("developer")
               .replace("{TASK}", task)
               .replace("{BRANCH}", branch)
               .replace("{TEST_CMD}", test_cmd)
               .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))
     reply, tokens, cost = claude_super(
-        prompt, workdir=clone_dir, allowed_tools=DEVELOPER_TOOLS,
-        as_user=as_user, claude_bin=claude_bin, timeout=timeout)
+        prompt, workdir=clone_dir, allowed_tools=tools, as_user=as_user,
+        claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout)
     return {"branch": branch, "reply": reply, "tokens": tokens, "cost": cost}
 
 

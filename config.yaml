@@ -99,6 +99,19 @@ roles:
 super_worker:
   user: "agent"
   claude_bin: "/Users/agent/.local/bin/claude"   # agent's OWN claude (a path agent can execute)
+  # Load the worker's USER plugins/skills/MCP so it's a FULL claude instance — the agora
+  # plugin, the diary skill, and MCP servers (chrome-devtools). "" = isolated (no
+  # plugins/hooks/MCP). acceptEdits + the curated toolset keep non-listed MCP tools
+  # (the operator's Gmail/Drive/etc.) out of reach even when loaded.
+  settings: "user"
+  # Extra tool grants beyond the curated developer set — e.g. an MCP server the developer
+  # needs to test web things. VERIFY the exact allow-string on the first live run (the
+  # MCP tool names appear as mcp__<server>__<tool>; the server-level grant is mcp__<server>).
+  extra_tools:
+    - "mcp__plugin_chrome-devtools-mcp_chrome-devtools"   # chrome-devtools (browser testing)
+  # The agora squad the worker joins — its OWN, so a headless one-shot worker never blocks
+  # on the operator's team barrier.
+  squad: "factory-workers"
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:

@@ -74,6 +74,22 @@ def test_claude_super_env_is_allowlisted(monkeypatch):
     assert "--add-dir" in captured["argv"]
 
 
+def test_super_argv_can_load_user_settings_for_plugins_skills_mcp():
+    """settings='user' lets a worker load the agora plugin, the diary skill, and MCP
+    (chrome-devtools) — a full claude instance. Default '' stays isolated."""
+    full = common._super_worker_argv("/ws", common.DEVELOPER_TOOLS, settings="user")
+    assert "--setting-sources user" in " ".join(full)
+    iso = common._super_worker_argv("/ws", common.DEFAULT_SUPER_TOOLS)
+    assert "--setting-sources " in " ".join(iso) and "--setting-sources user" not in " ".join(iso)
+
+
+def test_web_and_skill_in_developer_and_researcher_toolsets():
+    for t in ("WebSearch", "WebFetch", "Skill"):
+        assert t in common.DEVELOPER_TOOLS and t in common.RESEARCHER_TOOLS
+    assert "Bash" in common.DEVELOPER_TOOLS          # developer edits/tests
+    assert "Bash" not in common.RESEARCHER_TOOLS     # researcher investigates, doesn't edit/shell
+
+
 def test_super_argv_runs_as_guest_house_user_with_its_own_claude_and_bash():
     argv = common._super_worker_argv("/ws", common.DEVELOPER_TOOLS, as_user="Agent",
                                      claude_bin="/Users/Agent/.local/bin/claude")
