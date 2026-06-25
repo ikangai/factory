@@ -17,6 +17,7 @@ through an adapter is a near-no-op rename — no new behaviour, no new data shap
 from __future__ import annotations
 
 import abc
+import subprocess
 from typing import Any, Optional
 
 # The runner consumes these existing shapes; the adapter returns them unchanged
@@ -89,3 +90,33 @@ class TargetAdapter(abc.ABC):
         derive the set from that source, so the freeze stays in sync."""
         from ..common import config
         return list((config.target_config().get("frozen_paths") or []))
+
+    def test_command(self) -> list[str]:
+        """Argv for the target's own test suite — the hard correctness gate for a code
+        candidate. Default: the `target.test_command` config list (adapters with a known
+        default override)."""
+        from ..common import config
+        return list(config.target_config().get("test_command") or [])
+
+    def run_tests(self, cwd: str, *, timeout: int = 900) -> tuple[bool, str]:
+        """Run the target's test suite in `cwd` (a candidate checkout). Returns
+        (passed, report-tail). Never crashes — a missing command / timeout / crash is a
+        failed gate, not an exception."""
+        cmd = self.test_command()
+        if not cmd:
+            return (False, "no test_command configured for this target")
+        try:
+            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return (False, f"test run failed: {e}")
+        report = ((p.stdout or "") + (p.stderr or "")).strip()
+        return (p.returncode == 0, report[-4000:])
+
+    def clone(self, dest: str) -> str:
+        """A SELF-CONTAINED git clone of the target into `dest` (its own `.git`, so it
+        works when owned by a different OS user — the Guest-House boundary). Returns
+        `dest`. Clones committed state; the worker branches/commits inside it."""
+        root, _ = self.entry()
+        subprocess.run(["git", "clone", "--quiet", root, dest],
+                       check=True, capture_output=True, text=True)
+        return dest

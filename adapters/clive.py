@@ -118,3 +118,11 @@ class CliveAdapter(TargetAdapter):
         except OSError:
             return super().frozen_paths()
         return _frozen_from_constitution(src)
+
+    def test_command(self) -> list[str]:
+        """clive's own suite: `<python> -m pytest tests/ -q` (conftest puts src/ on the
+        path). Overridable via `target.test_command`."""
+        cfg = config.target_config().get("test_command")
+        if cfg:
+            return list(cfg)
+        return [config.clive_python(), "-m", "pytest", "tests/", "-q"]
