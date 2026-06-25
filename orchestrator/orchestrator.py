@@ -657,7 +657,7 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
     adapter = config.get_adapter()
     sw = config.load_config().get("super_worker", {}) or {}
     as_user = (sw.get("user") or None) if prod else None
-    claude_bin = sw.get("claude_bin") or "claude"
+    claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
     print(f"[develop-once] task: {task!r}")
     print(f"[develop-once] mode: {'PROD (Guest House user=' + str(as_user) + ')' if prod else 'DEV (same-user soft boundary)'}")
 
@@ -739,7 +739,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     if conductor is None:                              # live: the claude conductor (dev/prod user)
         from ..roles.conductor import run_conductor
         as_user = (sw.get("user") or None) if prod else None
-        claude_bin = sw.get("claude_bin") or "claude"
+        claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
         if not prod:
             print("[run] ⚠ DEV mode: the conductor runs as YOU (same-user) with Bash + your "
                   "MCP loaded — supervised only; do not schedule unattended. Use --prod for the "
@@ -784,7 +784,7 @@ def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
     from ..roles import research_feed
     sw = config.load_config().get("super_worker", {}) or {}
     as_user = (sw.get("user") or None) if prod else None
-    claude_bin = sw.get("claude_bin") or "claude"
+    claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
     added = research_feed.propose_directions(store, as_user=as_user, claude_bin=claude_bin)
     print(f"[research-feed] proposed {len(added)} new direction(s):")
     for a in added:
