@@ -46,8 +46,11 @@ def run_shift(store, *, token_budget: int, conductor: Callable, mission: Optiona
 
     # A STOP that tripped DURING the shift overrides the conductor's own status.
     status = "halted" if killswitch.is_halted() else outcome.get("status", "completed")
-    if status != "completed":                        # abnormal end (error/timed_out/halted) →
-        store.requeue_shift_tasks(sh)                # don't strand the tasks it had claimed
+    # ALWAYS requeue work still in-flight at shift end — in this loop a task should be
+    # done/blocked/open by the time the conductor stops; anything left claimed/in_progress
+    # means it wasn't closed (a backgrounded dispatch, a bug, a kill), so a 'completed'
+    # shift would otherwise STRAND it (reap only rescues 'running' shifts).
+    store.requeue_shift_tasks(sh)
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
                     tokens_used=outcome.get("tokens_used", 0))

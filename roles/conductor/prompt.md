@@ -38,6 +38,12 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
      pipeline: it clones the target, runs a developer worker (its own TDD loop), and
      **only merges if the frozen-safety surface is untouched, the target's tests pass, and
      the gate clears** (auto-revert on regression). You cannot merge unsafe code.
+     ‼️ **Run it in the FOREGROUND and WAIT for it to return.** It blocks for several
+     minutes (clone + the developer's TDD loop + the target's full test suite) — that is
+     EXPECTED, not a hang. **NEVER background it (`&`, run_in_background) or expect to be
+     re-invoked when it finishes** — you are ONE headless session, and any dispatch still
+     running when your shift ends is KILLED and its work is LOST. Dispatch one task, wait
+     for its result, close it, then move to the next.
    - On a `"merged"` result: `./bin/factory task done <id> --result <merge_sha>`.
    - On `no_candidate`/`discarded`/`auto_reverted`: refine + retry once; if it still
      won't land, `./bin/factory task block <id> --result "<why>"` (or file an issue) and

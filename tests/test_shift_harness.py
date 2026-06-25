@@ -137,6 +137,24 @@ def test_run_shift_requeues_on_a_returned_error_status(tmp_path, monkeypatch):
         assert res["action"] == "error" and s.get_task("t1")["status"] == "open"
 
 
+def test_run_shift_requeues_unclosed_work_even_on_clean_completion(tmp_path, monkeypatch):
+    """Live-smoke regression: the conductor claimed a task, backgrounded its dispatch, and
+    ended the shift 'completed' without closing it — reap only rescues 'running' shifts, so
+    the task was stranded in_progress forever. A completed shift now requeues it too."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.add_task("t1", "x", source="issue")
+
+        def claims_but_does_not_close(store, *, shift_id, mission, token_budget, wall_clock_s):
+            store.set_task_status("t1", "in_progress", shift_id=shift_id)
+            return {"status": "completed"}      # ends WITHOUT a task done
+
+        res = shiftmod.run_shift(s, token_budget=1, conductor=claims_but_does_not_close)
+        assert res["action"] == "completed"
+        assert s.get_task("t1")["status"] == "open"     # rescued, not stranded in_progress
+
+
 def test_run_shift_post_completion_halt_overrides(tmp_path, monkeypatch):
     """STOP appearing DURING the shift → the post-check downgrades 'completed' to 'halted'."""
     state = {"halted": False}
