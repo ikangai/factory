@@ -1001,6 +1001,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     with Blackboard() as store:
+        # Auto-apply the schema on open. It's all CREATE ... IF NOT EXISTS, so it's
+        # idempotent + additive — a DB created before a table existed (e.g. the conductor
+        # tables) gains it here with no data loss, and the code's schema never drifts from
+        # the live DB. (The bug this fixes: `factory run` against a pre-conductor DB →
+        # "no such table: shifts".)
+        store.init_db()
         if a.cmd == "init":
             cmd_init(store)
         elif a.cmd == "baseline":

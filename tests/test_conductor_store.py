@@ -144,6 +144,28 @@ def test_crashed_shift_is_reconciled_on_resume(tmp_path):
 
 
 # -- digests: the research<->dev feedback loop -------------------------------
+def test_init_db_is_idempotent_and_additive(tmp_path):
+    """Regression (the live smoke run hit 'no such table: shifts'): a DB created before the
+    conductor tables existed must gain them on init_db WITHOUT losing existing data."""
+    import sqlite3
+    dbp = str(tmp_path / "old.db")
+    c = sqlite3.connect(dbp)        # a pre-conductor DB: an old table with real data
+    c.execute("CREATE TABLE champion(id TEXT PRIMARY KEY, spec_path TEXT, "
+              "promoted_at TEXT, scores_json TEXT DEFAULT '{}')")
+    c.execute("INSERT INTO champion(id, spec_path, promoted_at) VALUES('c1','p','t')")
+    c.commit()
+    c.close()
+
+    s = Blackboard(dbp)
+    s.init_db()                     # the auto-migrate (now run on every open in main)
+    names = {r[0] for r in s.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"shifts", "tasks", "mission", "digests", "mission_status"} <= names   # added
+    assert s.get_champion()["id"] == "c1"                                          # data preserved
+    s.init_db()                     # idempotent — safe to re-run
+    assert s.get_champion()["id"] == "c1"
+    s.close()
+
+
 def test_current_shift_id_and_requeue_in_flight_tasks(tmp_path):
     with _store(tmp_path) as s:
         assert s.current_shift_id() is None
