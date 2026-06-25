@@ -120,6 +120,8 @@ factory/
     common.py        the engine: assemble context slice → claude -p → write back
     proposer/ judge/ reporter/ scenario-miner/ researcher/ check-synth/
     presenter/ diarist/ blogger/   (prompt.md per role; reporting/ drives the last three)
+    super_worker/    the builder-reviewer loop preamble for opt-in super-workers (§12)
+    common.py also holds the two transports: isolated `claude_p` + `claude_super`
   research/      literature retrieval for the Researcher role (§12)
     arxiv.py git_repos.py focus.py ingest.py   arXiv + GitHub + MISSION.md material
     staging/         grounded, cited technique briefs (vetting-staged; feed the Proposer)
@@ -400,6 +402,30 @@ blog are generated the same way (not a separate local-model backend), so a singl
 transport — and a single failure mode, handled by the deterministic fallbacks — covers
 the whole system.
 
+**Super-workers (opt-in, `roles.super_workers`).** A role can instead run as a
+*super-worker*: a **full-capability** `claude -p` that keeps a curated toolset —
+Read/Write/Edit/Grep/Glob + **Task/Workflow** for internal fan-out — under
+`--permission-mode acceptEdits`, with its file tools steered into its **own disposable
+sandbox dir** (`--add-dir` + cwd), a **deny-by-default env** (host secrets withheld,
+subscription auth kept), `--max-turns` to bound the loop, and plugins/hooks dropped
+(`--setting-sources ""`) so a headless worker can't hang on a team barrier
+(`roles/common.py:claude_super`). It can run a builder-reviewer loop, spawn subagents,
+and use `/workflows` internally to do its task more thoroughly. The contract to the
+conductor is **unchanged** — a super-worker's *final message* is still the strict role
+output the board parses; everything else is private scratch. Every outer guardrail
+(frozen block, deterministic grader, budget caps, the human promotion gate) is
+untouched, and the isolated one-shot transport stays the **safe default**.
+
+This is a **SOFT boundary**, in the same honest sense as `local_sandbox.py` (§13): with
+the default Bash-less toolset the agent has no shell to escape the sandbox or read host
+files, so its file work is confined and it stays structurally blind to held-out/grader
+internals (they're outside the sandbox). But `--add-dir` does **not** jail Bash, so
+enabling Bash or web tools reopens host-file + network reach and dissolves both the
+confinement and the blindness — those belong behind the **docker hard boundary**
+(`envs/docker_env.py`, `--network none`), which is **not yet wired** for super-workers.
+So: keep Bash off until docker backs it, and don't enable a super-worker for a
+blindness-critical role (the Proposer) under the soft boundary with shell access.
+
 | Role | Reads | Writes | Blindness |
 |------|-------|--------|-----------|
 | **Proposer** | champion `open`, recent **champion** failures, redacted tried-history, **grounded research briefs** (`research/staging`, ungrounded excluded) | one candidate (`proposed`) | never sees grader internals or held-out (incl. held-out score fields, via `scoring.proposer_safe_scores`) |
@@ -509,7 +535,11 @@ Held by construction, and each enforced in more than one place:
    `frozen`; the spec hash detects tampering; the negative safety battery re-checks
    the same intent against the world.
 3. **The proposer is blind** to grader internals and the held-out set (including
-   held-out-derived score fields in the tried-history).
+   held-out-derived score fields in the tried-history). For the isolated transport this
+   is structural (`--tools ""` = no capability to read anything). For a super-worker
+   (§12) it holds only by **confinement** — the default Bash-less toolset, file tools
+   limited to a /tmp sandbox with no held-out — and would degrade to prompt-only if
+   Bash/web were enabled outside the docker hard boundary.
 4. **No autonomous promotion / outbound action.** The only mutation that changes the
    champion is the human `POST /api/promote`; the orchestrator never promotes.
 5. **No self-mod into real source.** `--safe-mode` + `CLIVE_EXPERIMENTAL_SELFMOD=0`
@@ -555,9 +585,15 @@ autonomous promotion. Built on top of that spine since:
   Proposer** arrow.
 - **Corpus intake** (`cmd_intake`): mine → check-synth → #64-validate → auto-promote
   to working (held-out stays human-only).
+- **Super-workers** (§12, opt-in `roles.super_workers`): a role can run as a
+  full-capability `claude -p` that fans out via `/workflows` + subagents in a disposable
+  sandbox. Built at the **soft** boundary (Bash-less default, env allowlist, turn cap).
 
 Still deferred / known gaps:
 
+- **Super-worker hard boundary.** Bash/web for a super-worker need the docker env
+  (`--network none`) wired in; until then they stay off, and the soft boundary is the
+  only one. Live super-worker behavior is also not yet proven end-to-end.
 - **Held-out gate-hardening.** `evaluate_promotion`'s held-out check can pass
   vacuously when no held-out cells are shared, and the held-out-**model** overfit probe
   (`holdout-check`) is not yet run inside `round`/the loop — it remains on demand.

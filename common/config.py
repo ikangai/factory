@@ -83,6 +83,20 @@ def clive_entry() -> tuple[str, str]:
     return root, os.path.join(root, cfg.get("entry", "clive.py"))
 
 
+def is_super_worker(role: str, cfg: dict[str, Any] | None = None) -> bool:
+    """Whether `role` should run as a full-capability SUPER-WORKER (curated tools +
+    acceptEdits in a disposable sandbox) instead of the isolated one-shot `claude -p`.
+
+    Opt-in via `roles.super_workers` in config.yaml — a list of role names, or `"*"`/
+    `"all"` for every role. Empty/absent = the SAFE DEFAULT: every role stays isolated."""
+    cfg = cfg if cfg is not None else load_config()
+    spec = (cfg.get("roles") or {}).get("super_workers") or []
+    if isinstance(spec, str):
+        spec = [spec]
+    names = {str(r).lower() for r in spec}
+    return role.lower() in names or "*" in names or "all" in names
+
+
 def get_adapter(cfg: dict[str, Any] | None = None):
     """Factory: return the TargetAdapter for the configured target.
 

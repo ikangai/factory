@@ -3,7 +3,12 @@ invocation assembles a context slice from the store, calls `claude -p` with the
 role's prompt file, and writes the result back. No role retains state.
 
 Blindness is structural: the proposer's context slice is assembled here and
-deliberately excludes grader internals (checks/) and held-out scenarios.
+deliberately excludes grader internals (checks/) and held-out scenarios. For the
+isolated transport this is enforced by capability removal (`--tools ""`). For a
+super-worker it is enforced instead by CONFINEMENT — the default Bash-less toolset has
+no shell and its file tools are limited to a /tmp sandbox that contains neither the
+grader nor held-out — so blindness survives only as long as Bash/web stay off (else it
+degrades to prompt-only; see the super-worker transport note below).
 """
 from __future__ import annotations
 
@@ -82,6 +87,111 @@ def claude_p(prompt: str, *, timeout: int = 180) -> tuple[str, int, float]:
         return p.stdout, 0, 0.0
     except Exception as e:
         return f"[claude -p failed: {e}]", 0, 0.0
+
+
+# ---------------------------------------------------------------------------
+# Super-worker transport — a FULL-CAPABILITY `claude -p` in a SOFT-bounded sandbox.
+# ---------------------------------------------------------------------------
+# The INVERSE of _isolated_claude_argv: instead of stripping the tools, it ENABLES a
+# curated set (incl. Task/Workflow for internal fan-out) under acceptEdits, with file
+# tools steered into a disposable per-worker workspace (--add-dir + cwd) and a
+# deny-by-default child env. Plugins/hooks stay dropped (--setting-sources "") so a
+# headless worker can't hang on a team barrier, and --max-turns bounds it.
+#
+# BOUNDARY HONESTY (cf. envs/local_sandbox.py): the DEFAULT toolset withholds Bash, so
+# the agent has no shell to escape the workspace or read host files/creds — the file
+# tools (Read/Write/Edit) are confined by cwd + --add-dir to the sandbox, which holds
+# no held-out scenarios and no credentials. That is a reasonable SOFT boundary. It is
+# NOT a hard jail: --add-dir does not confine Bash, and enabling Bash/web (or any tool
+# that shells out) reopens host-file + network reach. For those, run the worker under a
+# HARD boundary — the docker env (envs/docker_env.py, --network none) — which is not yet
+# wired for super-workers. So: keep Bash off unless/until docker backs it.
+import contextlib
+import shutil
+
+# Curated default toolset: fan out (Workflow/Task) + read/write/grep scratch — but NO
+# Bash and NO web. Bash escapes --add-dir and web is an exfil surface; both require the
+# docker hard boundary and must be opted in per role, never defaulted on.
+DEFAULT_SUPER_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Task", "Workflow")
+
+# Deny-by-default child env: only claude's runtime + auth/config families pass through,
+# so host secrets in the environment (known AND unknown) never reach the worker.
+_SUPER_ENV_ALLOW = {
+    "HOME", "PATH", "USER", "LOGNAME", "SHELL", "PWD", "TERM", "COLORTERM",
+    "LANG", "LANGUAGE", "TZ", "TMPDIR", "TMP", "TEMP",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+}
+_SUPER_ENV_ALLOW_PREFIX = ("ANTHROPIC_", "CLAUDE_", "XDG_", "LC_")
+
+
+def _super_worker_env() -> dict:
+    """Build the child env from an explicit allowlist (deny-by-default), preserving
+    claude's runtime + subscription auth while dropping every other host secret."""
+    return {k: v for k, v in os.environ.items()
+            if k in _SUPER_ENV_ALLOW or any(k.startswith(p) for p in _SUPER_ENV_ALLOW_PREFIX)}
+
+
+def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
+                       json_output: bool = True) -> list[str]:
+    argv = ["claude", "-p"]
+    if json_output:
+        argv += ["--output-format", "json"]
+    argv += ["--setting-sources", "",            # no plugins/hooks → no team-barrier hang
+             "--permission-mode", "acceptEdits",  # act without approval prompts…
+             "--add-dir", workdir,                # …file tools steered into the sandbox (soft)
+             "--max-turns", str(max_turns),       # bound the agentic loop (not just wall-clock)
+             "--allowedTools", *list(allowed_tools)]
+    return argv
+
+
+@contextlib.contextmanager
+def super_worker_workspace(prefix: str = "role"):
+    """A disposable workspace for ONE super-worker — a fresh tempdir under /tmp. Two
+    parallel workers get distinct dirs, and with the default (Bash-less) toolset their
+    file tools can't reach outside it, so their work doesn't collide. Auto-removed."""
+    root = tempfile.mkdtemp(prefix=f"sw-{prefix}-", dir="/tmp")
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS,
+                 max_turns: int = 24, timeout: int = 900) -> tuple[str, int, float]:
+    """Run a FULL-CAPABILITY `claude -p` super-worker in `workdir` with a curated
+    toolset + acceptEdits, a deny-by-default env (host secrets withheld; subscription
+    auth kept via ~/.claude), and a turn cap. Returns (text, tokens, cost). Never
+    crashes — a transport error yields the `[claude -p …]` sentinel callers fall back
+    on. SOFT boundary: do not pass Bash/web here without a docker hard boundary."""
+    env = _super_worker_env()   # deny-by-default; host secrets never reach the worker
+    try:
+        p = subprocess.run(_super_worker_argv(workdir, allowed_tools, max_turns=max_turns,
+                                              json_output=True),
+                           input=prompt, capture_output=True, text=True,
+                           timeout=timeout, cwd=workdir, env=env)
+        if p.returncode == 0 and p.stdout.strip():
+            try:
+                obj = json.loads(p.stdout)
+                text = obj.get("result", "") or obj.get("text", "")
+                usage = obj.get("usage", {}) or {}
+                tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+                cost = float(obj.get("total_cost_usd", 0.0) or 0.0)
+                if text:
+                    return text, tokens, cost
+            except json.JSONDecodeError:
+                return p.stdout, 0, 0.0
+        return f"[claude -p super-worker failed: rc={p.returncode}]", 0, 0.0
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return f"[claude -p unavailable: {e}]", 0, 0.0
+
+
+def run_super_worker(prompt: str, *, allowed_tools=DEFAULT_SUPER_TOOLS,
+                     timeout: int = 900) -> tuple[str, int, float]:
+    """Provision a disposable workspace, run one super-worker in it, tear it down.
+    The conductor's contract is unchanged: in = prompt, out = (text, tokens, cost)."""
+    with super_worker_workspace() as wd:
+        return claude_super(prompt, workdir=wd, allowed_tools=allowed_tools, timeout=timeout)
 
 
 def _load_prompt(role: str) -> str:
@@ -224,7 +334,14 @@ def propose(store: Blackboard) -> Optional[str]:
     }
     prompt = _load_prompt("proposer") + "\n\n## CONTEXT (JSON)\n```json\n" \
         + json.dumps(ctx, indent=2, default=str) + "\n```\n"
-    reply, tokens, cost = claude_p(prompt)
+    if config.is_super_worker("proposer"):
+        # Super-worker: a builder-reviewer LOOP that may fan out via /workflows +
+        # subagents in its sandbox, then converge — but its FINAL message must still
+        # be the strict one-change JSON patch parsed below (the conductor's contract).
+        reply, tokens, cost = run_super_worker(
+            _load_prompt("super_worker") + "\n\n" + prompt)
+    else:
+        reply, tokens, cost = claude_p(prompt)
     store.add_budget("proposer", tokens, cost, notes="propose")
 
     patch = _parse_obj(reply)

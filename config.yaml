@@ -68,6 +68,23 @@ spec:
   # change vs its parent. Frozen changes are always rejected.
   max_changed_open_keys: 1
 
+# --- super-workers (full-capability claude -p; opt-in) ----------------------
+# By default every role is an ISOLATED one-shot `claude -p` (no tools/plugins) — the
+# safe, proven path. A role listed here instead runs as a SUPER-WORKER: a
+# full-capability `claude -p` with a curated, Bash-LESS toolset (Read/Write/Edit/Grep/
+# Glob + Task/Workflow for internal fan-out) under --permission-mode acceptEdits, with
+# its file tools steered into its OWN disposable sandbox dir + a deny-by-default env +
+# a turn cap. It can run /workflows + subagents internally but must still return its
+# role's exact contract. The board + conductor + human promotion gate are unchanged.
+#
+# SOFT boundary (like the local env): safe for fan-out, but NOT a hard jail. Enabling
+# Bash/web reopens host-file + network reach — those need the docker hard boundary
+# (not yet wired for super-workers), and never enable a shell-capable super-worker for
+# a blindness-critical role (the proposer) until then.
+roles:
+  # e.g. ["proposer"] or "*" for all. Empty = every role stays isolated (default).
+  super_workers: []
+
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:
   # Retire a held-out scenario once it has influenced this many promotion
