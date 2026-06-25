@@ -37,6 +37,12 @@ def _stub_exec_summary(tmp_path, monkeypatch):
         "factory.reporting.summary.generate_executive_summary",
         lambda *a, **k: "## Discoveries\n(stub)\n\n## Decisions\n(stub)\n\n"
                         "## Proposed next steps\n(stub)\n")
+    # The loop also writes a dev-diary entry (and, when enabled, a blog post); stub
+    # both generators so no real claude -p fires and writes land under tmp FACTORY_ROOT.
+    monkeypatch.setattr("factory.reporting.diary.generate_diary_entry",
+                        lambda *a, **k: ("stub-entry", "I did stub things this run."))
+    monkeypatch.setattr("factory.reporting.blog.generate_blog_post",
+                        lambda *a, **k: ("stub-post", "# Stub headline\n\nStub body."))
     monkeypatch.setattr("factory.common.paths.FACTORY_ROOT", str(tmp_path))
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
@@ -314,6 +320,24 @@ def test_intake_promotions_keep_loop_busy_when_research_dry(store, monkeypatch):
     assert summary["rounds_run"] == 4
     assert summary["stop_reason"] == "max_rounds reached"
     assert n["i"] >= 1   # intake kept producing work
+
+
+def test_dry_run_writes_no_diary_or_blog(store, monkeypatch):
+    """A --dry-run must not write a diary entry or blog post (nothing invoked,
+    nothing spent) — guards the `if not dry_run` on both presentation blocks."""
+    import os
+
+    from factory.common import paths
+    _install_promotion_spy(monkeypatch, store)
+    calls: list = []
+    _patch_steps(monkeypatch, propose_returns=["cand-0"], gate_clears=[True], calls=calls)
+
+    summary = autonomy.cmd_autonomous(store, "mission", max_rounds=1, dry_run=True,
+                                      do_diary=True, do_blog=True)
+
+    assert not os.path.exists(os.path.join(paths.FACTORY_ROOT, ".dev-diary"))
+    assert not os.path.exists(os.path.join(paths.FACTORY_ROOT, "blog"))
+    assert "diary_path" not in summary and "blog_path" not in summary
 
 
 def test_no_intake_flag_skips_intake(store, monkeypatch):

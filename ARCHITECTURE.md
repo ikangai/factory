@@ -118,7 +118,8 @@ factory/
     multi_clive.py   run_multi_clive: the Rooms (clive-to-clive) path
   roles/         stateless claude -p workers (§12)
     common.py        the engine: assemble context slice → claude -p → write back
-    proposer/ judge/ reporter/ scenario-miner/ researcher/ check-synth/  (prompt.md + run.py)
+    proposer/ judge/ reporter/ scenario-miner/ researcher/ check-synth/
+    presenter/ diarist/ blogger/   (prompt.md per role; reporting/ drives the last three)
   research/      literature retrieval for the Researcher role (§12)
     arxiv.py git_repos.py focus.py ingest.py   arXiv + GitHub + MISSION.md material
     staging/         grounded, cited technique briefs (vetting-staged; feed the Proposer)
@@ -275,10 +276,14 @@ exhausted* (consecutive idle rounds that surfaced neither a new brief nor a prom
 It **never promotes** — there is no promote call in this module; every guardrail (gain
 governor, per-round BudgetGuard + circuit breakers, held-out leakage retirement,
 divergence/Goodhart checks, role isolation) is the same one the manual commands use.
-It ends by writing a plain-language executive summary (Discoveries / Decisions / Next
-steps) to `updates/YYYY-MM-DD-HHMM.md`. `factory daily` is this loop on a launchd 09:00
-schedule with a larger bounded budget; `--dry-run` prints the per-round plan, invoking
-nothing.
+It ends by writing three read-only **presentation** artifacts (best-effort, never
+fatal): a plain-language executive summary (Discoveries / Decisions / Next steps) →
+`updates/YYYY-MM-DD-HHMM.md`; a first-person **dev-diary** entry narrating what all
+the `claude -p` roles did, in the diary skill's voice → `.dev-diary/`; and (on the
+daily cadence) an accessible **blog post** for a broad audience → `blog/`. `factory
+daily` is this loop on a launchd 09:00 schedule with a larger bounded budget (and
+`do_blog=True`); `factory diary` / `factory blog` regenerate either on demand;
+`--dry-run` prints the per-round plan, invoking nothing.
 
 ---
 
@@ -392,6 +397,13 @@ Durable instructions live in `roles/<role>/prompt.md`; the engine is `roles/comm
 | **Scenario Miner** | `~/.clive_session_log.jsonl` | candidate scenarios → `scenarios/staging/` | never enters corpus/held-out without vetting (intake auto-promotes to **working** only after #64 validation; §17.8) |
 | **Researcher** | fetched arXiv papers + GitHub repos + `MISSION.md` material | cited technique briefs → `research/staging/` | distils only fetched text (no web tools); briefs *feed* the Proposer, never auto-applied |
 | **Check-Synth** | a staged scenario's goal + seed files | a deterministic `acceptance()` module, #64-validated | a wrong/guessed oracle is rejected before it can grade (Goodhart backstop) |
+| **Diarist** | the run's gathered state (same as the Presenter) | a first-person dev-diary entry → `.dev-diary/` | read-only; narrates, never promotes; deterministic fallback |
+| **Blogger** | the run's gathered state (same as the Presenter) | an accessible blog post → `blog/` | read-only; grounded only in the data, no invention; deterministic fallback |
+
+The **Presenter**, **Diarist**, and **Blogger** are the three *presentation* roles —
+all read-only over the same `gather_summary_data` and all degrade to a deterministic
+artifact if `claude -p` is unavailable, so a broken transport yields an honest
+fallback rather than a fake-success file (`reporting/{summary,diary,blog}.py`).
 
 The Proposer is a thin wrapper by construction (one field patch); a brief only
 supplies optional, cited direction — recorded failures still take priority and a

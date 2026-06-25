@@ -601,6 +601,44 @@ def cmd_report(store: Blackboard, mission: Optional[str] = None) -> str:
     return out_path
 
 
+def cmd_diary(store: Blackboard, mission: Optional[str] = None) -> str:
+    """Write a first-person dev-diary entry (diary skill voice) narrating the latest
+    autonomous work to `.dev-diary/<date>-<slug>.md`. Read-only over the store."""
+    from datetime import datetime
+    from ..reporting.diary import generate_diary_entry
+    from .autonomy import _unique_path
+
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    slug, entry = generate_diary_entry(store, since=stamp, mission=mission)
+    ddir = os.path.join(paths.FACTORY_ROOT, ".dev-diary")
+    os.makedirs(ddir, exist_ok=True)
+    path = _unique_path(os.path.join(ddir, f"{stamp}-{slug}.md"))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(entry if entry.endswith("\n") else entry + "\n")
+    print(entry)
+    print(f"\n[diary] saved to {os.path.relpath(path, paths.FACTORY_ROOT)}")
+    return path
+
+
+def cmd_blog(store: Blackboard, mission: Optional[str] = None) -> str:
+    """Write an accessible, Ars-Technica-style blog post about the ongoing autonomous
+    work to `blog/<date>-<slug>.md`. Read-only over the store."""
+    from datetime import datetime
+    from ..reporting.blog import generate_blog_post
+    from .autonomy import _unique_path
+
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    slug, post = generate_blog_post(store, since=stamp, mission=mission)
+    bdir = os.path.join(paths.FACTORY_ROOT, "blog")
+    os.makedirs(bdir, exist_ok=True)
+    path = _unique_path(os.path.join(bdir, f"{stamp}-{slug}.md"))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(post if post.endswith("\n") else post + "\n")
+    print(post)
+    print(f"\n[blog] saved to {os.path.relpath(path, paths.FACTORY_ROOT)}")
+    return path
+
+
 # --- the 09:00 daily update -------------------------------------------------
 # "Larger" daily run (operator choice): several rounds + a generous-but-bounded
 # token ceiling so the unattended run makes real headway without runaway spend.
@@ -634,8 +672,11 @@ def cmd_daily(store: Blackboard) -> dict:
     print(f"[daily] mission: {mission!r}")
     print(f"[daily] budget: max_rounds={max_rounds} token_budget="
           f"{token_budget if token_budget is not None else '∞'}")
+    # The daily run also writes a dev-diary entry (always) and an accessible blog
+    # post (the once-a-day cadence) about the day's autonomous work.
     return autonomy.cmd_autonomous(store, mission, max_rounds=max_rounds,
-                                   token_budget=token_budget, do_research=True)
+                                   token_budget=token_budget, do_research=True,
+                                   do_diary=True, do_blog=True)
 
 
 def cmd_schedule_install() -> None:
@@ -737,6 +778,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     rep = sub.add_parser("report")
     rep.add_argument("--mission", default=None,
                      help="optional mission statement to frame the executive summary")
+    dia = sub.add_parser("diary")       # first-person dev-diary entry → .dev-diary/
+    dia.add_argument("--mission", default=None)
+    blg = sub.add_parser("blog")        # accessible Ars-Technica-style post → blog/
+    blg.add_argument("--mission", default=None)
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sub.add_parser("schedule-uninstall")
@@ -752,6 +797,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="skip the researcher step (no grounded briefs staged)")
     au.add_argument("--no-intake", action="store_true",
                     help="skip the intake step (no mining/auto-promotion of scenarios)")
+    au.add_argument("--no-diary", action="store_true",
+                    help="skip writing the dev-diary entry at the end of the run")
+    au.add_argument("--blog", action="store_true",
+                    help="also write an accessible blog post about the run")
     au.add_argument("--dry-run", action="store_true",
                     help="print the per-round PLAN without invoking any role/LLM/subprocess")
     a = ap.parse_args(argv)
@@ -807,6 +856,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_status(store)
         elif a.cmd == "report":
             cmd_report(store, mission=a.mission)
+        elif a.cmd == "diary":
+            cmd_diary(store, mission=a.mission)
+        elif a.cmd == "blog":
+            cmd_blog(store, mission=a.mission)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":
@@ -814,7 +867,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_autonomous(store, a.mission, max_rounds=a.max_rounds,
                            token_budget=a.token_budget,
                            do_research=not a.no_research,
-                           do_intake=not a.no_intake, dry_run=a.dry_run)
+                           do_intake=not a.no_intake,
+                           do_diary=not a.no_diary, do_blog=a.blog,
+                           dry_run=a.dry_run)
     return 0
 
 

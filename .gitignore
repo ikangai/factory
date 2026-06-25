@@ -14,3 +14,7 @@ scenarios/staging/*.yaml
 research/staging/*.yaml
 # generated executive summaries (the daily 09:00 update); keep the dir, not the churn
 updates/*.md
+# generated blog posts (the factory's accessible write-ups); keep the dir, not the churn
+blog/*.md
+# the factory's own development diary (narrative entries + raw events) — local only
+.dev-diary/

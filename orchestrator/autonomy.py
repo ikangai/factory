@@ -58,7 +58,7 @@ def _mission_query(mission: str) -> str:
 def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
                    token_budget: Optional[int] = None, do_research: bool = True,
                    do_intake: bool = True, intake_limit: int = 10,
-                   intake_max_new: int = 3,
+                   intake_max_new: int = 3, do_diary: bool = True, do_blog: bool = False,
                    research_every: int = 3, dry_run: bool = False,
                    base_max_papers: int = 8, base_max_repos: int = 6,
                    max_research_breadth: int = 4,
@@ -339,7 +339,65 @@ def cmd_autonomous(store: Blackboard, mission: str, *, max_rounds: int,
         except Exception as e:  # noqa: BLE001 — presentation is never fatal to a run
             print(f"[report] executive summary skipped: {e}", file=sys.stderr)
 
+    # ----------------------------------------------------------------------
+    # narrative presentation outputs (best-effort, never fatal):
+    #  * diary  — a first-person dev-diary entry narrating what all the claude -p
+    #             roles did this run, in the diary skill's voice → .dev-diary/
+    #  * blog   — an accessible Ars-Technica-style post about the work → blog/
+    # Both reuse the same gathered data and degrade to a deterministic artifact.
+    # ----------------------------------------------------------------------
+    if not dry_run and do_diary:
+        try:
+            from datetime import datetime
+            import os
+            from ..common import paths
+            from ..reporting.diary import generate_diary_entry
+
+            stamp = datetime.now().strftime("%Y-%m-%d")
+            slug, entry = generate_diary_entry(store, since=stamp, mission=mission)
+            ddir = os.path.join(paths.FACTORY_ROOT, ".dev-diary")
+            os.makedirs(ddir, exist_ok=True)
+            dpath = _unique_path(os.path.join(ddir, f"{stamp}-{slug}.md"))
+            with open(dpath, "w", encoding="utf-8") as fh:
+                fh.write(entry if entry.endswith("\n") else entry + "\n")
+            print(f"[diary] wrote {os.path.relpath(dpath, paths.FACTORY_ROOT)}")
+            summary["diary_path"] = dpath
+        except Exception as e:  # noqa: BLE001
+            print(f"[diary] skipped: {e}", file=sys.stderr)
+
+    if not dry_run and do_blog:
+        try:
+            from datetime import datetime
+            import os
+            from ..common import paths
+            from ..reporting.blog import generate_blog_post
+
+            stamp = datetime.now().strftime("%Y-%m-%d")
+            slug, post = generate_blog_post(store, since=stamp, mission=mission)
+            bdir = os.path.join(paths.FACTORY_ROOT, "blog")
+            os.makedirs(bdir, exist_ok=True)
+            bpath = _unique_path(os.path.join(bdir, f"{stamp}-{slug}.md"))
+            with open(bpath, "w", encoding="utf-8") as fh:
+                fh.write(post if post.endswith("\n") else post + "\n")
+            print(f"[blog] wrote {os.path.relpath(bpath, paths.FACTORY_ROOT)}")
+            summary["blog_path"] = bpath
+        except Exception as e:  # noqa: BLE001
+            print(f"[blog] skipped: {e}", file=sys.stderr)
+
     return summary
+
+
+def _unique_path(path: str) -> str:
+    """`path` if free, else `<stem>-2.md`, `-3`, … — so two same-day runs with the
+    same slug don't clobber each other (the diary skill's collision convention)."""
+    import os
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(f"{stem}-{n}{ext}"):
+        n += 1
+    return f"{stem}-{n}{ext}"
 
 
 def _research_count(store: Blackboard) -> int:
