@@ -9,12 +9,70 @@ it exactly.
 """
 from __future__ import annotations
 
+import ast
+import os
 from typing import Optional
 
 from .base import TargetAdapter
 from ..common import clive_invoke, config, spec_applier
 from ..common.spec_applier import AppliedSpec
 from ..common.clive_invoke import CliveResult
+
+# clive source lives under <repo>/src/clive/; .clive/ governance + .env are at the root.
+_SRC_PREFIX = "src/clive"
+# The command blocklist + sandbox: ALWAYS frozen, regardless of clive's tier table
+# (the user's explicit add to the constitution-derived set). Repo-root-relative.
+_SAFETY_EXTRAS = (f"{_SRC_PREFIX}/execution/runtime.py", f"{_SRC_PREFIX}/sandbox/run.sh")
+# Tiers the factory may never touch — the rest (CORE/STANDARD/OPEN) it may develop.
+_FROZEN_TIERS = ("IMMUTABLE", "GOVERNANCE")
+
+
+def _extract_file_tiers(constitution_src: str) -> list:
+    """Pull the FILE_TIERS literal out of clive's selfmod/constitution.py by AST (no
+    importing clive). Returns [] if it can't be parsed."""
+    try:
+        tree = ast.parse(constitution_src)
+    except SyntaxError:
+        return []
+    for node in ast.walk(tree):
+        # Handle both `FILE_TIERS = [...]` (Assign) and the annotated
+        # `FILE_TIERS: list[...] = [...]` (AnnAssign — clive's real form).
+        value = None
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "FILE_TIERS" for t in node.targets):
+            value = node.value
+        elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+              and node.target.id == "FILE_TIERS"):
+            value = node.value
+        if value is not None:
+            try:
+                return list(ast.literal_eval(value))
+            except (ValueError, SyntaxError):
+                return []
+    return []
+
+
+def _resolve_clive_pattern(pattern: str) -> str:
+    """clive's FILE_TIERS patterns are relative to PROJECT_ROOT (src/clive/), except
+    repo-root dotfiles/dirs (.clive, .env, .github). Resolve to repo-root-relative."""
+    if pattern.startswith("."):
+        return pattern
+    return f"{_SRC_PREFIX}/{pattern}"
+
+
+def _frozen_from_constitution(constitution_src: str) -> list[str]:
+    """clive's frozen surface = its IMMUTABLE + GOVERNANCE FILE_TIERS (resolved to
+    repo-root paths) + the always-frozen command-blocklist/sandbox. Even if the
+    constitution can't be parsed, the hard safety files are still frozen."""
+    frozen = set(_SAFETY_EXTRAS)
+    for entry in _extract_file_tiers(constitution_src):
+        try:
+            pattern, tier = entry
+        except (ValueError, TypeError):
+            continue
+        if tier in _FROZEN_TIERS:
+            frozen.add(_resolve_clive_pattern(pattern))
+    return sorted(frozen)
 
 
 class CliveAdapter(TargetAdapter):
@@ -46,3 +104,17 @@ class CliveAdapter(TargetAdapter):
 
     def interpreter(self) -> str:
         return config.clive_python()
+
+    # -- code-development seam: derive the frozen surface from clive's constitution --
+    def frozen_paths(self) -> list[str]:
+        """Read clive's OWN constitution (selfmod/constitution.py's FILE_TIERS) and
+        freeze its IMMUTABLE + GOVERNANCE tiers + the command-blocklist/sandbox. Stays
+        in sync with clive's governance; falls back to the config list if unreadable."""
+        root, _ = config.clive_entry()
+        const = os.path.join(root, _SRC_PREFIX, "selfmod", "constitution.py")
+        try:
+            with open(const, "r", encoding="utf-8") as fh:
+                src = fh.read()
+        except OSError:
+            return super().frozen_paths()
+        return _frozen_from_constitution(src)

@@ -77,3 +77,15 @@ class TargetAdapter(abc.ABC):
     @abc.abstractmethod
     def interpreter(self) -> str:
         """Return the interpreter path used to run the target."""
+
+    # -- code-development seam (the autonomous code factory; design doc 2026-06-25) --
+    # Concrete defaults so existing adapters keep working; targets that develop their
+    # own source override them.
+    def frozen_paths(self) -> list[str]:
+        """Repo-root-relative paths/globs the factory may NEVER modify — the target's
+        SAFETY surface. A candidate code diff touching any of these is auto-rejected
+        before grading (common.frozen_source). Default: the `target.frozen_paths`
+        config list. A target that declares its own safety governance overrides this to
+        derive the set from that source, so the freeze stays in sync."""
+        from ..common import config
+        return list((config.target_config().get("frozen_paths") or []))
