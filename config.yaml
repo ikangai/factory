@@ -97,8 +97,8 @@ roles:
 #        <operator> ALL=(Agent) NOPASSWD: <that claude path>
 # Leave `user` empty to keep developer workers OFF until the Guest House is wired.
 super_worker:
-  user: "Agent"
-  claude_bin: ""        # e.g. /Users/Agent/.local/bin/claude — set once you locate it (step 1)
+  user: "agent"
+  claude_bin: "/Users/agent/.local/bin/claude"   # agent's OWN claude (a path agent can execute)
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:
