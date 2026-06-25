@@ -688,6 +688,60 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
             shutil.rmtree(work, ignore_errors=True)   # throwaway clone never touches the real target
 
 
+def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
+             source: str = "human", result: str = "", status: Optional[str] = None) -> None:
+    """The backlog CLI the conductor drives: `task list [--status open]`,
+    `task add "<title>"`, `task done <id> [--result <sha>]`."""
+    if action == "list":
+        for t in store.list_tasks(status=status):
+            print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
+    elif action == "add":
+        import uuid
+        tid = f"task-{uuid.uuid4().hex[:8]}"
+        store.add_task(tid, rest or "(untitled)", source=source)
+        print(f"[task] added {tid}: {rest}")
+    elif action == "done":
+        store.set_task_status(rest, "done", result=result)
+        print(f"[task] done {rest}")
+
+
+def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
+            wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
+            conductor=None) -> dict:
+    """The conductor loop entry point (design step 6): run ONE bounded shift, then assess
+    the mission and surface the status. State persists in the store, so each `run` resumes
+    where the last left off — schedule it (launchd) for the unattended daily cadence."""
+    from .shift import run_shift
+    from .mission import assess
+
+    cfg = config.load_config()
+    auton = cfg.get("autonomy", {}) or {}
+    token_budget = token_budget or int(auton.get("daily_token_budget", 500000))
+    wall_clock_s = wall_clock_s or int(auton.get("shift_wall_clock_s", 1800))
+    sw = cfg.get("super_worker", {}) or {}
+
+    if conductor is None:                              # live: the claude conductor (dev/prod user)
+        from ..roles.conductor import run_conductor
+        as_user = (sw.get("user") or None) if prod else None
+        claude_bin = sw.get("claude_bin") or "claude"
+        conductor = lambda st, **kw: run_conductor(st, as_user=as_user, claude_bin=claude_bin, **kw)
+
+    res = run_shift(store, token_budget=token_budget, conductor=conductor,
+                    mission=mission, wall_clock_s=wall_clock_s)
+    print(f"[run] shift {res.get('shift_id')}: {res['action']} "
+          f"(reaped {res.get('reaped', 0)} crashed shift(s))")
+
+    if res.get("shift_id"):                            # a shift actually ran → assess the mission
+        shipped = len([t for t in store.list_tasks(status="done")
+                       if t.get("shift_id") == res["shift_id"]])
+        m = assess(store, shift_id=res["shift_id"], shipped_count=shipped, plateau_k=plateau_k)
+        print(f"[run] mission status: {m['status']} — {m['rationale']}")
+        if m["recommend_stop"]:
+            print(f"[run] ⏸  STEADY STATE for {plateau_k} shifts — nothing left toward the "
+                  f"mission. Awaiting a mission revision (re-steer: factory run --mission \"…\").")
+    return res
+
+
 def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
     """The conductor-loop research feed (distinct from the spec-side `research`): a web
     researcher proposes bounded directions toward the active mission — outcome-informed by
@@ -744,15 +798,18 @@ def cmd_daily(store: Blackboard) -> dict:
                                    do_diary=True, do_blog=True)
 
 
-def cmd_schedule_install() -> None:
-    """Install + load the launchd agent that fires `factory daily` at 09:00 daily.
-    Per-user, no sudo; reversible via `factory schedule-uninstall`."""
+def cmd_schedule_install(*, loop: bool = False) -> None:
+    """Install + load the launchd agent at 09:00 daily. Default: `factory daily` (the
+    spec-side update). --loop: `factory run` (the autonomous CONDUCTOR loop). Per-user,
+    no sudo; reversible via `factory schedule-uninstall [--loop]`."""
     import subprocess
     from . import scheduling
 
+    command = ("run",) if loop else ("daily",)
+    label = scheduling.RUN_LABEL if loop else scheduling.PLIST_LABEL
     python_bin = sys.executable or "python3"
-    xml = scheduling.launchd_plist(paths.FACTORY_ROOT, python_bin)
-    path = scheduling.plist_path()
+    xml = scheduling.launchd_plist(paths.FACTORY_ROOT, python_bin, command=command, label=label)
+    path = scheduling.plist_path(label)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     os.makedirs(paths.LOGS_DIR, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -765,27 +822,26 @@ def cmd_schedule_install() -> None:
         print(f"[schedule] plist written to {path} — load manually: "
               f"launchctl load {path}", file=sys.stderr)
         return
-    print(f"[schedule] installed {scheduling.PLIST_LABEL}: `factory daily` runs at "
-          "09:00 every day.")
+    print(f"[schedule] installed {label}: `factory {command[0]}` runs at 09:00 every day.")
     print(f"[schedule] plist : {path}")
     print(f"[schedule] python: {python_bin}")
     print(f"[schedule] logs  : "
-          f"{os.path.join(paths.LOGS_DIR, 'daily-launchd.{out,err}.log')}")
-    print("[schedule] uninstall: factory schedule-uninstall")
+          f"{os.path.join(paths.LOGS_DIR, command[0] + '-launchd.{out,err}.log')}")
+    print(f"[schedule] uninstall: factory schedule-uninstall{' --loop' if loop else ''}")
 
 
-def cmd_schedule_uninstall() -> None:
-    """Unload + remove the launchd daily agent."""
+def cmd_schedule_uninstall(*, loop: bool = False) -> None:
+    """Unload + remove the launchd agent (the conductor loop with --loop, else daily)."""
     import subprocess
     from . import scheduling
 
-    path = scheduling.plist_path()
+    label = scheduling.RUN_LABEL if loop else scheduling.PLIST_LABEL
+    path = scheduling.plist_path(label)
     subprocess.run(["launchctl", "unload", path], capture_output=True)
     existed = os.path.exists(path)
     if existed:
         os.remove(path)
-    print(f"[schedule] {'removed' if existed else 'no plist at'} {path}; "
-          f"{scheduling.PLIST_LABEL} unloaded.")
+    print(f"[schedule] {'removed' if existed else 'no plist at'} {path}; {label} unloaded.")
 
 
 def cmd_status(store: Blackboard) -> None:
@@ -856,9 +912,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     rfe = sub.add_parser("research-feed")   # propose backlog directions toward the mission
     rfe.add_argument("--prod", action="store_true",
                      help="run the researcher in the Guest-House user (default: dev-mode, same-user)")
+    run = sub.add_parser("run")             # ONE conductor shift (the autonomous loop entry)
+    run.add_argument("--mission", default=None, help="set/replace the mission (else use the active one)")
+    run.add_argument("--budget", type=int, default=None, help="token budget for the shift")
+    run.add_argument("--wall-clock", type=int, default=None, help="hard wall-clock seconds for the shift")
+    run.add_argument("--prod", action="store_true", help="run the conductor in the Guest-House user")
+    tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
+    tsk.add_argument("action", choices=["list", "add", "done"])
+    tsk.add_argument("rest", nargs="?", help='title (add) or task id (done)')
+    tsk.add_argument("--source", default="human")
+    tsk.add_argument("--result", default="")
+    tsk.add_argument("--status", default=None, help="filter for `task list`")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
-    sub.add_parser("schedule-install")  # install the launchd 09:00 agent
-    sub.add_parser("schedule-uninstall")
+    sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
+    sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
+    scu = sub.add_parser("schedule-uninstall")
+    scu.add_argument("--loop", action="store_true", help="uninstall the conductor-loop agent")
     sub.add_parser("demo")
     au = sub.add_parser("autonomous")
     au.add_argument("--mission", required=True,
@@ -891,10 +960,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     # schedule (un)install touch launchd, not the store — handle before connecting.
     if a.cmd == "schedule-install":
-        cmd_schedule_install()
+        cmd_schedule_install(loop=a.loop)
         return 0
     if a.cmd == "schedule-uninstall":
-        cmd_schedule_uninstall()
+        cmd_schedule_uninstall(loop=a.loop)
         return 0
 
     with Blackboard() as store:
@@ -938,6 +1007,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_develop_once(store, a.task, prod=a.prod, keep=a.keep)
         elif a.cmd == "research-feed":
             cmd_research_feed(store, prod=a.prod)
+        elif a.cmd == "run":
+            cmd_run(store, mission=a.mission, token_budget=a.budget,
+                    wall_clock_s=a.wall_clock, prod=a.prod)
+        elif a.cmd == "task":
+            cmd_task(store, a.action, rest=a.rest, source=a.source,
+                     result=a.result, status=a.status)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

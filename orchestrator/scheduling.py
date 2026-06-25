@@ -11,30 +11,34 @@ from __future__ import annotations
 import os
 import plistlib
 
-PLIST_LABEL = "com.harness-factory.daily"
+PLIST_LABEL = "com.harness-factory.daily"   # the spec-side 09:00 update (`factory daily`)
+RUN_LABEL = "com.harness-factory.run"        # the autonomous conductor loop (`factory run`)
 
 
-def plist_path() -> str:
+def plist_path(label: str = PLIST_LABEL) -> str:
     """Per-user LaunchAgent path (runs as the logged-in user; no sudo)."""
-    return os.path.expanduser(f"~/Library/LaunchAgents/{PLIST_LABEL}.plist")
+    return os.path.expanduser(f"~/Library/LaunchAgents/{label}.plist")
 
 
 def launchd_plist(factory_root: str, python_bin: str = "python3",
-                  hour: int = 9, minute: int = 0) -> str:
-    """Return the LaunchAgent plist XML that runs `<factory_root>/bin/factory daily`
-    at hour:minute every day. stdout/stderr land in <factory_root>/logs so the human
-    can inspect the night's run; the run itself NEVER promotes (autonomy guarantee).
-    `python_bin` is propagated as FACTORY_PYTHON so the agent runs under an
-    interpreter that has the factory's deps (launchd's PATH is minimal)."""
+                  hour: int = 9, minute: int = 0, command=("daily",),
+                  label: str = PLIST_LABEL) -> str:
+    """Return the LaunchAgent plist XML that runs `<factory_root>/bin/factory <command>`
+    at hour:minute every day. Defaults to `factory daily` (the spec-side update); pass
+    command=("run",) / label=RUN_LABEL to schedule the autonomous CONDUCTOR loop instead.
+    stdout/stderr land in <factory_root>/logs so the human can inspect the run.
+    `python_bin` is propagated as FACTORY_PYTHON so the agent runs under an interpreter
+    that has the factory's deps (launchd's PATH is minimal)."""
     log_dir = os.path.join(factory_root, "logs")
+    tag = command[0]   # 'daily' | 'run' — keeps the two agents' logs separate
     spec = {
-        "Label": PLIST_LABEL,
-        "ProgramArguments": [os.path.join(factory_root, "bin", "factory"), "daily"],
+        "Label": label,
+        "ProgramArguments": [os.path.join(factory_root, "bin", "factory"), *command],
         "WorkingDirectory": factory_root,
         "EnvironmentVariables": {"FACTORY_PYTHON": python_bin},
         "StartCalendarInterval": {"Hour": int(hour), "Minute": int(minute)},
         "RunAtLoad": False,
-        "StandardOutPath": os.path.join(log_dir, "daily-launchd.out.log"),
-        "StandardErrorPath": os.path.join(log_dir, "daily-launchd.err.log"),
+        "StandardOutPath": os.path.join(log_dir, f"{tag}-launchd.out.log"),
+        "StandardErrorPath": os.path.join(log_dir, f"{tag}-launchd.err.log"),
     }
     return plistlib.dumps(spec).decode("utf-8")
