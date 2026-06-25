@@ -24,6 +24,16 @@ intentional checkpoint.
 The hard part is **measurement**, not generation. The architecture spends its
 complexity on the grader and keeps the proposer a thin wrapper.
 
+**North star (where this is heading).** The end goal is an **autonomous code factory**:
+the factory doesn't just tune clive's spec — it **builds and programs the target**
+(spec + source + features), with a fleet of collaborating super-workers, **auto-merge**
+behind automated gates (no human promotion gate), and the human **steering via the
+mission** only. clive is target #1; other repos follow. The human gate described below
+is today's state and the trust floor we build *up* from; the full design — the developer
+super-worker, the target-test gate, the **frozen safety surface**, git-reversibility +
+auto-revert, and the kill switch that make full autonomy safe — is in
+`docs/plans/2026-06-25-autonomous-code-factory.md`.
+
 ---
 
 ## 2. Design principles (these shaped the structure)
