@@ -141,6 +141,12 @@ class TargetAdapter(abc.ABC):
         subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", dest],
                        check=True, capture_output=True, text=True)
 
+    def default_branch(self, repo: str) -> str:
+        """The repo's current branch name (captured before a developer worker branches
+        off it, to diff the candidate against)."""
+        return subprocess.run(["git", "-C", repo, "branch", "--show-current"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+
     def changed_paths(self, repo: str, *refs: str) -> list[str]:
         """The files a candidate changes, via `git diff --name-only -z` — NUL-delimited
         and NEVER quoted, so it's robust where parsing diff text is not (the frozen-
