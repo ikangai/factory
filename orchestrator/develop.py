@@ -57,8 +57,12 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     conductor to reopen/refine next shift). Returns the count shipped. `develop_fn` is
     injectable for tests so no live worker spawns."""
     run = develop_fn or develop_task
+    claimed = store.tasks_in_flight(shift_id)        # the in_progress tasks claimed this shift
     shipped = 0
-    for task in store.tasks_in_flight(shift_id):     # the in_progress tasks claimed this shift
+    for i, task in enumerate(claimed, 1):
+        print(f"[execute] task {i}/{len(claimed)} {task['id']}: {task['title']} "
+              f"— running the gated pipeline (clone + developer TDD + the target's test "
+              f"suite; a few minutes, no live output)…", flush=True)
         text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
         try:
             res = run(text, as_user=as_user, claude_bin=claude_bin)
@@ -68,9 +72,11 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
             shipped += 1
+            print(f"[execute]   → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
         else:                                         # no_candidate/discarded/auto_reverted/error
             store.set_task_status(task["id"], "blocked", result=res.get("action", "no result"),
                                   shift_id=shift_id)
+            print(f"[execute]   → {res.get('action', 'no result')} — blocked", flush=True)
     return shipped
 
 
