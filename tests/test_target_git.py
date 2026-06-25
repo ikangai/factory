@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from factory.adapters.clive import CliveAdapter
 
 
@@ -23,6 +25,21 @@ def _new_repo(path):
 def _head_branch(repo):
     return subprocess.run(["git", "-C", repo, "branch", "--show-current"],
                           capture_output=True, text=True).stdout.strip()
+
+
+def test_changed_paths_via_name_only_z_is_unquoted(tmp_path):
+    """The robust frozen-check source: --name-only -z returns real, unquoted paths even
+    for a name with a space (where diff-text parsing would quote it)."""
+    repo = _new_repo(str(tmp_path / "r"))
+    (Path(repo) / "a.txt").write_text("1\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "root")
+    main = _head_branch(repo)
+    _git(repo, "checkout", "-qb", "feature")
+    (Path(repo) / "weird name.py").write_text("x\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "feat")
+
+    paths = CliveAdapter().changed_paths(repo, main, "feature")
+    assert paths == ["weird name.py"]            # real path, unquoted, NUL-split
 
 
 def test_merge_branch_brings_changes_to_main(tmp_path):
@@ -73,3 +90,25 @@ def test_revert_a_merge_commit_undoes_the_merge(tmp_path):
     assert os.path.exists(os.path.join(repo, "b.txt"))     # merged in…
     adapter.revert_commit(repo, merge_sha)
     assert not os.path.exists(os.path.join(repo, "b.txt"))  # …and the merge is undone
+
+
+def test_merge_conflict_aborts_and_raises_leaving_a_clean_tree(tmp_path):
+    """A conflicting candidate must NOT leave the repo stuck mid-merge — merge_branch
+    aborts the half-merge and raises, so the loop can discard cleanly."""
+    repo = _new_repo(str(tmp_path / "r"))
+    (Path(repo) / "a.txt").write_text("base\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "root")
+    main = _head_branch(repo)
+    _git(repo, "checkout", "-qb", "feature")
+    (Path(repo) / "a.txt").write_text("FEATURE\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "feat")
+    _git(repo, "checkout", "-q", main)
+    (Path(repo) / "a.txt").write_text("MAIN\n")              # same line diverges → conflict
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "main-edit")
+
+    with pytest.raises(Exception):
+        CliveAdapter().merge_branch(repo, "feature")
+    assert not os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD"))   # half-merge aborted
+    status = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                            capture_output=True, text=True).stdout
+    assert status.strip() == ""                                          # clean tree

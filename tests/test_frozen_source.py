@@ -21,6 +21,17 @@ def test_diff_parser_extracts_changed_paths():
     assert fz.changed_paths_from_diff(diff) == ["clive/sandbox/run.sh", "clive/tui.py"]
 
 
+def test_parses_quoted_headers_so_special_paths_are_not_hidden():
+    """git quotes special/non-ASCII paths (core.quotePath); an unquoted-only parser
+    returns [] and the frozen check passes blindly. The parser must still see them."""
+    diff = ('diff --git "a/clive/sandbox/r un.sh" "b/clive/sandbox/r un.sh"\n'
+            '--- "a/clive/sandbox/r un.sh"\n+++ "b/clive/sandbox/r un.sh"\n')
+    assert fz.changed_paths_from_diff(diff) == ["clive/sandbox/r un.sh"]
+    ok, violations = fz.validate_code_candidate(diff_text=diff,
+                                                frozen_patterns=["clive/sandbox/"])
+    assert not ok and violations == ["clive/sandbox/r un.sh"]
+
+
 def test_added_and_deleted_files_parsed():
     diff = (
         "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n"

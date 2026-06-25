@@ -12,9 +12,10 @@ from factory.orchestrator import code_round
 
 
 class FakeAdapter:
-    def __init__(self, *, frozen=(), tests_passed=True):
+    def __init__(self, *, frozen=(), tests_passed=True, merge_raises=False):
         self._frozen = list(frozen)
         self._tests_passed = tests_passed
+        self._merge_raises = merge_raises
         self.calls = []
 
     def frozen_paths(self):
@@ -26,6 +27,8 @@ class FakeAdapter:
 
     def merge_branch(self, repo, branch, **k):
         self.calls.append(("merge", branch))
+        if self._merge_raises:
+            raise RuntimeError("merge conflict (aborted)")
         return "MERGESHA"
 
     def revert_commit(self, repo, sha):
@@ -41,6 +44,13 @@ def _grade(*values):
     return lambda repo: next(it)
 
 
+def g(working, held_out=0.7):
+    """A fully-graded candidate result — supplies the fail-closed signals the gate
+    now requires (held_out_measured + the divergence/safety flags)."""
+    return {"working": working, "held_out": held_out, "held_out_measured": True,
+            "divergence_alarm": False, "safety_flag": False}
+
+
 CHAMP = {"working": 0.8, "held_out": 0.7}
 CLEAN_DIFF = ("diff --git a/src/clive/feature.py b/src/clive/feature.py\n"
               "--- a/src/clive/feature.py\n+++ b/src/clive/feature.py\n")
@@ -53,8 +63,7 @@ def _run(ad, grade_fn, diff=CLEAN_DIFF):
 
 def test_merges_when_all_gates_pass():
     ad = FakeAdapter(tests_passed=True)
-    res = _run(ad, _grade({"working": 0.85, "held_out": 0.7},   # candidate (gate)
-                          {"working": 0.85, "held_out": 0.7}))  # re-baseline (no regression)
+    res = _run(ad, _grade(g(0.85), g(0.85)))  # re-baseline (no regression)
     assert res["action"] == "merged" and res["merge_sha"] == "MERGESHA"
     assert ("merge", "cand") in ad.calls
 
@@ -63,7 +72,7 @@ def test_discards_on_frozen_violation_before_grading():
     ad = FakeAdapter(frozen=["src/clive/selfmod/"])
     bad = ("diff --git a/src/clive/selfmod/gate.py b/src/clive/selfmod/gate.py\n"
            "--- a/src/clive/selfmod/gate.py\n+++ b/src/clive/selfmod/gate.py\n")
-    res = _run(ad, _grade({"working": 1.0}), diff=bad)
+    res = _run(ad, _grade(g(1.0)), diff=bad)
     assert res["action"] == "discarded" and res["stage"] == "frozen"
     assert "src/clive/selfmod/gate.py" in res["violations"]
     assert "run_tests" not in ad.calls           # frozen check short-circuits BEFORE grading
@@ -84,8 +93,7 @@ def test_discards_on_scenario_regression():
 
 def test_auto_reverts_on_post_merge_regression():
     ad = FakeAdapter(tests_passed=True)
-    res = _run(ad, _grade({"working": 0.85, "held_out": 0.7},    # candidate looks good → merge
-                          {"working": 0.6, "held_out": 0.7}))    # re-baseline reveals a regression
+    res = _run(ad, _grade(g(0.85), g(0.6)))    # re-baseline reveals a regression
     assert res["action"] == "auto_reverted"
     assert ("revert", "MERGESHA") in ad.calls and res["revert_sha"] == "REVERTSHA"
 
@@ -93,6 +101,46 @@ def test_auto_reverts_on_post_merge_regression():
 def test_halted_kill_switch_aborts(monkeypatch):
     monkeypatch.setattr(killswitch, "is_halted", lambda: True)
     ad = FakeAdapter()
-    res = _run(ad, _grade({"working": 1.0}))
+    res = _run(ad, _grade(g(1.0)))
     assert res["action"] == "halted"
     assert ad.calls == []   # nothing touched while halted
+
+
+def test_kill_switch_dropped_during_grading_blocks_the_merge(monkeypatch):
+    """The brake is re-checked right before the merge: a STOP dropped while grading
+    must NOT result in a merge."""
+    state = {"n": 0}
+
+    def flip():
+        state["n"] += 1
+        return state["n"] >= 2   # not halted at round start; halted by the pre-merge check
+
+    monkeypatch.setattr(killswitch, "is_halted", flip)
+    ad = FakeAdapter(tests_passed=True)
+    res = _run(ad, _grade(g(0.85)))
+    assert res["action"] == "halted" and res.get("stage") == "pre_merge"
+    assert not any(isinstance(c, tuple) and c[0] == "merge" for c in ad.calls)
+
+
+def test_merge_failure_is_a_clean_discard_not_a_crash():
+    ad = FakeAdapter(tests_passed=True, merge_raises=True)
+    res = _run(ad, _grade(g(0.85)))      # gate passes, merge raises (conflict)
+    assert res["action"] == "discarded" and res["stage"] == "merge"   # not an exception
+
+
+def test_post_merge_grade_failure_triggers_auto_revert():
+    """If the re-baseline raises AFTER the merge, the merge must be auto-reverted —
+    never leave an ungraded merge in the repo."""
+    state = {"n": 0}
+
+    def grade(repo):
+        state["n"] += 1
+        if state["n"] == 1:
+            return g(0.85)            # candidate grade → gate passes → merge
+        raise RuntimeError("re-baseline boom")
+
+    ad = FakeAdapter(tests_passed=True)
+    res = code_round.run_code_round(adapter=ad, repo="/r", branch="cand", diff_text=CLEAN_DIFF,
+                                    champion_scores=CHAMP, grade_fn=grade, label="cand")
+    assert res["action"] == "auto_reverted"
+    assert ("revert", "MERGESHA") in ad.calls

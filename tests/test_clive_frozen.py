@@ -35,7 +35,7 @@ def test_extracts_immutable_and_governance_to_repo_paths():
     assert ".clive/audit/" in frozen
     assert ".env" in frozen
     # the command blocklist + sandbox are ALWAYS frozen (the user's explicit add)
-    assert "src/clive/execution/runtime.py" in frozen
+    assert "src/clive/execution/" in frozen           # whole runner dir (invocation surface)
     assert "src/clive/sandbox/run.sh" in frozen
     # CORE / STANDARD are NOT frozen — the factory may develop clive's actual features
     assert "src/clive/clive.py" not in frozen
@@ -44,7 +44,7 @@ def test_extracts_immutable_and_governance_to_repo_paths():
 
 def test_malformed_constitution_still_freezes_the_hard_safety_files():
     frozen = clive_adapter._frozen_from_constitution("this is not python {[")
-    assert "src/clive/execution/runtime.py" in frozen and "src/clive/sandbox/run.sh" in frozen
+    assert "src/clive/execution/" in frozen and "src/clive/sandbox/run.sh" in frozen
 
 
 def test_validator_rejects_a_diff_touching_clive_safety():
@@ -64,9 +64,40 @@ def test_validator_rejects_a_diff_touching_clive_safety():
     assert ok2
 
 
+def test_freezes_the_safety_INVOCATION_surface_not_just_definitions():
+    """BLOCKER fix (review 2026-06-25): freezing runtime.py (where the gate is DEFINED)
+    is not enough — the factory could keep it intact and delete the
+    `_check_command_safety()` call in an editable runner (executor.py is CORE-tier). So
+    freeze the whole invocation surface: execution/ (all runners), the discovery
+    credential guard, the bare-name import shims, and the safety test files (which the
+    worker could otherwise delete to keep the suite green)."""
+    frozen = clive_adapter._frozen_from_constitution(SYNTH)
+    must_freeze = [
+        "src/clive/execution/executor.py",            # CORE-tier caller of the gate
+        "src/clive/execution/interactive_runner.py",
+        "src/clive/execution/toolcall_runner.py",
+        "src/clive/execution/new_runner.py",          # a NEW runner under execution/ too
+        "src/clive/discovery/explorer.py",            # credential/exploration guard
+        "src/clive/runtime.py",                        # bare-name import shim
+        "src/clive/executor.py",                        # bare-name import shim
+        "tests/test_command_safety.py",                # safety tests can't be deleted…
+        "tests/test_runner_safety_parity.py",
+    ]
+    for p in must_freeze:
+        ok, _ = fz.validate_code_candidate(changed_paths=[p], frozen_patterns=frozen)
+        assert not ok, f"{p} must be frozen (it invokes or asserts clive's safety)"
+    # feature files stay editable — the factory can still develop clive
+    ok, _ = fz.validate_code_candidate(changed_paths=["src/clive/tui.py"], frozen_patterns=frozen)
+    assert ok
+
+
 @pytest.mark.skipif(not os.path.isdir("../clive/src/clive/selfmod"),
                     reason="clive target not present")
 def test_real_clive_constitution_freezes_the_gate_and_runtime():
     frozen = clive_adapter.CliveAdapter().frozen_paths()
     assert any("selfmod" in p for p in frozen)                 # selfmod frozen
-    assert "src/clive/execution/runtime.py" in frozen          # command blocklist frozen
+    assert "src/clive/execution/" in frozen                    # whole runner dir frozen
+    # and the invocation surface, derived live from the real target:
+    ok, _ = fz.validate_code_candidate(changed_paths=["src/clive/execution/executor.py"],
+                                       frozen_patterns=frozen)
+    assert not ok

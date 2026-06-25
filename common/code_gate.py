@@ -19,14 +19,22 @@ from __future__ import annotations
 
 
 def auto_merge_eligible(*, tests_passed: bool, frozen_ok: bool, working_delta: float,
-                        held_out_delta: float = 0.0, divergence_alarm: bool = False,
-                        safety_flag: bool = False, regression_tol: float = 0.0) -> dict:
-    """Return {eligible, failed, checks}. Eligible iff every gate holds."""
+                        held_out_delta: float = 0.0, held_out_measured: bool = False,
+                        divergence_alarm: bool = True, safety_flag: bool = True,
+                        regression_tol: float = 0.0) -> dict:
+    """Return {eligible, failed, checks}. Eligible iff every gate holds.
+
+    FAIL-CLOSED (review 2026-06-25): held-out must be MEASURED (a `held_out_measured`
+    gate) so the held-out check can't pass vacuously when no held-out was sampled — the
+    same class of bug as the earlier promotion-gate vacuous-held-out. And the
+    `divergence_alarm`/`safety_flag` signals DEFAULT TO UNSAFE, so a caller that forgets
+    to compute them BLOCKS rather than silently auto-merging."""
     checks = {
         "tests_passed": bool(tests_passed),
         "frozen_ok": bool(frozen_ok),
         "no_working_regression": working_delta >= -regression_tol,
-        "no_held_out_regression": held_out_delta >= -regression_tol,
+        "held_out_measured": bool(held_out_measured),
+        "no_held_out_regression": (not held_out_measured) or (held_out_delta >= -regression_tol),
         "no_divergence_alarm": not divergence_alarm,
         "no_safety_flag": not safety_flag,
     }

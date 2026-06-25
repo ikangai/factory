@@ -112,9 +112,27 @@ diary, and research. The new code is the adapter test/clone/frozen methods, the
 frozen-source validator, the developer role, the code-candidate grading path, and the
 auto-merge/auto-revert + kill switch.
 
+## Review-surfaced requirements for the LIVE wiring (adversarial review, 2026-06-25)
+The foundation cores were reviewed before merge. Fixed in the slice: the frozen surface
+now covers the safety **invocation** surface (execution/ runners + discovery guard +
+import shims + safety tests), not just `runtime.py`'s definition; the auto-merge gate is
+**fail-closed** (held-out must be measured; divergence/safety signals default unsafe);
+the round re-checks the kill switch pre-merge and never crashes or leaves a half-merge
+(merge aborts on conflict; a post-merge grading failure auto-reverts); and the frozen
+check uses unquoted `git diff --name-only -z` (`adapter.changed_paths`). **Still owed by
+the live developer-super-worker wiring** (deferred, not yet exploitable — no live loop):
+- **Candidate checkout before grading.** `run_code_round` grades `repo`; the caller must
+  ensure `repo` holds the CANDIDATE's code (check out / build the branch) before grading,
+  and merge into the champion tree — grade-the-candidate and merge-into-champion must be
+  coherent. Document + enforce the repo-state contract.
+- **The clone→merge fetch handoff.** Bring the worker-clone's branch into the main repo
+  (`git fetch <clone> <branch>`) before `merge_branch`; `clone()` output isn't otherwise
+  reachable by `merge_branch`.
+- **N-of-M grading** for a nondeterministic `grade_fn` (the self-heal rests on one
+  post-merge sample today).
+
 ## Open questions (to resolve as we build)
 - Guest House setup: confirm a Standard User + per-user `claude login` on the same
   subscription works; the sudoers grant for `sudo -u`.
-- Exactly which clive paths/symbols are the frozen safety surface (needs a clive read).
 - Auto-merge target: straight to `main`, or a `factory/integration` branch the human
   fast-forwards on a cadence? (Full-auto = main; the reflog + auto-revert make it safe.)

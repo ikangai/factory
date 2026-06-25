@@ -15,9 +15,14 @@ from __future__ import annotations
 import fnmatch
 import re
 
-_PLUS = re.compile(r"^\+\+\+ b/(.+)$")
-_MINUS = re.compile(r"^--- a/(.+)$")
-_GIT = re.compile(r"^diff --git a/(.+) b/(.+)$")
+# Tolerate git's quoted-path headers (core.quotePath=true wraps non-ASCII/special
+# paths in "...") — an unquoted-only regex returns ZERO paths for such a diff, hiding
+# the change. The robust source for the live loop is the adapter's
+# `changed_paths()` (git diff --name-only -z, never quoted); this text parser is the
+# fallback and at least no longer silently drops a quoted safety-file edit.
+_PLUS = re.compile(r'^\+\+\+ "?b/(.+?)"?$')
+_MINUS = re.compile(r'^--- "?a/(.+?)"?$')
+_GIT = re.compile(r'^diff --git "?a/(.+?)"? "?b/(.+?)"?$')
 
 
 def changed_paths_from_diff(diff_text: str | None) -> list[str]:

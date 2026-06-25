@@ -20,9 +20,24 @@ from ..common.clive_invoke import CliveResult
 
 # clive source lives under <repo>/src/clive/; .clive/ governance + .env are at the root.
 _SRC_PREFIX = "src/clive"
-# The command blocklist + sandbox: ALWAYS frozen, regardless of clive's tier table
-# (the user's explicit add to the constitution-derived set). Repo-root-relative.
-_SAFETY_EXTRAS = (f"{_SRC_PREFIX}/execution/runtime.py", f"{_SRC_PREFIX}/sandbox/run.sh")
+# ALWAYS frozen, regardless of clive's tier table — the command-safety INVOCATION
+# surface, not just its definition (review 2026-06-25 blocker: freezing runtime.py
+# alone let the factory keep the gate but delete the `_check_command_safety()` CALL in
+# an editable runner). So freeze the whole execution/ dir (every runner that invokes
+# the gate), the sandbox, the discovery credential guard, the bare-name import shims,
+# and the safety TESTS (the worker can't delete them to keep the suite green).
+_SAFETY_EXTRAS = (
+    f"{_SRC_PREFIX}/execution/",                 # runtime.py + executor.py + all runners
+    f"{_SRC_PREFIX}/sandbox/run.sh",
+    f"{_SRC_PREFIX}/discovery/explorer.py",      # aws/gh/ssh exploration block
+    f"{_SRC_PREFIX}/runtime.py",                 # bare-name import shim → execution/runtime
+    f"{_SRC_PREFIX}/executor.py",                # bare-name import shim → execution/executor
+    "tests/test_command_safety.py",
+    "tests/test_runner_safety_parity.py",
+    "tests/test_sandbox.py",
+    "tests/test_selfmod_gate.py",
+    "tests/test_selfmod_gate_ast.py",
+)
 # Tiers the factory may never touch — the rest (CORE/STANDARD/OPEN) it may develop.
 _FROZEN_TIERS = ("IMMUTABLE", "GOVERNANCE")
 

@@ -121,6 +121,15 @@ class TargetAdapter(abc.ABC):
                        check=True, capture_output=True, text=True)
         return dest
 
+    def changed_paths(self, repo: str, *refs: str) -> list[str]:
+        """The files a candidate changes, via `git diff --name-only -z` — NUL-delimited
+        and NEVER quoted, so it's robust where parsing diff text is not (the frozen-
+        safety check must not be evadable by a special path name). `refs` selects the
+        comparison: () = working tree vs HEAD, (base, branch) = between two refs."""
+        p = subprocess.run(["git", "-C", repo, "diff", "--name-only", "-z", *refs],
+                           capture_output=True, text=True, check=True)
+        return [x for x in p.stdout.split("\x00") if x]
+
     # -- auto-merge actuation + auto-revert self-heal (full-auto loop) -------
     def current_commit(self, repo: str) -> str:
         """The repo's current HEAD sha (recorded around a merge so it can be reverted)."""
@@ -132,9 +141,15 @@ class TargetAdapter(abc.ABC):
                      message: str = "factory: merge candidate") -> str:
         """Auto-merge a candidate `branch` into `repo`'s current branch (a real merge
         commit, --no-ff, so every factory merge is one revertible commit). Returns the
-        new HEAD sha."""
-        subprocess.run(["git", "-C", repo, "merge", "--no-ff", "-m", message, branch],
-                       check=True, capture_output=True, text=True)
+        new HEAD sha. On conflict/failure it ABORTS the half-merge (never leaves the
+        repo stuck mid-merge with conflict markers) and raises, so the caller discards
+        cleanly."""
+        r = subprocess.run(["git", "-C", repo, "merge", "--no-ff", "-m", message, branch],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True, text=True)
+            raise RuntimeError(f"merge of {branch!r} failed/conflicted: "
+                               f"{(r.stderr or r.stdout).strip()[:200]}")
         return self.current_commit(repo)
 
     def revert_commit(self, repo: str, sha: str) -> str:
