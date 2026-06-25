@@ -57,7 +57,8 @@ CLEAN_DIFF = ("diff --git a/src/clive/feature.py b/src/clive/feature.py\n"
 
 
 def _run(ad, grade_fn, diff=CLEAN_DIFF):
-    return code_round.run_code_round(adapter=ad, repo="/r", branch="cand", diff_text=diff,
+    return code_round.run_code_round(adapter=ad, main_repo="/main", cand_repo="/cand",
+                                     branch="cand", diff_text=diff,
                                      champion_scores=CHAMP, grade_fn=grade_fn, label="cand")
 
 
@@ -140,7 +141,8 @@ def test_post_merge_grade_failure_triggers_auto_revert():
         raise RuntimeError("re-baseline boom")
 
     ad = FakeAdapter(tests_passed=True)
-    res = code_round.run_code_round(adapter=ad, repo="/r", branch="cand", diff_text=CLEAN_DIFF,
+    res = code_round.run_code_round(adapter=ad, main_repo="/main", cand_repo="/cand",
+                                    branch="cand", diff_text=CLEAN_DIFF,
                                     champion_scores=CHAMP, grade_fn=grade, label="cand")
     assert res["action"] == "auto_reverted"
     assert ("revert", "MERGESHA") in ad.calls

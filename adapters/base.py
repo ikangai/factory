@@ -121,6 +121,26 @@ class TargetAdapter(abc.ABC):
                        check=True, capture_output=True, text=True)
         return dest
 
+    def fetch_candidate(self, repo: str, clone_dir: str, branch: str) -> str:
+        """Bring `branch` (produced in a worker CLONE at `clone_dir`) into the main
+        `repo` as a local ref, so merge_branch can reach it. The clone dir acts as a
+        plain local git remote — this is the clone→merge handoff."""
+        subprocess.run(["git", "-C", repo, "fetch", "--no-tags", clone_dir,
+                        f"{branch}:refs/heads/{branch}"],
+                       check=True, capture_output=True, text=True)
+        return branch
+
+    def add_worktree(self, repo: str, dest: str, branch: str) -> str:
+        """Check out `branch` into an isolated worktree at `dest` — so a candidate is
+        GRADED on its own code without moving the main checkout off its branch."""
+        subprocess.run(["git", "-C", repo, "worktree", "add", "--quiet", dest, branch],
+                       check=True, capture_output=True, text=True)
+        return dest
+
+    def remove_worktree(self, repo: str, dest: str) -> None:
+        subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", dest],
+                       check=True, capture_output=True, text=True)
+
     def changed_paths(self, repo: str, *refs: str) -> list[str]:
         """The files a candidate changes, via `git diff --name-only -z` — NUL-delimited
         and NEVER quoted, so it's robust where parsing diff text is not (the frozen-

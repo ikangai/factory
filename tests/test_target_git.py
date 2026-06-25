@@ -42,6 +42,48 @@ def test_changed_paths_via_name_only_z_is_unquoted(tmp_path):
     assert paths == ["weird name.py"]            # real path, unquoted, NUL-split
 
 
+def test_fetch_candidate_brings_a_clone_branch_into_main(tmp_path):
+    """The clone→merge handoff: a branch a worker made in its own CLONE is fetched into
+    the main repo, so merge_branch can reach it (a clone dir is a plain local remote)."""
+    main = _new_repo(str(tmp_path / "main"))
+    (Path(main) / "a.txt").write_text("1\n")
+    _git(main, "add", "."); _git(main, "commit", "-qm", "root")
+    clone = str(tmp_path / "clone")
+    subprocess.run(["git", "clone", "--quiet", main, clone], check=True, capture_output=True)
+    _git(clone, "config", "user.email", "t@t"); _git(clone, "config", "user.name", "t")
+    _git(clone, "checkout", "-qb", "cand")
+    (Path(clone) / "feat.py").write_text("x\n")
+    _git(clone, "add", "."); _git(clone, "commit", "-qm", "feat")
+
+    adapter = CliveAdapter()
+    adapter.fetch_candidate(main, clone, "cand")
+    assert subprocess.run(["git", "-C", main, "rev-parse", "refs/heads/cand"],
+                          capture_output=True).returncode == 0   # branch reachable in main
+    adapter.merge_branch(main, "cand")
+    assert os.path.exists(os.path.join(main, "feat.py"))         # …and mergeable
+
+
+def test_worktree_add_grades_candidate_in_isolation_then_removes(tmp_path):
+    """Candidate-checkout contract: grade the candidate's code in an isolated worktree
+    without moving the main checkout off its branch."""
+    repo = _new_repo(str(tmp_path / "r"))
+    (Path(repo) / "a.txt").write_text("champion\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "root")
+    main = _head_branch(repo)                 # capture main BEFORE creating the branch
+    _git(repo, "checkout", "-qb", "cand")
+    (Path(repo) / "a.txt").write_text("candidate\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "cand")
+    _git(repo, "checkout", "-q", main)        # main back on its own branch → cand is free
+
+    adapter = CliveAdapter()
+    wt = str(tmp_path / "wt")
+    adapter.add_worktree(repo, wt, "cand")
+    assert (Path(wt) / "a.txt").read_text() == "candidate\n"     # candidate code, isolated
+    assert (Path(repo) / "a.txt").read_text() == "champion\n"    # main untouched
+    adapter.remove_worktree(repo, wt)
+    assert not os.path.exists(wt)
+
+
 def test_merge_branch_brings_changes_to_main(tmp_path):
     repo = _new_repo(str(tmp_path / "r"))
     (Path(repo) / "a.txt").write_text("1\n")
