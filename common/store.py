@@ -306,6 +306,10 @@ class Blackboard:
         return self._one("SELECT * FROM shifts WHERE id < ? ORDER BY id DESC LIMIT 1",
                          (before_id,))
 
+    def list_shifts(self, limit: int = 50) -> list[dict]:
+        """All shifts, newest first — for the fleet view / a run history."""
+        return self._all("SELECT * FROM shifts ORDER BY id DESC LIMIT ?", (limit,))
+
     def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
         """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
         skips end_shift) still leaves a usable figure for the next shift's resume math."""

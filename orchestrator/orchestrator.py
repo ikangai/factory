@@ -787,6 +787,23 @@ def _should_idle(store: Blackboard, plateau_k: int) -> bool:
             and len(store.list_tasks(status="open")) == 0)
 
 
+def cmd_viz(store: Blackboard, *, open_browser: bool = True) -> str:
+    """Generate the fleet HTML visualization — the (super) worker instances (conductor
+    shifts → developer-worker dispatches → researcher output) and their activities, plus
+    the live `claude -p` workers — and open it. Read-only snapshot; regenerate any time."""
+    from ..reporting import fleet_viz
+    from ..common.store import now_iso
+    path = fleet_viz.generate_fleet_html(store, generated_at=now_iso())
+    print(f"[viz] fleet visualization → {path}")
+    if open_browser:
+        import subprocess
+        try:
+            subprocess.run(["open", path], check=False, capture_output=True)
+        except Exception:  # noqa: BLE001
+            print(f"[viz] open it in a browser: file://{path}")
+    return path
+
+
 def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
     """The conductor-loop research feed (distinct from the spec-side `research`): a web
     researcher proposes bounded directions toward the active mission — outcome-informed by
@@ -964,6 +981,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--prod", action="store_true", help="run the conductor in the Guest-House user")
     run.add_argument("--real", action="store_true",
                      help="merge into the REAL target's factory/auto branch (default: throwaway clones)")
+    viz = sub.add_parser("viz")             # HTML visualization of the fleet + activities
+    viz.add_argument("--no-open", action="store_true", help="write the file but don't open it")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
     tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
     tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
@@ -1060,6 +1079,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_develop_once(store, a.task, prod=a.prod, keep=a.keep)
         elif a.cmd == "research-feed":
             cmd_research_feed(store, prod=a.prod)
+        elif a.cmd == "viz":
+            cmd_viz(store, open_browser=not a.no_open)
         elif a.cmd == "run":
             cmd_run(store, mission=a.mission, token_budget=a.budget,
                     wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)
