@@ -83,6 +83,26 @@ def clive_entry() -> tuple[str, str]:
     return root, os.path.join(root, cfg.get("entry", "clive.py"))
 
 
+def target_repo_slug() -> str:
+    """The target's 'owner/repo' for `gh` issue commands — from config.yaml (target.repo),
+    else derived from the target repo's `origin` remote, else '' (issue features degrade
+    gracefully). This is the robust fallback so research + the conductor see the real issues
+    even when the mission row never carried a target_repo."""
+    import re
+    import subprocess
+    slug = (target_config().get("repo") or "").strip()
+    if slug:
+        return slug
+    try:
+        root = clive_entry()[0]
+        url = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:  # noqa: BLE001 — no git / no remote → no slug
+        return ""
+    m = re.search(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?/?$", url)
+    return m.group(1) if m else ""
+
+
 def is_super_worker(role: str, cfg: dict[str, Any] | None = None) -> bool:
     """Whether `role` should run as a full-capability SUPER-WORKER (curated tools +
     acceptEdits in a disposable sandbox) instead of the isolated one-shot `claude -p`.

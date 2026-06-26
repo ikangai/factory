@@ -68,6 +68,19 @@ def test_fetch_issues_parses_gh_json_and_is_graceful(monkeypatch):
     assert research_feed.fetch_issues("x/y") == ""                       # gh missing → graceful
 
 
+def test_issue_dedup_detects_reissues_not_new_bugs():
+    """The unattended bug-filing guard: skip an issue whose title matches an OPEN one
+    (case/space-insensitive, either-contains-the-other), but let a genuinely new bug through."""
+    from factory.orchestrator.orchestrator import _dup_title
+    existing = ("- #41: Self-learning tool discovery  [enhancement]\n"
+                "- #38: Messaging CLIs in toolset")
+    assert _dup_title("Self-learning tool discovery", existing)              # exact (normalized)
+    assert _dup_title("self-learning   TOOL  discovery", existing)           # case/space-insensitive
+    assert _dup_title("Add self-learning tool discovery to clive", existing)  # superset contains it
+    assert not _dup_title("Fix pane reconnect race on resize", existing)     # genuinely new → file it
+    assert not _dup_title("", existing)                                      # blank → not a dup
+
+
 def test_build_research_prompt_includes_the_open_issues(tmp_path):
     with _store(tmp_path) as s:
         s.set_mission("make clive reliable", target_repo="ikangai/clive")

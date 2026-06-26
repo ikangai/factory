@@ -42,10 +42,11 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
                   f"{t['id']}: {t['title']}",
         "(empty — mine new work from the target's issues + research)")
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
-    issues = fetch_issues(mission.get("target_repo", "")) or "(none fetched)"
+    target = mission.get("target_repo") or config.target_repo_slug()   # robust fallback if unset
+    issues = fetch_issues(target) or "(none fetched)"
     return (common._load_prompt("conductor")
             .replace("{MISSION}", mission.get("statement", ""))
-            .replace("{TARGET_REPO}", mission.get("target_repo", "") or "(none set)")
+            .replace("{TARGET_REPO}", target or "(none set)")
             .replace("{BUDGET}", f"{token_budget:,} tokens")
             .replace("{RESUME}", resume)
             .replace("{ISSUES}", issues)

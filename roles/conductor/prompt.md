@@ -48,11 +48,12 @@ in your planning where they fit the mission):
 4. **React to last shift** — at the top of the backlog you'll see tasks `done` (with the
    merge sha) or `blocked` (with a reason) from the prior shift's execution. Build on what
    shipped; reopen + refine what blocked if it's still worth doing; drop what isn't.
-5. **File bugs as issues** — when you (or a worker's blocked result) surface a real BUG you
-   can't fix this shift, file it upstream so a future shift's research picks it up:
-   `gh issue create -R {TARGET_REPO} --title "<short>" --body "<what, where, repro, why it
-   matters>"`. Also add backlog tasks for found-but-not-fixed work so the backlog reflects
-   reality. Narrate with `/diary`.
+5. **File bugs as issues (dedup'd)** — when you (or a worker's blocked result) surface a real
+   BUG you can't fix this shift, file it upstream so a future shift's research picks it up:
+   `./bin/factory issue create --title "<short>" --body "<what, where, repro, why it matters>"`.
+   This auto-resolves the target repo and SKIPS duplicates of already-open issues, so you can
+   file freely without spamming the tracker. Also add backlog tasks for found-but-not-fixed
+   work so the backlog reflects reality. Narrate with `/diary`.
 6. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
    "done": if the backlog is empty AND research is dry AND nothing is improving, say so in
    the report — don't invent busywork. **The mission, not an empty queue, is the terminator.**

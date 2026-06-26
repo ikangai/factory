@@ -863,6 +863,57 @@ def cmd_mode(new_mode: Optional[str] = None) -> str:
     return m
 
 
+def _dup_title(title: str, existing_text: str) -> bool:
+    """True when `title` matches an already-open issue in `existing_text` (the bulleted
+    '- #N: title [labels]' list from fetch_issues) — normalized case/space, either string
+    containing the other. The dedup that stops unattended bug-filing from spamming re-files."""
+    import re
+    def norm(s):
+        return " ".join((s or "").lower().split())
+    nt = norm(title)
+    if not nt:
+        return False
+    for line in existing_text.splitlines():
+        m = re.match(r"-\s*#\d+:\s*(.*?)(?:\s+\[[^\]]*\])?\s*$", line)
+        if not m:
+            continue
+        ne = norm(m.group(1))
+        if ne and (ne == nt or ne in nt or nt in ne):
+            return True
+    return False
+
+
+def cmd_issue(action: str, *, title: Optional[str] = None, body: str = "",
+              repo: Optional[str] = None, label: str = "auto-filed") -> Optional[str]:
+    """`factory issue create --title … [--body …]` — file a target-repo issue WITH DEDUP so
+    the fleet (conductor + developers, unattended) can't re-file the same bug every shift.
+    Skips silently when no repo resolves, the action isn't 'create', or an open issue already
+    covers the title. Tags auto-filed issues with a label for visibility."""
+    import subprocess
+    repo = repo or config.target_repo_slug()
+    if action != "create" or not title:
+        print("[issue] usage: factory issue create --title \"…\" [--body \"…\"]")
+        return None
+    if not repo:
+        print("[issue] no target repo resolved (set target.repo in config.yaml) — skipping.")
+        return None
+    from ..roles.research_feed import fetch_issues
+    if _dup_title(title, fetch_issues(repo)):
+        print(f"[issue] an open issue already covers this — not filing: {title!r}")
+        return None
+    base = ["gh", "issue", "create", "-R", repo, "--title", title, "--body", body]
+    try:
+        out = subprocess.run(base + ["--label", label], capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:                       # label may not exist on the repo → retry plain
+            out = subprocess.run(base, capture_output=True, text=True, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        print(f"[issue] gh failed: {e}")
+        return None
+    url = (out.stdout or "").strip()
+    print(f"[issue] filed: {url or title}")
+    return url or None
+
+
 def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
             port: int = 8788):
     """The fleet visualization of the (super) worker instances + activities. `--serve`:
@@ -1068,6 +1119,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     mod = sub.add_parser("mode")            # the auto/shift autonomy toggle
     mod.add_argument("set", nargs="?", choices=["auto", "shift"],
                      help="set the autonomy mode (omit to just read it)")
+    iss = sub.add_parser("issue")           # dedup'd issue-filing for the fleet
+    iss.add_argument("action", choices=["create"])
+    iss.add_argument("--title", required=True)
+    iss.add_argument("--body", default="")
+    iss.add_argument("--label", default="auto-filed")
     viz = sub.add_parser("viz")             # HTML visualization of the fleet + activities
     viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
     viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
@@ -1180,6 +1236,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)
         elif a.cmd == "mode":
             cmd_mode(a.set)
+        elif a.cmd == "issue":
+            cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
                      result=a.result, status=a.status)

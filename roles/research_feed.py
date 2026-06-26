@@ -48,9 +48,10 @@ def build_research_prompt(store, mission: dict, *, limit: int, issues: str = "")
                        "(nothing shipped yet)")
     backlog = _bullets(store.list_tasks(status="open"), lambda t: f"- {t['title']}",
                        "(empty)")
+    target = mission.get("target_repo") or config.target_repo_slug()    # robust fallback if unset
     return (common._load_prompt("research_feed")
             .replace("{MISSION}", mission.get("statement", ""))
-            .replace("{TARGET_REPO}", mission.get("target_repo", "") or "(none set)")
+            .replace("{TARGET_REPO}", target or "(none set)")
             .replace("{ISSUES}", issues or "(none fetched — propose from the code + the web)")
             .replace("{DIGESTS}", digests)
             .replace("{BACKLOG}", backlog)
@@ -69,7 +70,7 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     digests = store.unconsumed_digests()
     existing = {t["title"].strip().lower() for t in store.list_tasks(status="open")}
 
-    issues = fetch_issues(mission.get("target_repo", ""))  # real filed problems to consider
+    issues = fetch_issues(mission.get("target_repo") or config.target_repo_slug())  # real filed problems
     prompt = build_research_prompt(store, mission, limit=limit, issues=issues)
     target_root = config.get_adapter().entry()[0]         # the REAL target repo (not the parent dir)
     reply, _tokens, _cost = common.claude_super(

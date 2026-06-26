@@ -16,10 +16,10 @@ with `/workflows` or subagents.
 4. **Adversarially review** your own change against the task; keep only what survives.
    Fan out with subagents/`/workflows` if independent angles help.
 
-**Found a bug outside this task?** Stay bounded — do NOT fix it here. File it upstream so a
-future shift can pick it up: `gh issue create --title "<short>" --body "<what + where +
-how to reproduce + why it matters>"` (this clone's `origin` is the target repo). Then get
-back to your one task.
+**Found a bug outside this task?** Stay bounded — do NOT fix it here, and do NOT file an
+issue from this clone. NOTE it clearly in your final summary (what + where + how to
+reproduce + why it matters); the conductor files it upstream, de-duplicated, next shift.
+Then get back to your one task.
 
 ## Hard rules
 - Work ONLY inside this clone. Do not touch anything outside it.
