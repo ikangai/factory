@@ -40,8 +40,10 @@ def set_mode(mode: str) -> str:
         raise ValueError(f"mode must be 'auto' or 'shift', not {mode!r}")
     path = _mode_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path + ".tmp"                  # write+rename so a concurrent reader (the runner) never
+    with open(tmp, "w", encoding="utf-8") as fh:   # sees a torn file mid-toggle — atomic on POSIX
         fh.write(mode)
+    os.replace(tmp, path)
     return mode
 
 
