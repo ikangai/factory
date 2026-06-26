@@ -29,6 +29,9 @@ class FakeAdapter:
     def frozen_paths(self):
         return self._frozen
 
+    def branch_exists(self, repo, branch):
+        return getattr(self, "_has_branch", True)
+
     def changed_paths(self, repo, *refs):
         return list(self._changed)
 
@@ -84,6 +87,24 @@ def test_no_candidate_when_worker_changed_nothing(monkeypatch, tmp_path):
                                     task="t", champion_scores=CHAMP, grade_fn=_good_grade)
     assert res["action"] == "no_candidate"
     assert ("merge", "factory/cand-x") not in ad.calls and "fetch" not in [c[0] for c in ad.calls]
+
+
+def test_no_candidate_when_worker_produced_no_branch(monkeypatch, tmp_path):
+    """ada's find: a worker that crashes / commits nothing leaves NO candidate branch; the
+    rail must return a clean no_candidate, not let `git diff base <missing>` (exit 128) surface
+    as an 'error — blocked'. changed_paths must not even run when the branch is absent."""
+    ad = FakeAdapter(changed=["x"])           # changed_paths WOULD return a change if reached…
+    ad._has_branch = False                     # …but the worker never created the branch
+
+    def boom(*a, **k):
+        raise AssertionError("changed_paths must NOT run when the candidate branch is missing")
+
+    ad.changed_paths = boom
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                    task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "no_candidate"
+    assert "fetch" not in [c[0] for c in ad.calls]   # never fetched/merged a non-existent branch
 
 
 def test_frozen_violation_discards_before_merge(monkeypatch, tmp_path):

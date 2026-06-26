@@ -147,6 +147,14 @@ class TargetAdapter(abc.ABC):
         return subprocess.run(["git", "-C", repo, "branch", "--show-current"],
                              capture_output=True, text=True, check=True).stdout.strip()
 
+    def branch_exists(self, repo: str, branch: str) -> bool:
+        """Whether `branch` exists in `repo`. A developer that crashed or committed nothing
+        never created it — so the caller must treat that as no_candidate, NOT diff a missing
+        ref (`git diff base <missing>` exits 128 and would surface as a masked 'error')."""
+        p = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet",
+                            f"refs/heads/{branch}"], capture_output=True, text=True)
+        return p.returncode == 0
+
     def changed_paths(self, repo: str, *refs: str) -> list[str]:
         """The files a candidate changes, via `git diff --name-only -z` — NUL-delimited
         and NEVER quoted, so it's robust where parsing diff text is not (the frozen-

@@ -184,6 +184,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                           test_cmd=" ".join(adapter.test_command()),
                           frozen=adapter.frozen_paths(), as_user=as_user, claude_bin=claude_bin)
 
+        if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
+            return {"action": "no_candidate", "branch": branch}   # NO branch; don't diff a missing ref
         changed = adapter.changed_paths(dev_clone, base, branch)
         if not changed:                                # the worker made no committed change
             return {"action": "no_candidate", "branch": branch}
