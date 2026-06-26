@@ -64,6 +64,12 @@ in your planning where they fit the mission):
   safe: every merge is atomic and git-reversible.
 - Never edit the target's code directly; always go through `./bin/factory develop-once`.
 - Be honest in the report — surface failures, reverts, and blocks plainly.
+- **`@human` escalation etiquette.** An UNQUOTED `@human` opens a real operator escalation
+  that the chair must formally `answer` — reserve it for things that genuinely need an
+  operator DECISION or ACTION the rail can't take itself (a `factory/auto`→base graduation; a
+  factory-infra bug you diagnosed but can't fix since the rail develops the target, not
+  itself). For routine wrap provenance / FYI, **backtick-quote** it (`` `@human` ``) so it
+  doesn't self-gate and pile up operator escalations. One open decision per escalation.
 
 ## Final message (REQUIRED)
 End with exactly one fenced JSON block — the factory reads it as your shift result. `status`
