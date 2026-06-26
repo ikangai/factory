@@ -792,6 +792,52 @@ def _should_idle(store: Blackboard, plateau_k: int) -> bool:
             and len(store.list_tasks(status="open")) == 0)
 
 
+def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budget=None,
+                 wall_clock_s=None, prod: bool = False, real: bool = False, plateau_k: int = 3,
+                 max_shifts: int = 50, run_fn=None) -> int:
+    """The autonomous runner. In AUTO mode it works shift after shift on its own (no human
+    between shifts) until the mission converges, STOP trips, or the dashboard toggles back
+    to SHIFT. In SHIFT mode it runs ONE shift, then pauses for the human. The mode is read
+    BETWEEN shifts, so toggling it on the dashboard takes effect live. `run_fn` is
+    injectable (defaults to cmd_run) so the loop is testable without spawning agents."""
+    from ..common import killswitch, mode as modemod
+    run_fn = run_fn or cmd_run
+    n = 0
+    print(f"[loop] autonomy mode: {modemod.read_mode().upper()} "
+          f"(toggle on the dashboard, or `factory mode auto|shift`)")
+    while n < max_shifts:
+        if killswitch.is_halted():
+            print("[loop] STOP engaged — halting.")
+            break
+        res = run_fn(store, mission=mission, token_budget=token_budget, wall_clock_s=wall_clock_s,
+                     prod=prod, real=real, plateau_k=plateau_k)
+        mission = None                                  # mission only steers the first shift
+        n += 1
+        if res.get("action") in ("idle", "no_mission"):
+            print(f"[loop] {res.get('action')} — nothing left to do; stopped after {n} shift(s).")
+            break
+        if modemod.read_mode() != modemod.AUTO:
+            print(f"[loop] SHIFT mode — paused after shift {res.get('shift_id')}. "
+                  f"Toggle AUTO on the dashboard (or run again) for the next shift.")
+            break
+        print(f"[loop] AUTO — continuing to the next shift (#{n + 1})…")
+    else:
+        print(f"[loop] reached max_shifts={max_shifts} — stopping (safety cap).")
+    return n
+
+
+def cmd_mode(new_mode: Optional[str] = None) -> str:
+    """Read or set the autonomy mode. `factory mode` prints it; `factory mode auto|shift` sets it."""
+    from ..common import mode as modemod
+    if new_mode:
+        m = modemod.set_mode(new_mode)
+        print(f"[mode] set to {m.upper()}")
+        return m
+    m = modemod.read_mode()
+    print(f"[mode] {m.upper()}")
+    return m
+
+
 def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
             port: int = 8788):
     """The fleet visualization of the (super) worker instances + activities. `--serve`:
@@ -991,6 +1037,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--prod", action="store_true", help="run the conductor in the Guest-House user")
     run.add_argument("--real", action="store_true",
                      help="merge into the REAL target's factory/auto branch (default: throwaway clones)")
+    run.add_argument("--loop", action="store_true",
+                     help="autonomous runner: shift-after-shift in AUTO mode, one-and-pause in SHIFT mode")
+    run.add_argument("--max-shifts", type=int, default=50, help="safety cap on shifts in --loop")
+    mod = sub.add_parser("mode")            # the auto/shift autonomy toggle
+    mod.add_argument("set", nargs="?", choices=["auto", "shift"],
+                     help="set the autonomy mode (omit to just read it)")
     viz = sub.add_parser("viz")             # HTML visualization of the fleet + activities
     viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
     viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
@@ -1094,8 +1146,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "viz":
             cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port)
         elif a.cmd == "run":
-            cmd_run(store, mission=a.mission, token_budget=a.budget,
-                    wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)
+            if a.loop:
+                cmd_run_loop(store, mission=a.mission, token_budget=a.budget,
+                             wall_clock_s=a.wall_clock, prod=a.prod, real=a.real,
+                             max_shifts=a.max_shifts)
+            else:
+                cmd_run(store, mission=a.mission, token_budget=a.budget,
+                        wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)
+        elif a.cmd == "mode":
+            cmd_mode(a.set)
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
                      result=a.result, status=a.status)
