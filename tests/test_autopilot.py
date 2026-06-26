@@ -8,6 +8,8 @@ from factory.orchestrator import autopilot
 
 def test_start_runner_spawns_once_and_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(autopilot, "pid_path", lambda: str(tmp_path / ".autopilot.pid"))
+    monkeypatch.setattr(autopilot, "_is_runner_proc", lambda pid: True)   # this test's pid stands in
+    monkeypatch.setattr(autopilot, "_scan_for_runner", lambda: None)
     spawned = []
 
     def fake_spawn(argv, log_path):
@@ -63,6 +65,7 @@ def test_scan_for_runner_accepts_python_runner_rejects_shell(monkeypatch):
 
 def test_prod_flag_threads_into_argv(tmp_path, monkeypatch):
     monkeypatch.setattr(autopilot, "pid_path", lambda: str(tmp_path / ".autopilot.pid"))
+    monkeypatch.setattr(autopilot, "_scan_for_runner", lambda: None)
     captured = {}
 
     def fake_spawn(argv, log_path):
@@ -72,3 +75,24 @@ def test_prod_flag_threads_into_argv(tmp_path, monkeypatch):
     autopilot.start_runner(real=False, prod=True, spawn_fn=fake_spawn,
                            log_path=str(tmp_path / "ap.log"))
     assert "--prod" in captured["argv"] and "--real" not in captured["argv"]
+
+
+def test_runner_alive_rejects_recycled_nonrunner_pid(tmp_path, monkeypatch):
+    """Identity check: a live pid that is NOT a factory runner (recycled) is not 'running' —
+    no phantom on the board, and a toggle won't adopt the wrong process."""
+    pid_file = tmp_path / ".autopilot.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")    # alive, but it's pytest, not a runner
+    monkeypatch.setattr(autopilot, "pid_path", lambda: str(pid_file))
+    monkeypatch.setattr(autopilot, "_is_runner_proc", lambda pid: False)
+    assert autopilot.runner_alive() is None and not pid_file.exists()
+
+
+def test_clear_pid_if_mine_only_removes_own(tmp_path, monkeypatch):
+    pid_file = tmp_path / ".autopilot.pid"
+    monkeypatch.setattr(autopilot, "pid_path", lambda: str(pid_file))
+    pid_file.write_text("424242", encoding="utf-8")            # someone else's pid
+    autopilot.clear_pid_if_mine()
+    assert pid_file.exists()                                   # NOT mine → left alone
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")    # mine
+    autopilot.clear_pid_if_mine()
+    assert not pid_file.exists()                               # removed on my exit

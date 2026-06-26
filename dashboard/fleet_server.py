@@ -62,11 +62,19 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
     def do_POST(self) -> None:
-        # The ONE write action: toggle the autonomy mode (auto/shift).
-        if urlparse(self.path).path != "/api/mode":
-            return self._send(404, b'{"error":"the only write action is /api/mode"}', "application/json")
+        path = urlparse(self.path).path
+        if path not in ("/api/mode", "/api/stop", "/api/resume"):
+            return self._send(404, b'{"error":"unknown write action"}', "application/json")
         if not self._local_origin():
             return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
+        from ..common import killswitch
+        if path == "/api/stop":               # HALT the fleet now — the board's emergency brake
+            killswitch.engage("dashboard")
+            return self._send(200, b'{"halted": true}', "application/json")
+        if path == "/api/resume":
+            killswitch.release()
+            return self._send(200, b'{"halted": false}', "application/json")
+        # /api/mode — toggle the autonomy mode (auto/shift)
         length = int(self.headers.get("Content-Length", 0) or 0)
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")

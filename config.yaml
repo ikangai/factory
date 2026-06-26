@@ -144,7 +144,21 @@ autonomy:
   # still stops early on no-improvement / research-exhausted. Promotion is NEVER
   # automatic — candidates only ever reach 'awaiting_gate' for the human.
   daily_max_rounds: 8
-  daily_token_budget: 500000
+  daily_token_budget: 500000        # PER-SHIFT token guideline
+  # the continuous `run --loop` / autopilot ceilings (HARD brakes for unattended AUTO):
+  loop_token_budget: 5000000        # stop after ~5M cumulative output tokens across shifts (0 = unlimited)
+  loop_deadline_s: 14400            # …or after 4h wall-clock, whichever first (+ max_shifts=50)
+
+# --- autopilot: the dashboard AUTO toggle's runner --------------------------
+autopilot:
+  # Toggling AUTO on the board spawns `factory run --loop` with these. real=true lands gated
+  # merges on the REVERSIBLE factory/auto branch (the useful default). prod=false = DEV/
+  # same-user (the conductor + workers run as YOU with Bash + your MCP) — fine while you watch
+  # the board, but it is NOT the Guest-House boundary; set prod=true once the agent user is
+  # provisioned for a truly unattended run. Set real=false to exercise the loop on throwaway
+  # clones (no real merges).
+  real: true
+  prod: false
 
 # --- board ------------------------------------------------------------------
 dashboard:

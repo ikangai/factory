@@ -32,6 +32,9 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .mbtn.active[data-mode=shift]{background:#38bdf8;color:#04121f}
 .apstat{font-size:11px;font-weight:600;margin-left:9px;white-space:nowrap}
 .apstat.run{color:#22c55e}.apstat.warn{color:#fb923c}
+.stopbtn{margin-left:10px;background:transparent;border:1px solid #f43f5e;color:#f43f5e;border-radius:99px;padding:5px 13px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s}
+.stopbtn:hover{background:#f43f5e;color:#fff}
+.stopbtn.halted{border-color:#22c55e;color:#22c55e}.stopbtn.halted:hover{background:#22c55e;color:#04140a}
 
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:16px 0}
@@ -119,6 +122,7 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
       <button class="mbtn" data-mode="auto">▶&nbsp;Auto</button>
     </div>
     <span class="apstat" id="apstat"></span>
+    <button class="stopbtn" id="stopbtn" title="Halt the fleet now (STOP)">⛔&nbsp;Stop</button>
   </header>
 
   <!-- CEO KPI strip -->
@@ -198,11 +202,14 @@ async function tick(){
   el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
   const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
   document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
-  const ap=d.autopilot||{},aps=el('apstat');
-  if((d.mode||'shift')==='auto'){
+  const ap=d.autopilot||{},aps=el('apstat'),sb=el('stopbtn');
+  if(d.halted){aps.textContent='⛔ fleet halted';aps.className='apstat warn';}
+  else if((d.mode||'shift')==='auto'){
     if(ap.running){aps.textContent='● autopilot running'+(ap.pid?(' (pid '+ap.pid+')'):'');aps.className='apstat run';}
     else{aps.textContent='⚠ autopilot idle — starting…';aps.className='apstat warn';}
   }else{aps.textContent='';aps.className='apstat';}
+  if(d.halted){sb.textContent='▶ Resume';sb.dataset.halted='1';sb.classList.add('halted');}
+  else{sb.textContent='⛔ Stop';sb.dataset.halted='0';sb.classList.remove('halted');}
   // KPI strip
   el('kpis').innerHTML=
     kpi('🚢 Shipped','<span>'+(k.shipped||0)+'</span>',(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked','hero')+
@@ -242,9 +249,18 @@ async function tick(){
 }
 buildLoop();
 document.querySelectorAll('.mbtn').forEach(b=>b.addEventListener('click',async()=>{
-  try{await fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});}catch(e){}
+  try{
+    const r=await fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});
+    const j=await r.json();
+    if(j.autopilot&&j.autopilot.error){const a=el('apstat');a.textContent='⚠ start failed: '+j.autopilot.error;a.className='apstat warn';}
+  }catch(e){}
   tick();
 }));
+el('stopbtn').addEventListener('click',async()=>{
+  const halted=el('stopbtn').dataset.halted==='1';
+  try{await fetch(halted?'/api/resume':'/api/stop',{method:'POST'});}catch(e){}
+  tick();
+});
 tick();setInterval(tick,2000);
 </script>
 </body>

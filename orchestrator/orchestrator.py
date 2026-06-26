@@ -806,8 +806,8 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
     import time
     from ..common import killswitch, mode as modemod
     auton = config.load_config().get("autonomy", {}) or {}
-    if loop_token_budget is None:
-        loop_token_budget = int(auton.get("loop_token_budget", 0)) or None      # 0/absent → no token cap
+    if loop_token_budget is None:                                               # real default ceiling;
+        loop_token_budget = int(auton.get("loop_token_budget", 5_000_000)) or None   # config 0 → unlimited
     if loop_deadline_s is None:
         loop_deadline_s = int(auton.get("loop_deadline_s", 14400))              # default 4h wall-clock
     run_fn = run_fn or cmd_run
@@ -848,6 +848,8 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
         print(f"[loop] AUTO — continuing to the next shift (#{n + 1})…")
     else:
         print(f"[loop] reached max_shifts={max_shifts} — stopping (safety cap).")
+    from . import autopilot
+    autopilot.clear_pid_if_mine()       # this runner's pid file must not outlive it (phantom guard)
     return n
 
 
