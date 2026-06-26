@@ -112,6 +112,11 @@ super_worker:
   # The agora squad the worker joins — its OWN, so a headless one-shot worker never blocks
   # on the operator's team barrier.
   squad: "factory-workers"
+  # The rail auto-refills the backlog from research (a researcher super-worker proposes new
+  # directions toward the mission) BEFORE a shift whenever the open backlog is below this
+  # threshold — so the generative loop runs deterministically, not at the conductor's
+  # discretion. Set to 0 to disable rail-driven research.
+  refill_threshold: 2
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:

@@ -15,6 +15,7 @@ from ..common import killswitch
 
 
 def run_shift(store, *, token_budget: int, conductor: Callable, executor: Optional[Callable] = None,
+              refill: Optional[Callable] = None, refill_threshold: int = 2,
               mission: Optional[str] = None, wall_clock_s: int = 1800) -> dict:
     """Run one bounded conductor shift. The conductor PLANS (orients, claims the tasks to
     work); then the `executor` (deterministic, no LLM-driven Bash) runs each claimed task
@@ -34,6 +35,17 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
         return {"action": "no_mission", "shift_id": None, "reaped": len(reaped), "shipped": 0}
 
     sh = store.start_shift(token_budget=token_budget, mission_id=m["id"])
+
+    # Top up the backlog from research when it's THIN — the generative loop runs on the
+    # RAIL, deterministically, not at the conductor's discretion (which left research dry).
+    # Bounded by the idle short-circuit upstream: once converged, cmd_run never starts a
+    # shift, so this won't spin a researcher forever. refill_threshold ≤ 0 disables it.
+    if refill is not None and len(store.list_tasks(status="open")) < refill_threshold:
+        try:
+            refill(store)
+        except Exception:  # noqa: BLE001 — a researcher failure mustn't sink the shift
+            pass
+
     try:
         outcome = conductor(store, shift_id=sh, mission=m,
                             token_budget=token_budget, wall_clock_s=wall_clock_s) or {}

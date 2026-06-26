@@ -1,8 +1,18 @@
 """factory run (design step 6) — composes the loop: one bounded conductor shift (the
 harness + an injected conductor) → mission-assess → surface. And `factory task` so the
 conductor works the backlog. Hermetic: the conductor is injected, no live agent."""
+import pytest
+
 from factory.common.store import Blackboard
 from factory.orchestrator import orchestrator, shift as shiftmod
+from factory.roles import research_feed
+
+
+@pytest.fixture(autouse=True)
+def _no_real_research(monkeypatch):
+    """The rail now auto-refills the backlog from research; keep these cmd_run tests
+    hermetic by stubbing the researcher (no live claude -p spawn)."""
+    monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
 
 
 def _store(tmp_path):

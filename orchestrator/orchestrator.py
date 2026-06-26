@@ -715,7 +715,7 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
 
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
-            real: bool = False, conductor=None, executor=None) -> dict:
+            real: bool = False, conductor=None, executor=None, refill=None) -> dict:
     """The conductor loop entry point (design step 6): run ONE bounded shift, then assess
     the mission and surface the status. State persists in the store, so each `run` resumes
     where the last left off — schedule it (launchd) for the unattended daily cadence."""
@@ -752,8 +752,13 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         from .develop import execute_claimed_tasks
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real)
+    if refill is None:                                 # …and REFILLS the backlog from research when thin
+        from ..roles import research_feed
+        refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
+    refill_threshold = int(sw.get("refill_threshold", 2))
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
+                    refill=refill, refill_threshold=refill_threshold,
                     mission=mission, wall_clock_s=wall_clock_s)
     print(f"[run] shift {res.get('shift_id')}: {res['action']} "
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")

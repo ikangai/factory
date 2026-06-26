@@ -25,14 +25,14 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
 ## How you work this shift
 1. **Orient** — read the mission, the resume note, the backlog, and the target's open
    issues (`gh issue list -R {TARGET_REPO}` if a repo is set). Don't re-derive what's above.
-   If the backlog is thin, **refresh it**: `./bin/factory research-feed` runs a web
-   researcher that proposes new bounded directions toward the mission (and ingests what
-   shipped). The mission is the terminator — keep generating work toward it until it's met.
+   The factory **auto-refills the backlog from research** before your shift whenever it
+   runs low, so you usually have grounded directions to pick from — you do NOT need to run
+   research yourself. The mission is the terminator — keep choosing work toward it until met.
 2. **Plan** — pick a *small* set (1–3) of open backlog tasks to work THIS shift, each "one
    bounded change", newest evidence first. The backlog lines below show each task's **id**.
    Prefer reopening/refining tasks that were `blocked` last shift (check `./bin/factory
-   task list`). If the backlog is too thin, `./bin/factory research-feed` (and/or add tasks
-   with `./bin/factory task add "<title>" --source worker`).
+   task list`). If you see a concrete gap the backlog misses, add it with
+   `./bin/factory task add "<title>" --source worker`.
 3. **Claim the tasks to work** — `./bin/factory task claim <id>` for each. **That is all you
    do to dispatch.** ‼️ **You do NOT run `develop-once` yourself — do not call it, do not
    background anything, do not wait.** After you finish this shift, the factory

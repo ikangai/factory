@@ -137,6 +137,41 @@ def test_run_shift_requeues_on_a_returned_error_status(tmp_path, monkeypatch):
         assert res["action"] == "error" and s.get_task("t1")["status"] == "open"
 
 
+def test_run_shift_refills_backlog_from_research_when_thin(tmp_path, monkeypatch):
+    """The generative loop on the RAIL: when the open backlog is below the threshold,
+    run_shift tops it up from research BEFORE the conductor plans — so the conductor has
+    grounded work and research isn't left to the LLM's discretion (which left it dry)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")                              # empty backlog (< threshold)
+        called = {"n": 0}
+
+        def refill(store):
+            called["n"] += 1
+            store.add_task("r1", "researched direction", source="research")
+
+        def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+            assert any(t["id"] == "r1" for t in store.list_tasks(status="open"))   # sees the refill
+            return {"status": "completed"}
+
+        res = shiftmod.run_shift(s, token_budget=1, conductor=conductor, refill=refill, refill_threshold=2)
+        assert called["n"] == 1 and res["action"] == "completed"
+        assert any(t["source"] == "research" for t in s.list_tasks())              # research produced work
+
+
+def test_run_shift_skips_refill_when_backlog_is_full(tmp_path, monkeypatch):
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        for i in "abc":
+            s.add_task(i, i, source="issue")            # 3 open ≥ threshold 2
+        called = {"n": 0}
+        shiftmod.run_shift(s, token_budget=1, conductor=lambda *a, **k: {"status": "completed"},
+                           refill=lambda store: called.__setitem__("n", called["n"] + 1),
+                           refill_threshold=2)
+        assert called["n"] == 0                          # backlog not thin → no researcher spawned
+
+
 def test_run_shift_runs_the_executor_for_the_shift_and_returns_shipped(tmp_path, monkeypatch):
     """The conductor PLANS; the rail's executor runs the claimed work. run_shift invokes the
     executor for the just-run shift and surfaces its shipped count."""
