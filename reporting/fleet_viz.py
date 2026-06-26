@@ -169,11 +169,17 @@ def live_workers() -> list[dict]:
         if not parts or not parts[0].isdigit():
             continue
         pid = parts[0]
-        if "/cf-dev-" in line or "/cf-champ-" in line or ".factory-auto" in line:
+        # Classify by the TOOLSET signature (the prompt is on stdin + --add-dir varies, so
+        # the role name isn't in the command line): a worker in a clone is a developer; web
+        # + NO Bash is the read-only researcher; Bash outside a clone is the conductor.
+        is_clone = "/cf-dev-" in line or "/cf-champ-" in line or ".factory-auto" in line
+        has_bash = " Bash" in line
+        has_web = "WebSearch" in line or "WebFetch" in line
+        if is_clone:
             role, where = "developer worker", _add_dir(line)
-        elif "research" in line.lower():
+        elif has_web and not has_bash:
             role, where = "researcher", _add_dir(line)
-        elif "/factory" in line:
+        elif has_bash:
             role, where = "conductor", "planning the shift"
         else:
             role, where = "worker", _add_dir(line)

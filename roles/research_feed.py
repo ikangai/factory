@@ -46,8 +46,9 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     existing = {t["title"].strip().lower() for t in store.list_tasks(status="open")}
 
     prompt = build_research_prompt(store, mission, limit=limit)
+    target_root = config.get_adapter().entry()[0]         # the REAL target repo (not the parent dir)
     reply, _tokens, _cost = common.claude_super(
-        prompt, workdir=paths.CLIVE_ROOT,                 # reads the target to find real gaps
+        prompt, workdir=target_root,                      # reads the target to find real gaps
         allowed_tools=common.RESEARCHER_TOOLS,            # read + web + fan-out; NO Bash/edits
         as_user=as_user, claude_bin=claude_bin,
         settings=sw.get("settings", "user"),              # web + diary + MCP

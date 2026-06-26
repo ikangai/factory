@@ -69,14 +69,16 @@ def test_live_workers_filters_shells_and_echoes(monkeypatch):
     merely MENTION 'claude -p' in their text (the 'pid: echo' junk seen on the live board)."""
     import types
     canned = (
-        '4011 /Users/x/.local/bin/claude -p --output-format json --add-dir /tmp/cf-dev-abc/clone --max-turns 24\n'
+        '4011 /Users/x/.local/bin/claude -p --add-dir /tmp/cf-dev-abc/clone --max-turns 24 --allowedTools Read Write Edit Bash Grep WebSearch\n'
         '5123 /bin/zsh -c echo "checking claude -p workers"\n'
-        '6001 claude -p --output-format json --setting-sources user --add-dir /Users/x/factory --max-turns 60\n')
+        '6001 claude -p --setting-sources user --add-dir /Users/x/factory --max-turns 60 --allowedTools Read Bash Grep WebSearch\n'
+        '7001 claude -p --setting-sources user --add-dir /Users/x/Development --max-turns 40 --allowedTools Read Grep Glob WebSearch WebFetch\n')
     monkeypatch.setattr(fleet_viz.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(stdout=canned))
     ws = fleet_viz.live_workers()
-    assert [w["pid"] for w in ws] == ["4011", "6001"]        # the zsh/echo line dropped
-    assert ws[0]["role"] == "developer worker" and ws[1]["role"] == "conductor"
+    assert [w["pid"] for w in ws] == ["4011", "6001", "7001"]   # the zsh/echo line dropped
+    # classified by toolset signature: clone→developer, Bash-not-in-clone→conductor, web+no-Bash→researcher
+    assert [w["role"] for w in ws] == ["developer worker", "conductor", "researcher"]
 
 
 def test_fleet_json_derives_phase_and_summary(tmp_path, monkeypatch):
