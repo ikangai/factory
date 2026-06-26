@@ -175,7 +175,6 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         base = adapter.default_branch(dev_clone)
         if as_user:                                    # Guest House: the worker user must own the clone
             try:
-                import subprocess
                 subprocess.run(["sudo", "chown", "-R", as_user, dev_clone],
                                check=True, capture_output=True, text=True)
             except Exception as e:  # noqa: BLE001
