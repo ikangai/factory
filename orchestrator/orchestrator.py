@@ -923,7 +923,7 @@ def cmd_schedule_install(*, loop: bool = False) -> None:
     import subprocess
     from . import scheduling
 
-    command = ("run",) if loop else ("daily",)
+    command = ("run", "--loop") if loop else ("daily",)   # --loop = the autonomous runner (auto/shift)
     label = scheduling.RUN_LABEL if loop else scheduling.PLIST_LABEL
     python_bin = sys.executable or "python3"
     xml = scheduling.launchd_plist(paths.FACTORY_ROOT, python_bin, command=command, label=label)

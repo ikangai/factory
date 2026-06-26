@@ -74,11 +74,11 @@ def test_launchd_plist_runs_factory_daily_at_0900():
 
 def test_launchd_plist_can_schedule_the_conductor_loop():
     xml = scheduling.launchd_plist("/opt/factory", "/usr/bin/python3",
-                                   command=("run",), label=scheduling.RUN_LABEL)
+                                   command=("run", "--loop"), label=scheduling.RUN_LABEL)
     pl = plistlib.loads(xml.encode("utf-8"))
-    assert pl["ProgramArguments"][-1] == "run"        # schedules `factory run`, not daily
-    assert pl["Label"] == scheduling.RUN_LABEL        # a distinct agent (coexists with daily)
-    assert "run-launchd" in pl["StandardOutPath"]     # separate logs
+    assert pl["ProgramArguments"][-2:] == ["run", "--loop"]   # the autonomous runner, not daily
+    assert pl["Label"] == scheduling.RUN_LABEL                # a distinct agent (coexists with daily)
+    assert "run-launchd" in pl["StandardOutPath"]            # separate logs
 
 
 def test_plist_path_is_in_user_launchagents():
