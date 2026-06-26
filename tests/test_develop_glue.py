@@ -107,8 +107,9 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     s.add_task("b", "fails", source="issue"); s.set_task_status("b", "in_progress", shift_id=sh)
     s.add_task("o", "open, not claimed", source="issue")     # not in-flight → executor ignores it
 
-    results = iter([{"action": "merged", "merge_sha": "sha1"}, {"action": "no_candidate"}])
-    shipped = execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: next(results))
+    def fake(text, **k):    # map by task text — parallel workers finish in any order
+        return {"action": "merged", "merge_sha": "sha1"} if "merge me" in text else {"action": "no_candidate"}
+    shipped = execute_claimed_tasks(s, sh, develop_fn=fake)
 
     assert shipped == 1
     assert s.get_task("m")["status"] == "done" and s.get_task("m")["result"] == "sha1"
@@ -181,9 +182,64 @@ def test_execute_halts_between_tasks_on_kill_switch(tmp_path, monkeypatch):
         state["halt"] = True                          # STOP trips after the first task
         return {"action": "merged", "merge_sha": "x"}
 
-    dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+    dev.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
     assert len(calls) == 1                             # stopped before the 2nd task
     s.close()
+
+
+def test_execute_runs_super_workers_in_parallel(tmp_path):
+    """The conductor claims distinct-file tasks; the rail develops them CONCURRENTLY."""
+    import threading
+    import time
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for i in range(3):
+        s.add_task(f"t{i}", "x", source="issue")
+        s.set_task_status(f"t{i}", "in_progress", shift_id=sh)
+    active = {"now": 0, "max": 0}
+    lk = threading.Lock()
+
+    def fake(text, **k):
+        with lk:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+        time.sleep(0.05)
+        with lk:
+            active["now"] -= 1
+        return {"action": "merged", "merge_sha": "abc123def456"}
+
+    shipped = execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=3)
+    assert shipped == 3 and active["max"] >= 2          # genuinely concurrent, not one-at-a-time
+    s.close()
+
+
+def test_execute_serializes_the_merge_lock_only_in_real_mode(tmp_path):
+    """Parallel workers in REAL mode share the factory/auto worktree → a merge lock is passed;
+    throwaway clones are isolated → no lock."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+
+    def seen_lock(real, tag):
+        s = Blackboard(str(tmp_path / f"f{tag}.db"))
+        s.init_db()
+        sh = s.start_shift(token_budget=1)
+        s.add_task("t", "x", source="issue")
+        s.set_task_status("t", "in_progress", shift_id=sh)
+        captured = []
+
+        def fake(text, merge_lock=None, **k):
+            captured.append(merge_lock)
+            return {"action": "merged", "merge_sha": "x"}
+
+        execute_claimed_tasks(s, sh, develop_fn=fake, real=real)
+        s.close()
+        return captured[0]
+
+    assert seen_lock(True, "real") is not None          # real → serialize the shared worktree
+    assert seen_lock(False, "throw") is None            # throwaway → isolated, no lock
 
 
 def test_factory_worktree_creates_branch_and_is_idempotent(tmp_path):

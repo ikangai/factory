@@ -751,8 +751,10 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     if executor is None:                               # the deterministic rail EXECUTES claimed tasks
         from .develop import execute_claimed_tasks
         max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
+        max_parallel = int(sw.get("max_parallel", 3))       # …run that many super-workers at once
         executor = lambda st, *, shift_id: execute_claimed_tasks(
-            st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real, max_tasks=max_tasks)
+            st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
+            max_tasks=max_tasks, max_parallel=max_parallel)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)

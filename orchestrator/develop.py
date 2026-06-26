@@ -12,6 +12,7 @@ omitted = same-user dev mode (SOFT boundary, supervised, scoped to the disposabl
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -54,21 +55,23 @@ def factory_worktree(adapter, *, branch: str = "factory/auto") -> str:
 
 def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
                  real: bool = False, grade_fn: Optional[Callable] = None,
-                 champion_scores: Optional[dict] = None) -> dict:
+                 champion_scores: Optional[dict] = None, merge_lock=None) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
     `real=True`: merge into the persistent `factory/auto` worktree of the REAL target — the
-    work persists, git-reversible, on a branch that never disturbs the operator's checkout."""
+    work persists, git-reversible, on a branch that never disturbs the operator's checkout.
+    `merge_lock` serializes the shared factory/auto worktree across PARALLEL workers (real)."""
     adapter = config.get_adapter()
     cs = champion_scores or {"working": 0.0, "held_out": 0.0}
     gf = grade_fn or _smoke_grade
     if real:
-        main = factory_worktree(adapter)            # persistent — do NOT delete
+        with (merge_lock or contextlib.nullcontext()):   # find/create the ONE worktree race-safe
+            main = factory_worktree(adapter)             # persistent — do NOT delete
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
-                                 champion_scores=cs, grade_fn=gf,
-                                 as_user=as_user, claude_bin=claude_bin)
-    work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")
+                                 champion_scores=cs, grade_fn=gf, as_user=as_user,
+                                 claude_bin=claude_bin, merge_lock=merge_lock)
+    work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
         adapter.clone(main)
@@ -82,58 +85,82 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
 def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None,
                           claude_bin: str = "claude", real: bool = False,
                           develop_fn: Optional[Callable] = None,
-                          max_tasks: Optional[int] = None) -> int:
-    """Deterministically run the tasks the conductor claimed this shift through the gated
-    pipeline and CLOSE each: merged → done(sha), anything else → blocked(reason, for the
-    conductor to reopen/refine next shift). Returns the count shipped. `real` merges into
-    the real target's factory/auto branch; default is throwaway clones. `develop_fn` is
-    injectable for tests so no live worker spawns. `max_tasks` caps the per-shift fan-out
-    (unattended safety) — the rest stay in_progress for run_shift to requeue. The STOP
-    kill-switch is re-checked between tasks so a long execute phase can be interrupted."""
+                          max_tasks: Optional[int] = None,
+                          max_parallel: Optional[int] = None) -> int:
+    """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
+    each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
+
+    The super-workers run IN PARALLEL (up to `max_parallel`) — the conductor claims distinct-
+    file tasks, each develops in its OWN clone, so the slow clone+developer+tests overlap. In
+    REAL mode the merge into the ONE shared factory/auto worktree is serialized under a lock
+    (so only that fast section is mutually exclusive). Task-status writes happen on the MAIN
+    thread (the store's SQLite connection is single-threaded). `max_tasks` caps the fan-out;
+    STOP is honored — already-engaged → nothing dispatches; tripped mid-flight → queued
+    workers skip (they stay in_progress for run_shift to requeue)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     run = develop_fn or develop_task
     claimed = store.tasks_in_flight(shift_id)        # the in_progress tasks claimed this shift
     if max_tasks is not None and len(claimed) > max_tasks:
         print(f"[execute] {len(claimed)} tasks claimed — capping at {max_tasks} this shift; "
               f"the rest stay in_progress and are requeued for the next shift.", flush=True)
         claimed = claimed[:max_tasks]
-    shipped = 0
-    for i, task in enumerate(claimed, 1):
-        if killswitch.is_halted():                   # STOP can trip DURING a long execute phase
-            print(f"[execute] STOP engaged — halting after {i - 1}/{len(claimed)}.", flush=True)
-            break
-        print(f"[execute] task {i}/{len(claimed)} {task['id']}: {task['title']} "
-              f"— running the gated pipeline (clone + developer TDD + the target's test "
-              f"suite; a few minutes, no live output)…", flush=True)
+    if not claimed:
+        return 0
+    if killswitch.is_halted():
+        print("[execute] STOP engaged — not dispatching.", flush=True)
+        return 0
+
+    merge_lock = threading.Lock() if real else None  # serialize the shared factory/auto merge
+    workers = max(1, min(max_parallel or len(claimed), len(claimed)))
+    print(f"[execute] dispatching {len(claimed)} task(s) — up to {workers} super-worker(s) "
+          f"in parallel (clone + developer TDD + the target's tests; a few minutes)…", flush=True)
+
+    def work(task):
+        if killswitch.is_halted():                   # STOP tripped before this one started
+            return task, {"action": "halted"}
         text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
+        print(f"[execute] ▶ {task['id']}: {task['title']}", flush=True)
         try:
-            res = run(text, as_user=as_user, claude_bin=claude_bin, real=real)
+            return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
+                             merge_lock=merge_lock)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
-            res = {"action": "error", "error": str(e)}
-        if res.get("action") == "merged":
+            return task, {"action": "error", "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = [f.result() for f in [ex.submit(work, t) for t in claimed]]
+
+    shipped = 0                                       # close out on the MAIN thread (single-writer)
+    for task, res in results:
+        action = res.get("action")
+        if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
             shipped += 1
-            print(f"[execute]   → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
+            print(f"[execute]   {task['id']} → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
+        elif action == "halted":                      # STOP — leave in_progress for requeue
+            print(f"[execute]   {task['id']} → skipped (STOP)", flush=True)
         else:                                         # no_candidate/discarded/auto_reverted/error
-            # CAPTURE WHY — a bare 'error' is undiagnosable. Thread the exception message
-            # (or the discard stage) into the result so the operator + the conductor (next
-            # shift) can see what failed.
-            reason = res.get("action", "no result")
+            reason = action or "no result"            # CAPTURE WHY — a bare 'error' is undiagnosable
             if res.get("error"):
                 reason = f"error: {str(res['error'])[:180]}"
             elif res.get("stage"):
                 reason = f"{reason} ({res['stage']})"
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
-            print(f"[execute]   → {reason} — blocked", flush=True)
+            print(f"[execute]   {task['id']} → {reason} — blocked", flush=True)
     return shipped
 
 
 def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: dict,
                       grade_fn: Callable[[str], dict], as_user: Optional[str] = None,
-                      claude_bin: str = "claude", label: Optional[str] = None) -> dict:
+                      claude_bin: str = "claude", label: Optional[str] = None,
+                      merge_lock=None) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
-    on). Never leaves clones behind."""
+    on). Never leaves clones behind. `merge_lock`, when given, serializes the
+    SHARED-worktree section (fetch + worktree + grade + merge) so parallel workers in REAL
+    mode don't race on the one factory/auto worktree — the slow clone+develop runs unlocked."""
     from ..roles.common import develop_candidate
 
     if killswitch.is_halted():
@@ -161,18 +188,22 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         if not changed:                                # the worker made no committed change
             return {"action": "no_candidate", "branch": branch}
 
-        adapter.fetch_candidate(main_repo, dev_clone, branch)
-        cand_wt = os.path.join(work, "wt")
-        adapter.add_worktree(main_repo, cand_wt, branch)
-        try:
-            return code_round.run_code_round(
-                adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
-                champion_scores=champion_scores, grade_fn=grade_fn,
-                changed_paths=changed, label=branch)
-        finally:
+        # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
+        # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
+        # The slow part (clone + the developer worker) already ran in parallel above.
+        with (merge_lock or contextlib.nullcontext()):
+            adapter.fetch_candidate(main_repo, dev_clone, branch)
+            cand_wt = os.path.join(work, "wt")
+            adapter.add_worktree(main_repo, cand_wt, branch)
             try:
-                adapter.remove_worktree(main_repo, cand_wt)
-            except Exception:  # noqa: BLE001
-                pass
+                return code_round.run_code_round(
+                    adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
+                    champion_scores=champion_scores, grade_fn=grade_fn,
+                    changed_paths=changed, label=branch)
+            finally:
+                try:
+                    adapter.remove_worktree(main_repo, cand_wt)
+                except Exception:  # noqa: BLE001
+                    pass
     finally:
         shutil.rmtree(work, ignore_errors=True)
