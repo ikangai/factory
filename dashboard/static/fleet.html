@@ -168,6 +168,9 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 const PHASES=[{key:'research',ico:'🔬',lbl:'Research'},{key:'plan',ico:'🧭',lbl:'Plan'},
  {key:'develop',ico:'⚒',lbl:'Develop'},{key:'gate',ico:'🛡',lbl:'Gate'},{key:'assess',ico:'🎯',lbl:'Assess'}];
 const CX=210,CY=210,R=140,el=id=>document.getElementById(id),SVG='http://www.w3.org/2000/svg';
+// HTML-escape every dynamic value before it goes into innerHTML — task titles, reports,
+// digests, and GH issue text are attacker-influenceable (XSS guard).
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtN=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':''+n;
 const fmtT=s=>{s=Math.round(s);if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+(s%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
 function buildLoop(){const g=el('nodes');let p='';PHASES.forEach((ph,i)=>{
@@ -197,25 +200,25 @@ async function tick(){
   el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(k.shifts||'—');
   el('hub-phase').textContent=d.phase||'idle';
   const dev=(d.live||[]).filter(w=>w.role==='developer worker').length;el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
-  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${w.role.split(' ')[0]}">${w.role}</b> <span class="muted">pid ${w.pid}${w.where?(' · …/'+w.where.split('/').pop()):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
+  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${esc(String(w.role).split(' ')[0])}">${esc(w.role)}</b> <span class="muted">pid ${esc(w.pid)}${w.where?(' · …/'+esc(String(w.where).split('/').pop())):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
   // momentum
   el('momentum-verdict').textContent=mo.verdict||'—';
   const ser=mo.merges_series||[],smax=Math.max(1,...ser);
   el('spark').innerHTML=ser.length?ser.map((n,i)=>`<div class="s ${(d.running_shift&&i===ser.length-1)?'run':''}" title="${n} merged" style="height:${8+82*n/smax}%"><span>${n||''}</span></div>`).join(''):'<span class="muted">—</span>';
   const SC={advancing:'#22c55e',steady_state:'#f59e0b',blocked:'#f43f5e',reached:'#a78bfa'};
-  el('strip').innerHTML=(mo.status_series||[]).map(s=>`<span class="ms" title="${s}" style="background:${SC[s]||'#475569'}"></span>`).join('')||'<span class="muted">—</span>';
+  el('strip').innerHTML=(mo.status_series||[]).map(s=>`<span class="ms" title="${esc(s)}" style="background:${SC[s]||'#475569'}"></span>`).join('')||'<span class="muted">—</span>';
   // built ledger
   el('built-count').textContent=(d.built||[]).length?('· '+d.built.length):'';
-  el('built').innerHTML=(d.built||[]).length?d.built.map(b=>`<div class="row"><span class="ok">✓</span><span class="ttl">${b.title}</span>${b.sha?`<code>${b.sha}</code>`:''}<span class="src">${b.source}</span></div>`).join(''):'<div class="muted">nothing shipped yet</div>';
+  el('built').innerHTML=(d.built||[]).length?d.built.map(b=>`<div class="row"><span class="ok">✓</span><span class="ttl">${esc(b.title)}</span>${b.sha?`<code>${esc(b.sha)}</code>`:''}<span class="src">${esc(b.source)}</span></div>`).join(''):'<div class="muted">nothing shipped yet</div>';
   // backlog & plan
   const bk=d.backlog||[];el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
-  el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||t.status;
-    return `<div class="brow b-${t.status}"><span class="bstatus">${tag}</span><span class="src2">${t.source}${t.ref?('/'+t.ref):''}</span><span class="btitle">${t.title}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
+  el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||esc(t.status);
+    return `<div class="brow b-${esc(t.status)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
   // shifts
-  el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${s.id}</span><span><span class="badge b-${s.status}">${s.status}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${s.shipped} shipped</span> &nbsp;<span class="rep">${s.report||''}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
+  el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
   // research
   el('research-h').textContent=`· ${k.research_proposed||0} proposed, ${k.research_shipped||0} shipped`;
-  el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${x}</div>`).join(''):'<div class="muted">no research digests yet</div>';
+  el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';
   el('stamp').textContent='updated '+new Date().toLocaleTimeString();
 }
 buildLoop();tick();setInterval(tick,2000);

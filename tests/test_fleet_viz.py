@@ -136,6 +136,17 @@ def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch
         assert j["research"]["working"] is True
 
 
+def test_dashboard_escapes_dynamic_fields_xss_guard():
+    """XSS guard: task titles, conductor reports, and GH-issue-derived digests are
+    attacker-influenceable, so every dynamic value that goes into innerHTML must be esc()'d."""
+    page = os.path.join(os.path.dirname(__file__), "..", "dashboard", "static", "fleet.html")
+    with open(page, encoding="utf-8") as fh:
+        body = fh.read()
+    assert "const esc=" in body                                          # the escaper exists
+    for sink in ("esc(b.title)", "esc(t.title)", "esc(s.report", "esc(x)", "esc(w.role)"):
+        assert sink in body, f"un-escaped dashboard field (XSS risk): {sink}"
+
+
 def test_fleet_server_serves_the_live_page_and_api(monkeypatch):
     import json
     import threading
