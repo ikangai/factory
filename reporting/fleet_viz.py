@@ -32,6 +32,16 @@ def _autopilot_status() -> dict:
         return {"running": False, "pid": None}
 
 
+def _collab_state() -> dict:
+    """The agora collaboration view (who's working + who @mentions whom). Crash-proof."""
+    try:
+        from . import collab
+        return collab.agora_state()
+    except Exception:  # noqa: BLE001
+        return {"active": False, "total": 0, "mentions": 0, "senders": 0,
+                "agents": [], "messages": [], "edges": []}
+
+
 def _parse_iso(ts: str):
     try:
         return datetime.strptime(ts or "", "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -138,6 +148,7 @@ def fleet_json(store) -> dict:
         "mode": _mode.read_mode(),          # AUTO (self-driving) | SHIFT (one-and-wait)
         "autopilot": _autopilot_status(),   # is the AUTO runner actually alive? (+ pid)
         "halted": _killswitch.is_halted(),  # STOP engaged → the board shows Resume
+        "collab": _collab_state(),          # the agora bus: who's working + who @mentions whom
         "phase": phase,
         "status": latest,
         "running_shift": running["id"] if running else None,

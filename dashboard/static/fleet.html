@@ -93,6 +93,21 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .brow.b-in_progress .bstatus{color:#fb923c}
 .brow.b-open .bstatus{color:#7dd3fc}
 .brow.b-blocked .bstatus{color:#f43f5e}.brow.b-blocked .btitle{color:var(--muted)}
+/* collaboration — agora bus */
+.agents{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}
+.agent{display:flex;align-items:center;gap:6px;background:#0e1626;border:1px solid var(--line);border-radius:99px;padding:4px 11px;font-size:12px}
+.agent .dot{width:7px;height:7px;border-radius:50%;background:#334155;flex-shrink:0}
+.agent.live .dot{background:#22c55e;box-shadow:0 0 6px #22c55e}
+.agent .h{font-weight:700}.agent .sq{font-size:10px;color:var(--muted);text-transform:uppercase}
+.edges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.edge{font-size:11px;color:#c4b5fd;background:#2e1065aa;border:1px solid #4c1d95;border-radius:5px;padding:2px 8px;white-space:nowrap}
+.feed{max-height:300px;overflow-y:auto;border-top:1px solid var(--line);padding-top:8px}
+.msg{display:flex;gap:9px;padding:5px 0;border-bottom:1px solid #101830;font-size:12.5px;line-height:1.45}
+.msg .mt{color:var(--muted);font-variant-numeric:tabular-nums;flex-shrink:0;font-size:11px}
+.msg .mfrom{font-weight:700;flex-shrink:0;color:#7dd3fc}
+.msg .mto{color:#a78bfa;font-weight:600;flex-shrink:0}
+.msg .mbody{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg.sys{opacity:.45}.msg.sys .mfrom{color:var(--muted)}.msg.sys .mbody{font-style:italic;white-space:normal}
 
 /* shifts */
 .shift-row{display:grid;grid-template-columns:54px 92px 1fr;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #101830;font-size:13px}
@@ -160,6 +175,13 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
         <div class="built" id="built"><div class="muted">nothing shipped yet</div></div>
       </div>
     </div>
+  </div>
+
+  <div class="panel full">
+    <h3>Collaboration — agora bus <span class="muted" id="collab-h"></span></h3>
+    <div class="agents" id="collab-agents"></div>
+    <div class="edges" id="collab-edges"></div>
+    <div class="feed" id="collab-feed"><div class="muted">no bus activity yet</div></div>
   </div>
 
   <div class="panel full">
@@ -240,6 +262,12 @@ async function tick(){
   el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||esc(t.status);
     const why=(t.status==='blocked'&&t.result)?` <span class="muted">— ${esc(t.result)}</span>`:'';
     return `<div class="brow b-${esc(t.status)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}${why}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
+  // collaboration — agora bus
+  const c=d.collab||{};
+  el('collab-h').textContent=c.active?(`· ● active · ${c.total} msgs · ${c.mentions} @mentions · ${c.senders} talking`):'· idle (no bus activity)';
+  el('collab-agents').innerHTML=(c.agents||[]).length?c.agents.map(a=>`<span class="agent ${a.live?'live':''}"><span class="dot"></span><span class="h">${esc(a.handle)}</span>${a.squad?`<span class="sq">${esc(String(a.squad).replace('factory-',''))}</span>`:''}</span>`).join(''):'<span class="muted">no agents on the bus</span>';
+  el('collab-edges').innerHTML=(c.edges||[]).map(e=>`<span class="edge">${esc(e.from)} → @${esc(e.to)}${e.n>1?(' ×'+e.n):''}</span>`).join('');
+  el('collab-feed').innerHTML=(c.messages||[]).length?c.messages.map(m=>{const sys=m.kind==='system'||m.sender==='system';const to=(m.to&&m.to.length)?` <span class="mto">→ @${m.to.map(esc).join(' @')}</span>`:'';return `<div class="msg ${sys?'sys':''}"><span class="mt">${esc(String(m.ts||'').substr(11,5))}</span><span class="mfrom">${esc(m.sender)}</span>${to}<span class="mbody">${esc(m.body)}</span></div>`;}).join(''):'<div class="muted">no bus activity yet</div>';
   // shifts
   el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
   // research
