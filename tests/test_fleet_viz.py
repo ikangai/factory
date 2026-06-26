@@ -129,6 +129,8 @@ def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch
         # the BUILT ledger — what's actually been built
         assert [b["title"] for b in j["built"]] == ["verify-before-done"]
         assert j["built"][0]["sha"] == "247cebcAAA" and j["built"][0]["source"] == "research"
+        # the BACKLOG & plan — active (non-done) tasks only; done excluded
+        assert [x["id"] for x in j["backlog"]] == ["b"] and j["backlog"][0]["status"] == "blocked"
         # mission momentum
         assert "Advancing" in j["momentum"]["verdict"] and j["momentum"]["merges_series"] == [1]
         assert j["research"]["working"] is True

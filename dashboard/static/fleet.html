@@ -74,6 +74,15 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .built .row .ok{color:#22c55e}.built .row .ttl{flex:1;min-width:0}
 .built .row code{background:#0008;padding:1px 5px;border-radius:4px;color:#fbbf24;font-size:11px}
 .built .row .src{font-size:10px;color:var(--muted);text-transform:uppercase}
+/* backlog & plan */
+.brow{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #101830;font-size:13px}
+.brow .bstatus{width:88px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.brow .src2{font-size:10px;color:var(--muted);text-transform:uppercase;width:74px}
+.brow .btitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brow.b-in_progress{background:#fb923c12;border-left:3px solid #fb923c;padding-left:8px;border-radius:4px}
+.brow.b-in_progress .bstatus{color:#fb923c}
+.brow.b-open .bstatus{color:#7dd3fc}
+.brow.b-blocked .bstatus{color:#f43f5e}.brow.b-blocked .btitle{color:var(--muted)}
 
 /* shifts */
 .shift-row{display:grid;grid-template-columns:54px 92px 1fr;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #101830;font-size:13px}
@@ -138,6 +147,11 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
   </div>
 
   <div class="panel full">
+    <h3>Backlog &amp; plan <span class="muted" id="backlog-h"></span></h3>
+    <div id="backlog"><div class="muted">backlog empty</div></div>
+  </div>
+
+  <div class="panel full">
     <h3>Shifts — every conductor run</h3>
     <div id="shifts"><div class="muted">no shifts yet</div></div>
   </div>
@@ -193,6 +207,10 @@ async function tick(){
   // built ledger
   el('built-count').textContent=(d.built||[]).length?('· '+d.built.length):'';
   el('built').innerHTML=(d.built||[]).length?d.built.map(b=>`<div class="row"><span class="ok">✓</span><span class="ttl">${b.title}</span>${b.sha?`<code>${b.sha}</code>`:''}<span class="src">${b.source}</span></div>`).join(''):'<div class="muted">nothing shipped yet</div>';
+  // backlog & plan
+  const bk=d.backlog||[];el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
+  el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||t.status;
+    return `<div class="brow b-${t.status}"><span class="bstatus">${tag}</span><span class="src2">${t.source}${t.ref?('/'+t.ref):''}</span><span class="btitle">${t.title}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
   // shifts
   el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${s.id}</span><span><span class="badge b-${s.status}">${s.status}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${s.shipped} shipped</span> &nbsp;<span class="rep">${s.report||''}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
   // research

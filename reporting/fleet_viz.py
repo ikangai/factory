@@ -134,6 +134,14 @@ def fleet_json(store) -> dict:
                      "merges_series": [sum(1 for t in s["tasks"] if t["status"] == "done")
                                        for s in reversed(shifts)],           # oldest → newest
                      "status_series": [r["status"] for r in reversed(ms)]},
+        # THE BACKLOG + PLAN — the active (non-done) tasks: in_progress = claimed/planned
+        # THIS shift, open = waiting (incl. research proposals), blocked = stuck. So the
+        # operator sees both what the conductor is working and what research proposed.
+        "backlog": sorted(
+            [{"id": t["id"], "title": t["title"], "source": t["source"],
+              "status": t["status"], "ref": t.get("source_ref", "")}
+             for t in all_tasks if t["status"] in ("open", "in_progress", "blocked")],
+            key=lambda t: {"in_progress": 0, "open": 1, "blocked": 2}.get(t["status"], 3)),
         # WHAT'S BEEN BUILT — the ledger of shipped changes (title + sha), newest first.
         "built": [{"title": t["title"], "sha": (t.get("result") or "")[:10],
                    "source": t["source"], "shift": t.get("shift_id")}
