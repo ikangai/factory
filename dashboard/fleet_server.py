@@ -73,7 +73,14 @@ class Handler(BaseHTTPRequestHandler):
             m = modemod.set_mode(payload.get("mode", ""))
         except (json.JSONDecodeError, ValueError) as e:
             return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
-        return self._send(200, json.dumps({"mode": m}).encode(), "application/json")
+        info = {"mode": m}
+        if m == modemod.AUTO:                 # toggling AUTO actually STARTS the autopilot runner
+            from ..orchestrator import autopilot
+            try:
+                info["autopilot"] = autopilot.start_runner()
+            except Exception as e:  # noqa: BLE001 — surface the failure, don't 500 the toggle
+                info["autopilot"] = {"started": False, "error": str(e)}
+        return self._send(200, json.dumps(info).encode(), "application/json")
 
 
 def serve(host: str = "127.0.0.1", port: int = 8788, *, open_browser: bool = True) -> int:

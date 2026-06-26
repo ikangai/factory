@@ -22,6 +22,15 @@ from ..common import mode as _mode
 from ..common import paths
 
 
+def _autopilot_status() -> dict:
+    """Is the AUTO runner actually alive? (lazy import — keep fleet_viz importable anywhere)."""
+    try:
+        from ..orchestrator import autopilot
+        return autopilot.status()
+    except Exception:  # noqa: BLE001
+        return {"running": False, "pid": None}
+
+
 def _parse_iso(ts: str):
     try:
         return datetime.strptime(ts or "", "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -126,6 +135,7 @@ def fleet_json(store) -> dict:
         "mission": m["statement"] if m else None,
         "target": (m.get("target_repo") if m else None) or None,
         "mode": _mode.read_mode(),          # AUTO (self-driving) | SHIFT (one-and-wait)
+        "autopilot": _autopilot_status(),   # is the AUTO runner actually alive? (+ pid)
         "phase": phase,
         "status": latest,
         "running_shift": running["id"] if running else None,

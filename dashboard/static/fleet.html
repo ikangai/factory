@@ -30,6 +30,8 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .mbtn:hover{color:var(--ink)}
 .mbtn.active[data-mode=auto]{background:#22c55e;color:#04140a}
 .mbtn.active[data-mode=shift]{background:#38bdf8;color:#04121f}
+.apstat{font-size:11px;font-weight:600;margin-left:9px;white-space:nowrap}
+.apstat.run{color:#22c55e}.apstat.warn{color:#fb923c}
 
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:16px 0}
@@ -116,6 +118,7 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
       <button class="mbtn" data-mode="shift">⏸&nbsp;Shift</button>
       <button class="mbtn" data-mode="auto">▶&nbsp;Auto</button>
     </div>
+    <span class="apstat" id="apstat"></span>
   </header>
 
   <!-- CEO KPI strip -->
@@ -195,6 +198,11 @@ async function tick(){
   el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
   const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
   document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
+  const ap=d.autopilot||{},aps=el('apstat');
+  if((d.mode||'shift')==='auto'){
+    if(ap.running){aps.textContent='● autopilot running'+(ap.pid?(' (pid '+ap.pid+')'):'');aps.className='apstat run';}
+    else{aps.textContent='⚠ autopilot idle — starting…';aps.className='apstat warn';}
+  }else{aps.textContent='';aps.className='apstat';}
   // KPI strip
   el('kpis').innerHTML=
     kpi('🚢 Shipped','<span>'+(k.shipped||0)+'</span>',(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked','hero')+
