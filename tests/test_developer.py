@@ -37,11 +37,20 @@ def test_develop_candidate_is_a_full_instance_with_web_and_own_squad(monkeypatch
                         lambda: {"super_worker": {"settings": "user",
                                                   "extra_tools": ["mcp__chrome-devtools"],
                                                   "squad": "factory-workers"}})
-    common.develop_candidate("/clone", task="t", branch="b", test_cmd="pytest", frozen=[])
+    common.develop_candidate("/clone", task="t", branch="factory/cand-aaa111", test_cmd="pytest", frozen=[])
     assert captured["settings"] == "user"                     # full instance (agora/diary/MCP)
     assert "WebSearch" in captured["allowed_tools"]            # web search
     assert "mcp__chrome-devtools" in captured["allowed_tools"]  # chrome-devtools (config extra)
-    assert captured["extra_env"]["AGORA_SQUAD"] == "factory-workers"   # own squad → no barrier hang
+    env = captured["extra_env"]
+    assert env["AGORA_SQUAD"] == "factory-workers-aaa111"      # UNIQUE per worker → solo, no hang
+    assert env["AGORA_DIR"].endswith((".groupchat", ".agora"))  # posts to the FACTORY bus, not the clone's
+    assert env["AGORA_SOLO_GRACE"] == "0"                      # one-shot: announce + work + exit, no park
+
+    captured2 = {}
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: captured2.update(k) or ("done", 1, 0.0))
+    common.develop_candidate("/clone", task="t", branch="factory/cand-bbb222", test_cmd="pytest", frozen=[])
+    assert captured2["extra_env"]["AGORA_SQUAD"] != env["AGORA_SQUAD"]   # parallel workers → distinct squads
 
 
 def test_develop_candidate_runs_as_guest_house_user_when_configured(monkeypatch):

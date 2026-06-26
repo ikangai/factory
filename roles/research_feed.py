@@ -78,7 +78,7 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
         allowed_tools=common.RESEARCHER_TOOLS,            # read + web + fan-out; NO Bash/edits
         as_user=as_user, claude_bin=claude_bin,
         settings=sw.get("settings", "user"),              # web + diary + MCP
-        extra_env={"AGORA_SQUAD": sw.get("research_squad", "factory-research")},
+        extra_env=common.worker_bus_env(sw.get("research_squad", "factory-research")),
         max_turns=int(sw.get("research_max_turns", 40)),
         timeout=int(sw.get("research_timeout_s", 900)))
 

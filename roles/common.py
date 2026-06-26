@@ -237,6 +237,24 @@ def run_super_worker(prompt: str, *, allowed_tools=DEFAULT_SUPER_TOOLS,
         return claude_super(prompt, workdir=wd, allowed_tools=allowed_tools, timeout=timeout)
 
 
+def factory_agora_dir() -> str:
+    """The FACTORY's agora bus dir — so a super-worker running INSIDE a clone posts to OUR
+    bus (cwd-relative resolution would otherwise pick the clone's own throwaway bus, and the
+    worker's announcements would never reach the dashboard)."""
+    for name in (".agora", ".groupchat"):
+        d = os.path.join(paths.FACTORY_ROOT, name)
+        if os.path.isdir(d):
+            return d
+    return os.path.join(paths.FACTORY_ROOT, ".groupchat")
+
+
+def worker_bus_env(squad: str) -> dict:
+    """Agora env for a one-shot super-worker: post to the factory bus, in a (caller-made
+    UNIQUE) squad so it's SOLO — parallel workers sharing one squad would block each other at
+    the team barrier up to 2h — and SOLO_GRACE=0 so it announces, works, and exits w/o parking."""
+    return {"AGORA_SQUAD": squad, "AGORA_DIR": factory_agora_dir(), "AGORA_SOLO_GRACE": "0"}
+
+
 def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
                       frozen, as_user: Optional[str] = None, claude_bin: str = "claude",
                       timeout: int = 1800) -> dict:
@@ -249,9 +267,10 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
     sw = config.load_config().get("super_worker", {}) or {}
     settings = sw.get("settings", "user")            # full instance: agora + diary + MCP loaded
     tools = DEVELOPER_TOOLS + tuple(sw.get("extra_tools") or ())   # + chrome-devtools (config)
-    # Own agora squad: a headless one-shot worker must not wait at the OPERATOR's team
-    # barrier — solo in its own squad it can use the bus without blocking on us.
-    extra_env = {"AGORA_SQUAD": sw.get("squad", "factory-workers")}
+    # Post to the FACTORY bus, in a UNIQUE per-worker squad (the branch's uuid suffix) so
+    # PARALLEL developers stay solo (no team-barrier wait), and announce on the bus.
+    base = sw.get("squad", "factory-workers")
+    extra_env = worker_bus_env(f"{base}-{branch.rsplit('-', 1)[-1]}")
     prompt = (_load_prompt("developer")
               .replace("{TASK}", task)
               .replace("{BRANCH}", branch)
