@@ -42,6 +42,47 @@ def _collab_state() -> dict:
                 "live": 0, "agents": [], "messages": [], "edges": []}
 
 
+import threading as _threading  # noqa: E402
+
+_ISSUE_CACHE = {"t": -1e9, "data": {"repo": "", "count": 0, "issues": []}, "fetching": False}
+_ISSUE_LOCK = _threading.Lock()
+
+
+def _refresh_issues() -> None:
+    import re
+    import time
+    repo, issues = "", []
+    try:
+        from ..common import config
+        from ..roles.research_feed import fetch_issues
+        repo = config.target_repo_slug()
+        for line in (fetch_issues(repo, limit=30) if repo else "").splitlines():
+            m = re.match(r"-\s*#(\d+):\s*(.*?)(?:\s+\[([^\]]*)\])?\s*$", line)
+            if m:
+                issues.append({"number": int(m.group(1)), "title": m.group(2).strip(),
+                               "labels": m.group(3) or ""})
+    except Exception:  # noqa: BLE001
+        pass
+    with _ISSUE_LOCK:
+        _ISSUE_CACHE.update(t=time.monotonic(),
+                            data={"repo": repo, "count": len(issues), "issues": issues},
+                            fetching=False)
+
+
+def _upstream_issues() -> dict:
+    """The target's open GitHub issues — the FEED into research + the conductor. Cached 60s and
+    refreshed in a BACKGROUND thread (a gh fetch must never block the 2s dashboard poll)."""
+    import time
+    with _ISSUE_LOCK:
+        data = _ISSUE_CACHE["data"]
+        stale = (time.monotonic() - _ISSUE_CACHE["t"]) > 60 and not _ISSUE_CACHE["fetching"]
+        if stale:
+            _ISSUE_CACHE["fetching"] = True
+    if stale:
+        _threading.Thread(target=_refresh_issues, daemon=True).start()
+    return data
+
+
 def _parse_iso(ts: str):
     try:
         return datetime.strptime(ts or "", "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -149,6 +190,7 @@ def fleet_json(store) -> dict:
         "autopilot": _autopilot_status(),   # is the AUTO runner actually alive? (+ pid)
         "halted": _killswitch.is_halted(),  # STOP engaged → the board shows Resume
         "collab": _collab_state(),          # the agora bus: who's working + who @mentions whom
+        "issues": _upstream_issues(),       # the target's open GitHub issues feeding research
         "phase": phase,
         "status": latest,
         "running_shift": running["id"] if running else None,
@@ -165,7 +207,8 @@ def fleet_json(store) -> dict:
         "backlog": sorted(
             [{"id": t["id"], "title": t["title"], "source": t["source"],
               "status": t["status"], "ref": t.get("source_ref", ""),
-              "result": t.get("result", "")}      # blocked → the WHY (error/discard reason)
+              "result": t.get("result", ""),     # blocked → the WHY (error/discard reason)
+              "detail": (t.get("detail") or "")[:400]}   # the proposal rationale (hover to read)
              for t in all_tasks if t["status"] in ("open", "in_progress", "blocked")],
             key=lambda t: {"in_progress": 0, "open": 1, "blocked": 2}.get(t["status"], 3)),
         # WHAT'S BEEN BUILT — the ledger of shipped changes (title + sha), newest first.

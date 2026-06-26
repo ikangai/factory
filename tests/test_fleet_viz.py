@@ -168,6 +168,24 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
         httpd.shutdown()
 
 
+def test_upstream_issues_parses_into_structured_rows(monkeypatch):
+    """The dashboard's issue feed: gh issue lines → {number,title,labels}, cached."""
+    from factory.common import config
+    from factory.roles import research_feed
+    monkeypatch.setattr(config, "target_repo_slug", lambda: "ikangai/clive")
+    monkeypatch.setattr(research_feed, "fetch_issues",
+                        lambda repo, **k: "- #41: Self-learning tool discovery  [enhancement]\n"
+                                          "- #38: Messaging CLIs")
+    try:
+        fleet_viz._refresh_issues()                 # synchronous refresh into the cache
+        d = fleet_viz._ISSUE_CACHE["data"]
+        assert d["repo"] == "ikangai/clive" and d["count"] == 2
+        assert d["issues"][0] == {"number": 41, "title": "Self-learning tool discovery", "labels": "enhancement"}
+        assert d["issues"][1] == {"number": 38, "title": "Messaging CLIs", "labels": ""}
+    finally:
+        fleet_viz._ISSUE_CACHE.update(t=-1e9, data={"repo": "", "count": 0, "issues": []}, fetching=False)
+
+
 def test_dashboard_escapes_dynamic_fields_xss_guard():
     """XSS guard: task titles, conductor reports, and GH-issue-derived digests are
     attacker-influenceable, so every dynamic value that goes into innerHTML must be esc()'d."""
