@@ -53,6 +53,46 @@ def build_fleet_state(store) -> dict:
     }
 
 
+def fleet_json(store) -> dict:
+    """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
+    counts, the DERIVED current loop phase, the shifts (compact), live workers, the
+    mission-status timeline, and digests. (build_fleet_state + live_workers, distilled.)"""
+    state = build_fleet_state(store)
+    live = live_workers()
+    by = state["tasks_by_status"]
+    running = next((s for s in state["shifts"] if s["status"] == "running"), None)
+    dev_live = [w for w in live if w["role"] == "developer worker"]
+    res_live = [w for w in live if w["role"] == "researcher"]
+    if dev_live:
+        phase = "develop"            # the rail is running a developer worker
+    elif res_live:
+        phase = "research"
+    elif running:
+        phase = "plan"               # a shift is up but no worker yet → the conductor is planning
+    else:
+        phase = "idle"
+    ms = state["mission_status"]
+    m = state["mission"]
+    return {
+        "mission": m["statement"] if m else None,
+        "target": (m.get("target_repo") if m else None) or None,
+        "phase": phase,
+        "status": ms[0]["status"] if ms else None,
+        "running_shift": running["id"] if running else None,
+        "summary": {"shifts": len(state["shifts"]), "shipped": len(by["done"]),
+                    "open": len(by["open"]), "in_progress": len(by["in_progress"]),
+                    "blocked": len(by["blocked"])},
+        "live": live,
+        "shifts": [{"id": s["id"], "status": s["status"], "tokens": s.get("tokens_used", 0),
+                    "shipped": sum(1 for t in s["tasks"] if t["status"] == "done"),
+                    "report": (s.get("report") or "")[:280]}
+                   for s in state["shifts"]],
+        "mission_status": [{"status": r["status"], "shift": r.get("shift_id"),
+                            "rationale": r.get("rationale", "")} for r in ms],
+        "digests": [d["summary"][:140] for d in state["digests"]],
+    }
+
+
 def live_workers() -> list[dict]:
     """Snapshot the `claude -p` processes running right now, labelled by role from their
     args. Best-effort — returns [] if pgrep is unavailable."""

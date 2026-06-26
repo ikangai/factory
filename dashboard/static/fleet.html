@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Factory — Mission Control</title>
+<style>
+:root{
+  --bg:#070b16; --bg2:#0c1224; --ink:#e8eefc; --muted:#7e8ba6; --line:#1a2540;
+  --idle:#3a4b6b; --research:#a78bfa; --plan:#38bdf8; --develop:#fb923c;
+  --gate:#f43f5e; --assess:#22c55e;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:radial-gradient(1200px 800px at 70% -10%,#10204a33,transparent),var(--bg);
+  color:var(--ink);font:14px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+.app{display:grid;grid-template-columns:1.35fr 1fr;grid-template-rows:auto 1fr;height:100vh;gap:0}
+header{grid-column:1/3;display:flex;align-items:baseline;gap:18px;padding:16px 26px;border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0;letter-spacing:.5px;white-space:nowrap}
+.dot-live{width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:7px;
+  box-shadow:0 0 0 0 #22c55e;animation:pulse 1.8s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #22c55eaa}70%{box-shadow:0 0 0 9px #22c55e00}100%{box-shadow:0 0 0 0 #22c55e00}}
+#mission{color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#target{color:var(--muted);font-size:12px;margin-left:auto;white-space:nowrap}
+
+/* ── the loop ── */
+.stage{position:relative;display:flex;align-items:center;justify-content:center}
+#loop{width:min(56vh,560px);height:min(56vh,560px)}
+.ring{fill:none;stroke:#16223f;stroke-width:2}
+.flow{fill:none;stroke:url(#g);stroke-width:3;stroke-linecap:round;stroke-dasharray:14 26;opacity:.0;
+  transition:opacity .6s}
+.alive .flow{opacity:.9;animation:dash 2.4s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-40}}
+.node circle{fill:var(--bg2);stroke:#243156;stroke-width:2;transition:all .4s}
+.node .ico{font-size:20px;text-anchor:middle;dominant-baseline:central}
+.node .lbl{fill:var(--muted);font-size:11px;text-anchor:middle;text-transform:uppercase;letter-spacing:.6px;transition:fill .4s}
+.node.active circle{stroke-width:3;filter:drop-shadow(0 0 10px currentColor)}
+.node.active .lbl{fill:var(--ink);font-weight:700}
+.node[data-key=research].active circle{stroke:var(--research);color:var(--research)}
+.node[data-key=plan].active circle{stroke:var(--plan);color:var(--plan)}
+.node[data-key=develop].active circle{stroke:var(--develop);color:var(--develop)}
+.node[data-key=gate].active circle{stroke:var(--gate);color:var(--gate)}
+.node[data-key=assess].active circle{stroke:var(--assess);color:var(--assess)}
+.comet{fill:#bfe0ff;filter:drop-shadow(0 0 8px #7dd3fc)}
+.rotor{transform-origin:210px 210px;animation:spin 7s linear infinite;opacity:.35;transition:opacity .5s}
+.alive .rotor{opacity:1;animation-duration:3.6s}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hub{text-anchor:middle}
+.hub .shift{fill:var(--ink);font-size:26px;font-weight:800}
+.hub .phase{fill:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:2px}
+.devbadge{fill:#fb923c;font-size:12px;font-weight:800;text-anchor:middle;dominant-baseline:central}
+
+/* ── status pane ── */
+.pane{border-left:1px solid var(--line);padding:20px 24px;overflow:auto}
+.shipped{font-size:64px;font-weight:800;line-height:1;letter-spacing:-2px;
+  background:linear-gradient(180deg,#fff,#8fd3ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.shipped small{font-size:13px;color:var(--muted);font-weight:600;-webkit-text-fill-color:var(--muted)}
+.pill{display:inline-block;padding:3px 12px;border-radius:99px;font-size:12px;font-weight:700;margin-top:8px;border:1px solid}
+.pill-advancing{color:#22c55e;border-color:#22c55e66;background:#22c55e18}
+.pill-steady_state{color:#f59e0b;border-color:#f59e0b66;background:#f59e0b18}
+.pill-blocked{color:#f43f5e;border-color:#f43f5e66;background:#f43f5e18}
+.pill-reached{color:#a78bfa;border-color:#a78bfa66;background:#a78bfa18}
+.pill-none{color:var(--muted);border-color:var(--line)}
+h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:22px 0 9px}
+.bars{display:flex;flex-direction:column;gap:7px}
+.bar{display:flex;align-items:center;gap:9px;font-size:12px}
+.bar .k{width:84px;color:var(--muted)}.bar .t{flex:1;height:9px;border-radius:5px;background:#121a30;overflow:hidden}
+.bar .f{height:100%;border-radius:5px;transition:width .6s}
+.bar .n{width:22px;text-align:right;font-weight:700}
+.spark{display:flex;align-items:flex-end;gap:5px;height:64px}
+.spark .s{flex:1;min-width:6px;background:linear-gradient(180deg,#38bdf8,#1d4ed8);border-radius:3px 3px 0 0;
+  position:relative;transition:height .6s}
+.spark .s.run{background:linear-gradient(180deg,#fbbf24,#f97316);animation:glow 1.6s ease-in-out infinite}
+@keyframes glow{50%{filter:brightness(1.5)}}
+.spark .s span{position:absolute;top:-16px;left:0;right:0;text-align:center;font-size:10px;color:var(--muted)}
+.live .w{display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13px;border-bottom:1px solid #101830}
+.live .w b{font-weight:600}.live .w .role-developer{color:#fb923c}.live .w .role-conductor{color:#38bdf8}
+.live .w .role-researcher{color:#a78bfa}
+.live .blip{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 1.6s infinite}
+.muted{color:var(--muted)}.dig{font-size:12px;color:var(--muted);padding:4px 0;border-bottom:1px solid #101830}
+#stamp{position:fixed;bottom:8px;right:14px;font-size:11px;color:#46556f}
+.off{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#070b16ee;
+  font-size:14px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🏭 HARNESS FACTORY</h1>
+    <span><span class="dot-live"></span><span id="mission">connecting…</span></span>
+    <span id="target"></span>
+  </header>
+
+  <div class="stage">
+    <svg id="loop" viewBox="0 0 420 420">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
+      <circle class="ring" cx="210" cy="210" r="140"/>
+      <path class="flow" d=""/>
+      <g class="rotor"><circle class="comet" cx="210" cy="70" r="6"/></g>
+      <g id="nodes"></g>
+      <g class="hub"><text class="shift" x="210" y="204" id="hub-shift">—</text>
+        <text class="phase" x="210" y="230" id="hub-phase">idle</text></g>
+    </svg>
+  </div>
+
+  <aside class="pane">
+    <div class="shipped"><span id="shipped">0</span> <small>merges shipped</small></div>
+    <div><span class="pill pill-none" id="pill">—</span></div>
+
+    <h3>Backlog</h3>
+    <div class="bars" id="bars"></div>
+
+    <h3>Shifts — merges per shift</h3>
+    <div class="spark" id="spark"></div>
+
+    <h3>Live workers</h3>
+    <div class="live" id="live"><div class="muted">none running</div></div>
+
+    <h3>Research digests <span class="muted">— what shipped, fuels research</span></h3>
+    <div id="digests"><div class="muted">none yet</div></div>
+  </aside>
+</div>
+<div class="off" id="off">factory server unreachable — is <code>&nbsp;factory viz --serve&nbsp;</code> running?</div>
+<div id="stamp"></div>
+
+<script>
+const PHASES=[
+ {key:'research',ico:'🔬',lbl:'Research'},{key:'plan',ico:'🧭',lbl:'Plan'},
+ {key:'develop',ico:'⚒',lbl:'Develop'},{key:'gate',ico:'🛡',lbl:'Gate'},
+ {key:'assess',ico:'🎯',lbl:'Assess'}];
+const CX=210,CY=210,R=140,el=id=>document.getElementById(id),SVG='http://www.w3.org/2000/svg';
+function buildLoop(){
+  const g=el('nodes'); let path='';
+  PHASES.forEach((p,i)=>{
+    const a=(-90+i*72)*Math.PI/180, x=CX+R*Math.cos(a), y=CY+R*Math.sin(a);
+    if(i===0) path=`M ${x} ${y}`; else path+=` L ${x} ${y}`;
+    const node=document.createElementNS(SVG,'g'); node.setAttribute('class','node'); node.dataset.key=p.key;
+    node.innerHTML=`<circle cx="${x}" cy="${y}" r="30"></circle>`+
+      `<text class="ico" x="${x}" y="${y}">${p.ico}</text>`+
+      `<text class="lbl" x="${x}" y="${y+46}">${p.lbl}</text>`+
+      (p.key==='develop'?`<text class="devbadge" x="${x+24}" y="${y-22}" id="devbadge"></text>`:'');
+    g.appendChild(node);
+  });
+  document.querySelector('.flow').setAttribute('d',path+' Z');
+}
+function bar(k,n,max,color){
+  const w=max>0?Math.round(100*n/max):0;
+  return `<div class="bar"><span class="k">${k}</span><span class="t"><span class="f" style="width:${w}%;background:${color}"></span></span><span class="n">${n}</span></div>`;
+}
+async function tick(){
+  let d; try{ const r=await fetch('/api/fleet',{cache:'no-store'}); d=await r.json(); }
+  catch(e){ el('off').style.display='flex'; return; }
+  el('off').style.display='none';
+  el('mission').textContent=d.mission||'— no mission set —';
+  el('target').textContent=d.target?('🎯 '+d.target):'';
+  document.querySelectorAll('.node').forEach(n=>n.classList.toggle('active',n.dataset.key===d.phase));
+  el('loop').classList.toggle('alive',d.phase&&d.phase!=='idle');
+  el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(d.summary.shifts||'—');
+  el('hub-phase').textContent=d.phase||'idle';
+  el('shipped').textContent=d.summary.shipped;
+  const pill=el('pill'); pill.textContent=d.status||'—'; pill.className='pill pill-'+(d.status||'none');
+  const s=d.summary, mx=Math.max(1,s.open,s.in_progress,s.blocked,s.shipped);
+  el('bars').innerHTML=bar('open',s.open,mx,'#64748b')+bar('in progress',s.in_progress,mx,'#38bdf8')
+    +bar('blocked',s.blocked,mx,'#f43f5e')+bar('done',s.shipped,mx,'#22c55e');
+  const sh=[...d.shifts].reverse(), smax=Math.max(1,...sh.map(x=>x.shipped));
+  el('spark').innerHTML=sh.map(x=>`<div class="s ${x.status==='running'?'run':''}" title="shift ${x.id}: ${x.shipped} shipped (${x.status})" style="height:${10+80*x.shipped/smax}%"><span>${x.shipped||''}</span></div>`).join('')||'<span class="muted">no shifts yet</span>';
+  const dev=d.live.filter(w=>w.role==='developer worker').length; el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
+  el('live').innerHTML=d.live.length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${w.role.split(' ')[0]}">${w.role}</b> <span class="muted">pid ${w.pid}${w.where?(' · '+w.where.replace(/^.*\\//,'…/')):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
+  el('digests').innerHTML=d.digests.length?d.digests.map(x=>`<div class="dig">📦 ${x}</div>`).join(''):'<div class="muted">none yet</div>';
+  el('stamp').textContent='updated '+new Date().toLocaleTimeString();
+}
+buildLoop(); tick(); setInterval(tick,2000);
+</script>
+</body>
+</html>

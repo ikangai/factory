@@ -787,10 +787,15 @@ def _should_idle(store: Blackboard, plateau_k: int) -> bool:
             and len(store.list_tasks(status="open")) == 0)
 
 
-def cmd_viz(store: Blackboard, *, open_browser: bool = True) -> str:
-    """Generate the fleet HTML visualization — the (super) worker instances (conductor
-    shifts → developer-worker dispatches → researcher output) and their activities, plus
-    the live `claude -p` workers — and open it. Read-only snapshot; regenerate any time."""
+def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
+            port: int = 8788):
+    """The fleet visualization of the (super) worker instances + activities. `--serve`:
+    a LIVE 'mission control' — an animated conductor-loop that shows the active phase, the
+    live workers, and the mission's progress, auto-updating while a run is in flight.
+    Default: write + open a one-shot HTML snapshot (logs/fleet.html)."""
+    if serve:
+        from ..dashboard import fleet_server
+        return fleet_server.serve(port=port, open_browser=open_browser)
     from ..reporting import fleet_viz
     from ..common.store import now_iso
     path = fleet_viz.generate_fleet_html(store, generated_at=now_iso())
@@ -982,7 +987,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--real", action="store_true",
                      help="merge into the REAL target's factory/auto branch (default: throwaway clones)")
     viz = sub.add_parser("viz")             # HTML visualization of the fleet + activities
-    viz.add_argument("--no-open", action="store_true", help="write the file but don't open it")
+    viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
+    viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
+    viz.add_argument("--no-open", action="store_true", help="don't open the browser")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
     tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
     tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
@@ -1080,7 +1087,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "research-feed":
             cmd_research_feed(store, prod=a.prod)
         elif a.cmd == "viz":
-            cmd_viz(store, open_browser=not a.no_open)
+            cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port)
         elif a.cmd == "run":
             cmd_run(store, mission=a.mission, token_budget=a.budget,
                     wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)

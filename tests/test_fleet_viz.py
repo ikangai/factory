@@ -64,6 +64,54 @@ def test_render_handles_an_empty_factory(tmp_path):
     assert "no mission set" in doc and "no shifts yet" in doc         # graceful, not a crash
 
 
+def test_fleet_json_derives_phase_and_summary(tmp_path, monkeypatch):
+    """The --serve data layer: the current LOOP PHASE is derived from live workers + the
+    running shift, and the summary counts drive the progress visuals."""
+    with _store(tmp_path) as s:
+        s.set_mission("inter-clive comms", target_repo="ikangai/clive")
+        sh = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])   # a RUNNING shift
+        s.add_task("a", "x", source="issue"); s.set_task_status("a", "done", result="sha", shift_id=sh)
+        s.add_task("b", "y", source="research")                                    # open
+        s.add_task("c", "z", source="issue"); s.set_task_status("c", "blocked", result="no_candidate", shift_id=sh)
+        s.record_mission_status(shift_id=sh, status="advancing", rationale="1 shipped", metrics={})
+
+        monkeypatch.setattr(fleet_viz, "live_workers",
+                            lambda: [{"pid": "1", "role": "developer worker", "where": "/tmp/cf-dev-x"}])
+        j = fleet_viz.fleet_json(s)
+        assert j["phase"] == "develop" and j["running_shift"] == sh        # worker live → develop
+        assert j["mission"] == "inter-clive comms" and j["status"] == "advancing"
+        assert j["summary"] == {"shifts": 1, "shipped": 1, "open": 1, "in_progress": 0, "blocked": 1}
+
+        monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+        assert fleet_viz.fleet_json(s)["phase"] == "plan"                  # running shift, no worker → plan
+        s.end_shift(sh, status="completed")
+        assert fleet_viz.fleet_json(s)["phase"] == "idle"                  # nothing running → idle
+
+
+def test_fleet_server_serves_the_live_page_and_api(monkeypatch):
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "fleet_state", lambda: {
+        "mission": "m", "phase": "develop", "status": "advancing", "running_shift": 3,
+        "summary": {"shifts": 1, "shipped": 1, "open": 0, "in_progress": 0, "blocked": 0},
+        "live": [], "shifts": [], "mission_status": [], "digests": []})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    th = threading.Thread(target=httpd.serve_forever, daemon=True)
+    th.start()
+    try:
+        page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
+        api = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/fleet").read())
+    finally:
+        httpd.shutdown()
+    assert "HARNESS FACTORY" in page and "/api/fleet" in page             # the live page
+    assert api["phase"] == "develop" and api["summary"]["shipped"] == 1   # the polled state
+
+
 def test_generate_writes_a_self_contained_file(tmp_path):
     with _store(tmp_path) as s:
         s.set_mission("m")
