@@ -103,9 +103,14 @@ def live_workers() -> list[dict]:
         return []
     workers = []
     for line in out.splitlines():
-        if "claude -p" not in line or "pgrep" in line:
+        # Real super-workers are `claude -p … --add-dir <wd>`. Requiring --add-dir (and a
+        # numeric pid) skips shells/echoes/greps that merely MENTION "claude -p" in text.
+        if "claude -p" not in line or "--add-dir" not in line:
             continue
-        pid = line.split(" ", 1)[0]
+        parts = line.split()
+        if not parts or not parts[0].isdigit():
+            continue
+        pid = parts[0]
         if "/cf-dev-" in line or "/cf-champ-" in line or ".factory-auto" in line:
             role, where = "developer worker", _add_dir(line)
         elif "research" in line.lower():

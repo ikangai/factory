@@ -64,6 +64,21 @@ def test_render_handles_an_empty_factory(tmp_path):
     assert "no mission set" in doc and "no shifts yet" in doc         # graceful, not a crash
 
 
+def test_live_workers_filters_shells_and_echoes(monkeypatch):
+    """Only real super-workers (claude -p … --add-dir …) count — not shells/greps that
+    merely MENTION 'claude -p' in their text (the 'pid: echo' junk seen on the live board)."""
+    import types
+    canned = (
+        '4011 /Users/x/.local/bin/claude -p --output-format json --add-dir /tmp/cf-dev-abc/clone --max-turns 24\n'
+        '5123 /bin/zsh -c echo "checking claude -p workers"\n'
+        '6001 claude -p --output-format json --setting-sources user --add-dir /Users/x/factory --max-turns 60\n')
+    monkeypatch.setattr(fleet_viz.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=canned))
+    ws = fleet_viz.live_workers()
+    assert [w["pid"] for w in ws] == ["4011", "6001"]        # the zsh/echo line dropped
+    assert ws[0]["role"] == "developer worker" and ws[1]["role"] == "conductor"
+
+
 def test_fleet_json_derives_phase_and_summary(tmp_path, monkeypatch):
     """The --serve data layer: the current LOOP PHASE is derived from live workers + the
     running shift, and the summary counts drive the progress visuals."""
