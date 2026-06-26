@@ -117,6 +117,27 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     s.close()
 
 
+def test_execute_claimed_tasks_captures_the_block_reason(tmp_path):
+    """A bare 'error' is undiagnosable — when develop_task raises, the exception message
+    is threaded into the task result so the operator + the conductor can see WHY."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "x", source="issue")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+
+    def boom(text, **k):
+        raise RuntimeError("git worktree add failed: fatal: branch already checked out")
+
+    execute_claimed_tasks(s, sh, develop_fn=boom)
+    t = s.get_task("t")
+    assert t["status"] == "blocked"
+    assert t["result"].startswith("error:") and "git worktree" in t["result"]   # the WHY is captured
+    s.close()
+
+
 def test_factory_worktree_creates_branch_and_is_idempotent(tmp_path):
     """Real-clive graduation: a persistent factory/auto worktree of the REAL target, created
     off HEAD, leaving the operator's checkout untouched."""

@@ -139,7 +139,8 @@ def fleet_json(store) -> dict:
         # operator sees both what the conductor is working and what research proposed.
         "backlog": sorted(
             [{"id": t["id"], "title": t["title"], "source": t["source"],
-              "status": t["status"], "ref": t.get("source_ref", "")}
+              "status": t["status"], "ref": t.get("source_ref", ""),
+              "result": t.get("result", "")}      # blocked → the WHY (error/discard reason)
              for t in all_tasks if t["status"] in ("open", "in_progress", "blocked")],
             key=lambda t: {"in_progress": 0, "open": 1, "blocked": 2}.get(t["status"], 3)),
         # WHAT'S BEEN BUILT — the ledger of shipped changes (title + sha), newest first.

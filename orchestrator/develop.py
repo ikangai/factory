@@ -105,9 +105,16 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             shipped += 1
             print(f"[execute]   → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
         else:                                         # no_candidate/discarded/auto_reverted/error
-            store.set_task_status(task["id"], "blocked", result=res.get("action", "no result"),
-                                  shift_id=shift_id)
-            print(f"[execute]   → {res.get('action', 'no result')} — blocked", flush=True)
+            # CAPTURE WHY — a bare 'error' is undiagnosable. Thread the exception message
+            # (or the discard stage) into the result so the operator + the conductor (next
+            # shift) can see what failed.
+            reason = res.get("action", "no result")
+            if res.get("error"):
+                reason = f"error: {str(res['error'])[:180]}"
+            elif res.get("stage"):
+                reason = f"{reason} ({res['stage']})"
+            store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
+            print(f"[execute]   → {reason} — blocked", flush=True)
     return shipped
 
 

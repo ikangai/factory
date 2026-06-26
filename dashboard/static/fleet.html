@@ -213,7 +213,8 @@ async function tick(){
   // backlog & plan
   const bk=d.backlog||[];el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
   el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||esc(t.status);
-    return `<div class="brow b-${esc(t.status)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
+    const why=(t.status==='blocked'&&t.result)?` <span class="muted">— ${esc(t.result)}</span>`:'';
+    return `<div class="brow b-${esc(t.status)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}${why}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
   // shifts
   el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
   // research
