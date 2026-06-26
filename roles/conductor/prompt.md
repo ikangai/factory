@@ -22,9 +22,13 @@ Open backlog:
 Unconsumed research digests (what shipped recently — fuel for the researchers + you):
 {DIGESTS}
 
+The target's OPEN ISSUES (the maintainers' filed problems — already fetched; weigh these
+in your planning where they fit the mission):
+{ISSUES}
+
 ## How you work this shift
-1. **Orient** — read the mission, the resume note, the backlog, and the target's open
-   issues (`gh issue list -R {TARGET_REPO}` if a repo is set). Don't re-derive what's above.
+1. **Orient** — read the mission, the resume note, the backlog, and the **open issues
+   above** (already fetched — don't re-run `gh issue list`). Don't re-derive what's above.
    The factory **auto-refills the backlog from research** before your shift whenever it
    runs low, so you usually have grounded directions to pick from — you do NOT need to run
    research yourself. The mission is the terminator — keep choosing work toward it until met.
@@ -44,8 +48,11 @@ Unconsumed research digests (what shipped recently — fuel for the researchers 
 4. **React to last shift** — at the top of the backlog you'll see tasks `done` (with the
    merge sha) or `blocked` (with a reason) from the prior shift's execution. Build on what
    shipped; reopen + refine what blocked if it's still worth doing; drop what isn't.
-5. **Expand** — file issues (`gh issue create`) and add backlog tasks for found-but-not-fixed
-   problems, so the backlog reflects reality. Narrate with `/diary`.
+5. **File bugs as issues** — when you (or a worker's blocked result) surface a real BUG you
+   can't fix this shift, file it upstream so a future shift's research picks it up:
+   `gh issue create -R {TARGET_REPO} --title "<short>" --body "<what, where, repro, why it
+   matters>"`. Also add backlog tasks for found-but-not-fixed work so the backlog reflects
+   reality. Narrate with `/diary`.
 6. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
    "done": if the backlog is empty AND research is dry AND nothing is improving, say so in
    the report — don't invent busywork. **The mission, not an empty queue, is the terminator.**

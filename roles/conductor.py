@@ -31,7 +31,9 @@ def _bullets(rows, fmt, empty: str) -> str:
 
 
 def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget: int) -> str:
-    """Fill the conductor contract with this shift's live context from the store."""
+    """Fill the conductor contract with this shift's live context from the store + the
+    target's open GitHub issues (so planning is issue-aware, not just backlog-aware)."""
+    from .research_feed import fetch_issues
     prior = store.prior_shift(shift_id)
     resume = (prior.get("resume_note") if prior else "") or "(first shift — no prior note)"
     backlog = _bullets(
@@ -40,11 +42,13 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
                   f"{t['id']}: {t['title']}",
         "(empty — mine new work from the target's issues + research)")
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
+    issues = fetch_issues(mission.get("target_repo", "")) or "(none fetched)"
     return (common._load_prompt("conductor")
             .replace("{MISSION}", mission.get("statement", ""))
             .replace("{TARGET_REPO}", mission.get("target_repo", "") or "(none set)")
             .replace("{BUDGET}", f"{token_budget:,} tokens")
             .replace("{RESUME}", resume)
+            .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
             .replace("{DIGESTS}", digests))
 

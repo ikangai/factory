@@ -12,7 +12,10 @@ def _store(tmp_path):
     return s
 
 
-def test_build_conductor_prompt_carries_the_live_context(tmp_path):
+def test_build_conductor_prompt_carries_the_live_context(tmp_path, monkeypatch):
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues",          # hermetic: no live gh
+                        lambda repo, **k: "- #41: Self-learning tool discovery  [enhancement]")
     with _store(tmp_path) as s:
         m_id = s.set_mission("make clive reliable", target_repo="ikangai/clive")
         a = s.start_shift(token_budget=1)
@@ -26,6 +29,7 @@ def test_build_conductor_prompt_carries_the_live_context(tmp_path):
         assert "t9 awaiting fixture" in p                            # the PRIOR shift's resume note
         assert "fix dead-pane detection" in p and "#41" in p         # the open backlog (with source ref)
         assert "shipped the reconnect fix" in p                      # unconsumed research digest
+        assert "Self-learning tool discovery" in p                   # the target's OPEN ISSUES (fetched)
         assert "500,000" in p                                         # the shift budget
 
 
