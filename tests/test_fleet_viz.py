@@ -136,6 +136,38 @@ def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch
         assert j["research"]["working"] is True
 
 
+def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
+    """The dashboard's one write action: POST /api/mode toggles AUTO/SHIFT; bad value → 400."""
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.common import mode as modemod
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(modemod, "_mode_path", lambda: str(tmp_path / ".factory-mode"))
+    monkeypatch.setattr(fleet_server, "fleet_state", lambda: {"mode": modemod.read_mode()})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def post(body):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/mode", data=body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            return urllib.request.urlopen(req)
+
+        out = json.loads(post(b'{"mode":"auto"}').read())
+        assert out["mode"] == "auto" and modemod.read_mode() == "auto"     # toggled + persisted
+        try:
+            post(b'{"mode":"nonsense"}')
+            assert False, "bad mode should 400"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400                                            # rejected
+    finally:
+        httpd.shutdown()
+
+
 def test_dashboard_escapes_dynamic_fields_xss_guard():
     """XSS guard: task titles, conductor reports, and GH-issue-derived digests are
     attacker-influenceable, so every dynamic value that goes into innerHTML must be esc()'d."""

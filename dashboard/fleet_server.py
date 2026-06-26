@@ -11,6 +11,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from ..common import mode as modemod
 from ..common.store import Blackboard
 from ..reporting import fleet_viz
 
@@ -48,6 +49,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
             return self._send(200, body, "application/json")
         return self._send(404, b'{"error":"not found"}', "application/json")
+
+    def _local_origin(self) -> bool:
+        """CSRF guard — the board binds localhost but is browser-reachable; allow only
+        same-origin (no Origin) or an explicit localhost Origin for the one write action."""
+        origin = self.headers.get("Origin") or self.headers.get("Referer")
+        if not origin:
+            return True
+        try:
+            return urlparse(origin).hostname in ("127.0.0.1", "localhost", "::1")
+        except Exception:  # noqa: BLE001
+            return False
+
+    def do_POST(self) -> None:
+        # The ONE write action: toggle the autonomy mode (auto/shift).
+        if urlparse(self.path).path != "/api/mode":
+            return self._send(404, b'{"error":"the only write action is /api/mode"}', "application/json")
+        if not self._local_origin():
+            return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            m = modemod.set_mode(payload.get("mode", ""))
+        except (json.JSONDecodeError, ValueError) as e:
+            return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+        return self._send(200, json.dumps({"mode": m}).encode(), "application/json")
 
 
 def serve(host: str = "127.0.0.1", port: int = 8788, *, open_browser: bool = True) -> int:

@@ -18,6 +18,7 @@ import subprocess
 from datetime import datetime
 from typing import Optional
 
+from ..common import mode as _mode
 from ..common import paths
 
 
@@ -124,6 +125,7 @@ def fleet_json(store) -> dict:
     return {
         "mission": m["statement"] if m else None,
         "target": (m.get("target_repo") if m else None) or None,
+        "mode": _mode.read_mode(),          # AUTO (self-driving) | SHIFT (one-and-wait)
         "phase": phase,
         "status": latest,
         "running_shift": running["id"] if running else None,

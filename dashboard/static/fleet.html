@@ -25,6 +25,11 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .v-blocked{color:#f43f5e;border-color:#f43f5e66;background:#f43f5e15}
 .v-reached{color:#a78bfa;border-color:#a78bfa66;background:#a78bfa15}
 .v-none{color:var(--muted);border-color:var(--line)}
+.modetoggle{display:flex;border:1px solid var(--line);border-radius:99px;overflow:hidden;flex-shrink:0;margin-left:10px}
+.mbtn{background:transparent;color:var(--muted);border:none;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap}
+.mbtn:hover{color:var(--ink)}
+.mbtn.active[data-mode=auto]{background:#22c55e;color:#04140a}
+.mbtn.active[data-mode=shift]{background:#38bdf8;color:#04121f}
 
 /* KPI strip */
 .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:16px 0}
@@ -107,6 +112,10 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
     <h1>🏭 HARNESS FACTORY</h1>
     <span class="dot-live"></span><span id="mission">connecting…</span>
     <span class="verdict v-none" id="verdict">—</span>
+    <div class="modetoggle" id="modetoggle" title="AUTO: self-drives shift after shift · SHIFT: one shift, then waits for you">
+      <button class="mbtn" data-mode="shift">⏸&nbsp;Shift</button>
+      <button class="mbtn" data-mode="auto">▶&nbsp;Auto</button>
+    </div>
   </header>
 
   <!-- CEO KPI strip -->
@@ -185,6 +194,7 @@ async function tick(){
   el('off').style.display='none';const k=d.kpi||{},mo=d.momentum||{};
   el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
   const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
+  document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
   // KPI strip
   el('kpis').innerHTML=
     kpi('🚢 Shipped','<span>'+(k.shipped||0)+'</span>',(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked','hero')+
@@ -222,7 +232,12 @@ async function tick(){
   el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';
   el('stamp').textContent='updated '+new Date().toLocaleTimeString();
 }
-buildLoop();tick();setInterval(tick,2000);
+buildLoop();
+document.querySelectorAll('.mbtn').forEach(b=>b.addEventListener('click',async()=>{
+  try{await fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});}catch(e){}
+  tick();
+}));
+tick();setInterval(tick,2000);
 </script>
 </body>
 </html>
