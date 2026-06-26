@@ -183,7 +183,7 @@ async function tick(){
   el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(k.shifts||'—');
   el('hub-phase').textContent=d.phase||'idle';
   const dev=(d.live||[]).filter(w=>w.role==='developer worker').length;el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
-  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${w.role.split(' ')[0]}">${w.role}</b> <span class="muted">pid ${w.pid}${w.where?(' · '+w.where.replace(/^.*\\//,'…/')):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
+  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${w.role.split(' ')[0]}">${w.role}</b> <span class="muted">pid ${w.pid}${w.where?(' · …/'+w.where.split('/').pop()):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
   // momentum
   el('momentum-verdict').textContent=mo.verdict||'—';
   const ser=mo.merges_series||[],smax=Math.max(1,...ser);
