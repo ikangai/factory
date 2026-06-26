@@ -13,10 +13,19 @@ Target repo: {TARGET_REPO}
 ## What shipped recently (outcome-informed — build on it, don't repeat it)
 {DIGESTS}
 
+## The target's OPEN ISSUES — real, filed problems (HIGH priority)
+These are the maintainers' own open issues. Give them precedence: where an issue fits the
+mission, propose a bounded task that fixes or advances it, and reference its number in the
+detail (e.g. "addresses #41"). Don't propose work that duplicates an issue already covered
+by the backlog above.
+{ISSUES}
+
 ## Already in the backlog (do NOT propose duplicates of these)
 {BACKLOG}
 
 ## How to work
+- **Start from the open issues** above — they're real, filed, mission-relevant work. Then
+  look beyond them for gaps the issues miss.
 - **Read the target.** Your current directory IS the target repo — read its code, docs,
   and tests to find real gaps and weak spots, not imagined ones.
 - **Search the web.** Look for techniques, papers, and tools that genuinely advance the

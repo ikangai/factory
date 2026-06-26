@@ -50,6 +50,32 @@ def test_propose_directions_uses_the_web_researcher_toolset(tmp_path, monkeypatc
     assert "shipped the reconnect fix" in captured["prompt"]  # outcome-informed (the digest)
 
 
+def test_fetch_issues_parses_gh_json_and_is_graceful(monkeypatch):
+    import json
+    import subprocess
+    import types
+    canned = json.dumps([
+        {"number": 41, "title": "Self-learning tool discovery", "labels": [{"name": "enhancement"}]},
+        {"number": 38, "title": "Messaging CLIs in toolset", "labels": []}])
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=canned))
+    out = research_feed.fetch_issues("ikangai/clive")
+    assert "#41: Self-learning tool discovery  [enhancement]" in out and "#38: Messaging CLIs" in out
+
+    assert research_feed.fetch_issues("") == ""                          # no repo → no fetch
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
+    assert research_feed.fetch_issues("x/y") == ""                       # gh missing → graceful
+
+
+def test_build_research_prompt_includes_the_open_issues(tmp_path):
+    with _store(tmp_path) as s:
+        s.set_mission("make clive reliable", target_repo="ikangai/clive")
+        p = research_feed.build_research_prompt(s, s.active_mission(), limit=5,
+                                                issues="- #41: do a thing  [enhancement]")
+        assert "#41: do a thing" in p and "OPEN ISSUES" in p             # the researcher sees real issues
+
+
 def test_propose_directions_no_mission_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "claude_super", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("must not spawn a researcher with no mission")))

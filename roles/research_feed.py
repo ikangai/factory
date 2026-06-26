@@ -20,7 +20,30 @@ def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
-def build_research_prompt(store, mission: dict, *, limit: int) -> str:
+def fetch_issues(repo: str, limit: int = 25) -> str:
+    """The target's OPEN GitHub issues (via `gh`), as a compact bulleted list for the
+    research prompt — so the researcher proposes against real filed problems, not only its
+    own ideas. Best-effort: no repo / no gh / no network → '' (the researcher carries on)."""
+    if not repo:
+        return ""
+    import json as _json
+    import subprocess
+    try:
+        out = subprocess.run(["gh", "issue", "list", "-R", repo, "--state", "open",
+                              "--limit", str(limit), "--json", "number,title,labels"],
+                             capture_output=True, text=True, timeout=20)
+        issues = _json.loads(out.stdout or "[]") if out.returncode == 0 else []
+    except Exception:  # noqa: BLE001 — gh missing / offline / bad repo → skip silently
+        return ""
+    lines = []
+    for it in issues:
+        labels = ",".join(l.get("name", "") for l in it.get("labels", []))
+        lines.append(f"- #{it.get('number')}: {it.get('title', '')}"
+                     + (f"  [{labels}]" if labels else ""))
+    return "\n".join(lines)
+
+
+def build_research_prompt(store, mission: dict, *, limit: int, issues: str = "") -> str:
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}",
                        "(nothing shipped yet)")
     backlog = _bullets(store.list_tasks(status="open"), lambda t: f"- {t['title']}",
@@ -28,6 +51,7 @@ def build_research_prompt(store, mission: dict, *, limit: int) -> str:
     return (common._load_prompt("research_feed")
             .replace("{MISSION}", mission.get("statement", ""))
             .replace("{TARGET_REPO}", mission.get("target_repo", "") or "(none set)")
+            .replace("{ISSUES}", issues or "(none fetched — propose from the code + the web)")
             .replace("{DIGESTS}", digests)
             .replace("{BACKLOG}", backlog)
             .replace("{LIMIT}", str(limit)))
@@ -45,7 +69,8 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     digests = store.unconsumed_digests()
     existing = {t["title"].strip().lower() for t in store.list_tasks(status="open")}
 
-    prompt = build_research_prompt(store, mission, limit=limit)
+    issues = fetch_issues(mission.get("target_repo", ""))  # real filed problems to consider
+    prompt = build_research_prompt(store, mission, limit=limit, issues=issues)
     target_root = config.get_adapter().entry()[0]         # the REAL target repo (not the parent dir)
     reply, _tokens, _cost = common.claude_super(
         prompt, workdir=target_root,                      # reads the target to find real gaps
