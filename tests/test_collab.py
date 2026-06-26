@@ -41,4 +41,4 @@ def test_agora_state_graceful_without_bus(monkeypatch):
     monkeypatch.setattr(collab, "agora_db_path", lambda: None)
     st = collab.agora_state()
     assert st == {"active": False, "total": 0, "mentions": 0, "senders": 0,
-                  "agents": [], "messages": [], "edges": []}
+                  "live": 0, "agents": [], "messages": [], "edges": []}

@@ -39,7 +39,7 @@ def _collab_state() -> dict:
         return collab.agora_state()
     except Exception:  # noqa: BLE001
         return {"active": False, "total": 0, "mentions": 0, "senders": 0,
-                "agents": [], "messages": [], "edges": []}
+                "live": 0, "agents": [], "messages": [], "edges": []}
 
 
 def _parse_iso(ts: str):

@@ -42,7 +42,7 @@ def agora_state(limit: int = 14) -> dict:
     """The collaboration view: {active, total, mentions, senders, agents, messages, edges}.
     `active` answers 'is agora actually used here?'. Read-only + crash-proof."""
     empty = {"active": False, "total": 0, "mentions": 0, "senders": 0,
-             "agents": [], "messages": [], "edges": []}
+             "live": 0, "agents": [], "messages": [], "edges": []}
     db = agora_db_path()
     if not db:
         return empty
@@ -85,6 +85,8 @@ def agora_state(limit: int = 14) -> dict:
     agents = [{"handle": a["handle"], "squad": a["squad"] or "", "status": a["status"] or "",
                "focus": a["focus"] or "", "model": a["model"] or "", "live": _alive(a["pid"])}
               for a in agent_rows]
+    agents.sort(key=lambda a: not a["live"])        # LIVE agents first; the rest are historical
+    live = sum(1 for a in agents if a["live"])
 
     return {"active": total > 0, "total": total, "mentions": mentions, "senders": senders,
-            "agents": agents, "messages": messages, "edges": edge_list}
+            "live": live, "agents": agents, "messages": messages, "edges": edge_list}
