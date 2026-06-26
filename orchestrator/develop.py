@@ -81,16 +81,26 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
 
 def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None,
                           claude_bin: str = "claude", real: bool = False,
-                          develop_fn: Optional[Callable] = None) -> int:
-    """Deterministically run EVERY task the conductor claimed this shift through the gated
-    pipeline and CLOSE it: merged → done(sha), anything else → blocked(reason, for the
+                          develop_fn: Optional[Callable] = None,
+                          max_tasks: Optional[int] = None) -> int:
+    """Deterministically run the tasks the conductor claimed this shift through the gated
+    pipeline and CLOSE each: merged → done(sha), anything else → blocked(reason, for the
     conductor to reopen/refine next shift). Returns the count shipped. `real` merges into
     the real target's factory/auto branch; default is throwaway clones. `develop_fn` is
-    injectable for tests so no live worker spawns."""
+    injectable for tests so no live worker spawns. `max_tasks` caps the per-shift fan-out
+    (unattended safety) — the rest stay in_progress for run_shift to requeue. The STOP
+    kill-switch is re-checked between tasks so a long execute phase can be interrupted."""
     run = develop_fn or develop_task
     claimed = store.tasks_in_flight(shift_id)        # the in_progress tasks claimed this shift
+    if max_tasks is not None and len(claimed) > max_tasks:
+        print(f"[execute] {len(claimed)} tasks claimed — capping at {max_tasks} this shift; "
+              f"the rest stay in_progress and are requeued for the next shift.", flush=True)
+        claimed = claimed[:max_tasks]
     shipped = 0
     for i, task in enumerate(claimed, 1):
+        if killswitch.is_halted():                   # STOP can trip DURING a long execute phase
+            print(f"[execute] STOP engaged — halting after {i - 1}/{len(claimed)}.", flush=True)
+            break
         print(f"[execute] task {i}/{len(claimed)} {task['id']}: {task['title']} "
               f"— running the gated pipeline (clone + developer TDD + the target's test "
               f"suite; a few minutes, no live output)…", flush=True)

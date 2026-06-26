@@ -49,6 +49,29 @@ def test_loop_stops_immediately_on_kill_switch(monkeypatch):
     assert n == 0                                              # never ran a shift
 
 
+def test_loop_stops_on_wall_clock_deadline():
+    modemod.set_mode("auto")
+    clock = {"t": 0.0}
+
+    def fake(store, **k):
+        clock["t"] += 100                          # each shift advances the clock 100s
+        return {"action": "completed", "shift_id": 1, "tokens_used": 0}
+
+    n = orchestrator.cmd_run_loop(object(), run_fn=fake, now_fn=lambda: clock["t"],
+                                  loop_deadline_s=250)
+    assert n == 3                                  # shifts start at t=0,100,200; t=300 ≥ 250 → stop
+
+
+def test_loop_stops_on_token_budget():
+    modemod.set_mode("auto")
+
+    def fake(store, **k):
+        return {"action": "completed", "shift_id": 1, "tokens_used": 400_000}
+
+    n = orchestrator.cmd_run_loop(object(), run_fn=fake, loop_token_budget=1_000_000)
+    assert n == 3                                  # 400k×3 = 1.2M ≥ 1M → budget_exhausted
+
+
 def test_loop_honours_a_live_toggle_to_shift_mid_run():
     modemod.set_mode("auto")
     calls = {"n": 0}

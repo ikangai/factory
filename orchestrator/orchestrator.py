@@ -750,8 +750,9 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
               "(git-reversible; your working branch is untouched).")
     if executor is None:                               # the deterministic rail EXECUTES claimed tasks
         from .develop import execute_claimed_tasks
+        max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
         executor = lambda st, *, shift_id: execute_claimed_tasks(
-            st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real)
+            st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real, max_tasks=max_tasks)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
@@ -794,27 +795,51 @@ def _should_idle(store: Blackboard, plateau_k: int) -> bool:
 
 def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budget=None,
                  wall_clock_s=None, prod: bool = False, real: bool = False, plateau_k: int = 3,
-                 max_shifts: int = 50, run_fn=None) -> int:
+                 max_shifts: int = 50, loop_token_budget=None, loop_deadline_s=None,
+                 run_fn=None, now_fn=None) -> int:
     """The autonomous runner. In AUTO mode it works shift after shift on its own (no human
-    between shifts) until the mission converges, STOP trips, or the dashboard toggles back
-    to SHIFT. In SHIFT mode it runs ONE shift, then pauses for the human. The mode is read
-    BETWEEN shifts, so toggling it on the dashboard takes effect live. `run_fn` is
-    injectable (defaults to cmd_run) so the loop is testable without spawning agents."""
+    between shifts) until the mission converges, STOP trips, the dashboard toggles back to
+    SHIFT, OR a HARD UNATTENDED-SAFETY CEILING is hit: max_shifts, a cumulative token budget,
+    or a wall-clock deadline (default 4h). In SHIFT mode it runs ONE shift, then pauses. The
+    mode + STOP are re-read BETWEEN shifts so the dashboard toggle is live. `run_fn`/`now_fn`
+    are injectable so the loop is testable without spawning agents or real time."""
+    import time
     from ..common import killswitch, mode as modemod
+    auton = config.load_config().get("autonomy", {}) or {}
+    if loop_token_budget is None:
+        loop_token_budget = int(auton.get("loop_token_budget", 0)) or None      # 0/absent → no token cap
+    if loop_deadline_s is None:
+        loop_deadline_s = int(auton.get("loop_deadline_s", 14400))              # default 4h wall-clock
     run_fn = run_fn or cmd_run
+    now = now_fn or time.monotonic
+    start = now()
+    spent = 0
     n = 0
+    ceilings = f"max_shifts={max_shifts}"
+    if loop_token_budget:
+        ceilings += f", tokens≤{loop_token_budget:,}"
+    if loop_deadline_s:
+        ceilings += f", deadline={loop_deadline_s}s"
     print(f"[loop] autonomy mode: {modemod.read_mode().upper()} "
-          f"(toggle on the dashboard, or `factory mode auto|shift`)")
+          f"(toggle on the dashboard, or `factory mode auto|shift`) | ceilings: {ceilings}")
     while n < max_shifts:
         if killswitch.is_halted():
             print("[loop] STOP engaged — halting.")
+            break
+        if loop_deadline_s and (now() - start) >= loop_deadline_s:
+            print(f"[loop] wall-clock deadline ({loop_deadline_s}s) reached — stopping after {n} shift(s).")
             break
         res = run_fn(store, mission=mission, token_budget=token_budget, wall_clock_s=wall_clock_s,
                      prod=prod, real=real, plateau_k=plateau_k)
         mission = None                                  # mission only steers the first shift
         n += 1
+        spent += int(res.get("tokens_used", 0) or 0)
         if res.get("action") in ("idle", "no_mission"):
             print(f"[loop] {res.get('action')} — nothing left to do; stopped after {n} shift(s).")
+            break
+        if loop_token_budget and spent >= loop_token_budget:
+            print(f"[loop] token budget exhausted ({spent:,}/{loop_token_budget:,}) — "
+                  f"stopping after {n} shift(s).")
             break
         if modemod.read_mode() != modemod.AUTO:
             print(f"[loop] SHIFT mode — paused after shift {res.get('shift_id')}. "

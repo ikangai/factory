@@ -138,6 +138,54 @@ def test_execute_claimed_tasks_captures_the_block_reason(tmp_path):
     s.close()
 
 
+def test_execute_caps_tasks_per_shift(tmp_path):
+    """Unattended safety: the executor runs at most max_tasks claimed tasks per shift; the
+    rest stay in_progress (run_shift requeues them) so one shift can't fan out unbounded."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for i in range(5):
+        s.add_task(f"t{i}", "x", source="issue")
+        s.set_task_status(f"t{i}", "in_progress", shift_id=sh)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "merged", "merge_sha": "abc123def456"}
+
+    shipped = execute_claimed_tasks(s, sh, develop_fn=fake, max_tasks=2)
+    assert len(calls) == 2 and shipped == 2           # only the cap ran
+    assert len(s.tasks_in_flight(sh)) == 3            # the rest left for requeue
+    s.close()
+
+
+def test_execute_halts_between_tasks_on_kill_switch(tmp_path, monkeypatch):
+    """A long execute phase honors STOP — it re-checks the kill-switch between tasks."""
+    from factory.orchestrator import develop as dev
+    from factory.common import killswitch
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for i in range(3):
+        s.add_task(f"t{i}", "x", source="issue")
+        s.set_task_status(f"t{i}", "in_progress", shift_id=sh)
+    state = {"halt": False}
+    monkeypatch.setattr(killswitch, "is_halted", lambda: state["halt"])
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        state["halt"] = True                          # STOP trips after the first task
+        return {"action": "merged", "merge_sha": "x"}
+
+    dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+    assert len(calls) == 1                             # stopped before the 2nd task
+    s.close()
+
+
 def test_factory_worktree_creates_branch_and_is_idempotent(tmp_path):
     """Real-clive graduation: a persistent factory/auto worktree of the REAL target, created
     off HEAD, leaving the operator's checkout untouched."""

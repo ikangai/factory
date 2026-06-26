@@ -75,4 +75,5 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
                     tokens_used=outcome.get("tokens_used", 0))
-    return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped}
+    return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped,
+            "tokens_used": outcome.get("tokens_used", 0)}   # for the loop's cumulative ceiling
