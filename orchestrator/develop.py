@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import subprocess
 import tempfile
 import uuid
 from typing import Callable, Optional
@@ -186,7 +187,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
             return {"action": "no_candidate", "branch": branch}   # NO branch; don't diff a missing ref
-        changed = adapter.changed_paths(dev_clone, base, branch)
+        try:
+            changed = adapter.changed_paths(dev_clone, base, branch)
+        except subprocess.CalledProcessError:          # 2nd exit-128 site: branch exists but the diff
+            return {"action": "no_candidate", "branch": branch}   # can't resolve/run → no usable candidate
         if not changed:                                # the worker made no committed change
             return {"action": "no_candidate", "branch": branch}
 

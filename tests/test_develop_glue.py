@@ -107,6 +107,25 @@ def test_no_candidate_when_worker_produced_no_branch(monkeypatch, tmp_path):
     assert "fetch" not in [c[0] for c in ad.calls]   # never fetched/merged a non-existent branch
 
 
+def test_no_candidate_when_changed_paths_git_diff_fails(monkeypatch, tmp_path):
+    """exit-128 part 2 (turing's find): the branch EXISTS (branch_exists passes) but
+    `git diff base branch` still fails (ref-resolution etc.) — changed_paths raises
+    CalledProcessError(128). That must surface as a clean no_candidate, not a masked
+    error-block. The second unguarded git-diff site, beyond the missing-branch one."""
+    import subprocess
+    ad = FakeAdapter(changed=["x"])           # branch_exists True (default), but the diff blows up
+
+    def diff_128(*a, **k):
+        raise subprocess.CalledProcessError(128, ["git", "diff", "--name-only"])
+
+    ad.changed_paths = diff_128
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                    task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "no_candidate"
+    assert "fetch" not in [c[0] for c in ad.calls]   # never tried to fetch/merge an un-diffable candidate
+
+
 def test_frozen_violation_discards_before_merge(monkeypatch, tmp_path):
     ad = FakeAdapter(changed=["src/clive/selfmod/gate.py"], frozen=["src/clive/selfmod/"])
     monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
