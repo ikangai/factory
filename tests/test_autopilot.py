@@ -32,6 +32,35 @@ def test_runner_alive_cleans_a_stale_pid_file(tmp_path, monkeypatch):
     assert not pid_file.exists()                             # stale file removed
 
 
+def test_start_adopts_existing_runner_when_pid_file_lost(tmp_path, monkeypatch):
+    """Robustness: if the PID file is gone but a runner is alive (found via process scan),
+    the toggle ADOPTS it instead of double-spawning — the bug that bit us live."""
+    monkeypatch.setattr(autopilot, "pid_path", lambda: str(tmp_path / ".autopilot.pid"))  # no file
+    monkeypatch.setattr(autopilot, "_scan_for_runner", lambda: 555)        # a runner found via scan
+    spawned = []
+    r = autopilot.start_runner(spawn_fn=lambda a, l: spawned.append(a) or 999)
+    assert not r["started"] and r["pid"] == 555 and not spawned            # adopted, NOT respawned
+
+
+def test_scan_for_runner_accepts_python_runner_rejects_shell(monkeypatch):
+    import types
+    seen = {}
+
+    def fake_run(argv, **k):
+        if argv[0] == "pgrep":
+            return types.SimpleNamespace(stdout="777\n", returncode=0)
+        if argv[0] == "ps":
+            seen["ps_pid"] = argv[-1]
+            return types.SimpleNamespace(
+                stdout="python -m factory.orchestrator.orchestrator run --loop --real\n",
+                returncode=0)
+        return types.SimpleNamespace(stdout="", returncode=1)
+
+    monkeypatch.setattr(autopilot, "_alive", lambda pid: True)
+    monkeypatch.setattr(autopilot.subprocess, "run", fake_run)
+    assert autopilot._scan_for_runner() == 777 and seen["ps_pid"] == "777"
+
+
 def test_prod_flag_threads_into_argv(tmp_path, monkeypatch):
     monkeypatch.setattr(autopilot, "pid_path", lambda: str(tmp_path / ".autopilot.pid"))
     captured = {}
