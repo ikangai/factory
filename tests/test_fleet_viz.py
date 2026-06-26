@@ -103,6 +103,35 @@ def test_fleet_json_derives_phase_and_summary(tmp_path, monkeypatch):
         assert fleet_viz.fleet_json(s)["phase"] == "idle"                  # nothing running → idle
 
 
+def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch):
+    """The CEO view: KPIs (shipped/shifts/tokens/exec/workers/research), the built ledger
+    (what was shipped, with shas), and a mission-momentum verdict."""
+    with _store(tmp_path) as s:
+        s.set_mission("inter-clive comms", target_repo="r")
+        sh = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.add_task("a", "verify-before-done", source="research")
+        s.set_task_status("a", "done", result="247cebcAAA1", shift_id=sh)
+        s.add_task("b", "planner verify", source="issue")
+        s.set_task_status("b", "blocked", result="no_candidate", shift_id=sh)
+        s.end_shift(sh, status="completed", report="shipped 1", tokens_used=46000)
+        s.record_mission_status(shift_id=sh, status="advancing", rationale="1 shipped", metrics={})
+        monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+
+        j = fleet_viz.fleet_json(s)
+        k = j["kpi"]
+        assert k["shipped"] == 1 and k["shifts"] == 1
+        assert k["total_tokens"] == 46000 and k["tokens_per_merge"] == 46000      # efficiency
+        assert k["workers_total"] == 2                                            # 1 done + 1 blocked dispatched
+        assert k["research_proposed"] == 1 and k["research_shipped"] == 1         # is research working?
+        assert k["exec_seconds"] >= 0                                             # the ended shift has a duration
+        # the BUILT ledger — what's actually been built
+        assert [b["title"] for b in j["built"]] == ["verify-before-done"]
+        assert j["built"][0]["sha"] == "247cebcAAA" and j["built"][0]["source"] == "research"
+        # mission momentum
+        assert "Advancing" in j["momentum"]["verdict"] and j["momentum"]["merges_series"] == [1]
+        assert j["research"]["working"] is True
+
+
 def test_fleet_server_serves_the_live_page_and_api(monkeypatch):
     import json
     import threading

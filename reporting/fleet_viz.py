@@ -15,9 +15,23 @@ from __future__ import annotations
 import html
 import os
 import subprocess
+from datetime import datetime
 from typing import Optional
 
 from ..common import paths
+
+
+def _parse_iso(ts: str):
+    try:
+        return datetime.strptime(ts or "", "%Y-%m-%dT%H:%M:%S.%fZ")
+    except (ValueError, TypeError):
+        return None
+
+
+def _shift_seconds(sh: dict):
+    """Wall-clock seconds a shift took (ended − started), or None while it's still running."""
+    a, b = _parse_iso(sh.get("started_at", "")), _parse_iso(sh.get("ended_at") or "")
+    return max(0.0, (b - a).total_seconds()) if (a and b) else None
 
 _SHIFT_COLOR = {"running": "#3b82f6", "completed": "#22c55e", "timed_out": "#f59e0b",
                 "budget_exhausted": "#f59e0b", "halted": "#a855f7", "error": "#ef4444"}
@@ -73,20 +87,64 @@ def fleet_json(store) -> dict:
         phase = "idle"
     ms = state["mission_status"]
     m = state["mission"]
+    shifts = state["shifts"]
+    done, blocked = by["done"], by["blocked"]
+    all_tasks = store.list_tasks()
+    research = [t for t in all_tasks if t["source"] == "research"]
+    research_shipped = sum(1 for t in research if t["status"] == "done")
+
+    durations = [d for d in (_shift_seconds(s) for s in shifts) if d is not None]
+    total_tokens = sum(int(s.get("tokens_used") or 0) for s in shifts)
+    shipped = len(done)
+
+    # CEO KPIs — the numbers worth watching.
+    kpi = {
+        "shipped": shipped,                                   # merges into the target (what's built)
+        "shifts": len(shifts),
+        "exec_seconds": int(sum(durations)),                  # total execution time
+        "avg_shift_seconds": int(sum(durations) / len(durations)) if durations else 0,
+        "total_tokens": total_tokens,
+        "tokens_per_merge": int(total_tokens / shipped) if shipped else 0,   # efficiency
+        "workers_live": len(live),
+        "workers_total": shipped + len(blocked),              # developer dispatches that ran to a verdict
+        "research_proposed": len(research),                   # is research producing work?
+        "research_shipped": research_shipped,
+        "backlog_open": len(by["open"]), "in_progress": len(by["in_progress"]),
+        "blocked": len(blocked),
+    }
+    # Mission momentum — the honest "how far": are we still advancing, or converged?
+    latest = ms[0]["status"] if ms else None
+    verdict = {
+        "advancing": "Advancing — actively building toward the mission",
+        "steady_state": "Converged — backlog drained, awaiting a new direction",
+        "blocked": "Blocked — work is stuck, needs attention",
+        "reached": "Mission reached",
+    }.get(latest, "Idle — no shifts run yet")
+
     return {
         "mission": m["statement"] if m else None,
         "target": (m.get("target_repo") if m else None) or None,
         "phase": phase,
-        "status": ms[0]["status"] if ms else None,
+        "status": latest,
         "running_shift": running["id"] if running else None,
-        "summary": {"shifts": len(state["shifts"]), "shipped": len(by["done"]),
-                    "open": len(by["open"]), "in_progress": len(by["in_progress"]),
-                    "blocked": len(by["blocked"])},
+        "summary": {"shifts": len(shifts), "shipped": shipped, "open": len(by["open"]),
+                    "in_progress": len(by["in_progress"]), "blocked": len(blocked)},
+        "kpi": kpi,
+        "momentum": {"verdict": verdict, "status": latest,
+                     "merges_series": [sum(1 for t in s["tasks"] if t["status"] == "done")
+                                       for s in reversed(shifts)],           # oldest → newest
+                     "status_series": [r["status"] for r in reversed(ms)]},
+        # WHAT'S BEEN BUILT — the ledger of shipped changes (title + sha), newest first.
+        "built": [{"title": t["title"], "sha": (t.get("result") or "")[:10],
+                   "source": t["source"], "shift": t.get("shift_id")}
+                  for t in sorted(done, key=lambda t: t.get("updated_at", ""), reverse=True)][:25],
+        "research": {"proposed": len(research), "shipped": research_shipped,
+                     "working": len(research) > 0},
         "live": live,
-        "shifts": [{"id": s["id"], "status": s["status"], "tokens": s.get("tokens_used", 0),
+        "shifts": [{"id": s["id"], "status": s["status"], "tokens": int(s.get("tokens_used") or 0),
                     "shipped": sum(1 for t in s["tasks"] if t["status"] == "done"),
-                    "report": (s.get("report") or "")[:280]}
-                   for s in state["shifts"]],
+                    "seconds": int(_shift_seconds(s) or 0),
+                    "report": (s.get("report") or "")[:240]} for s in shifts],
         "mission_status": [{"status": r["status"], "shift": r.get("shift_id"),
                             "rationale": r.get("rationale", "")} for r in ms],
         "digests": [d["summary"][:140] for d in state["digests"]],
