@@ -87,6 +87,15 @@ def test_runner_alive_rejects_recycled_nonrunner_pid(tmp_path, monkeypatch):
     assert autopilot.runner_alive() is None and not pid_file.exists()
 
 
+def test_cmd_autopilot_status_finds_runner_via_file_or_scan(monkeypatch):
+    from factory.orchestrator import orchestrator
+    monkeypatch.setattr(autopilot, "runner_alive", lambda: None)
+    monkeypatch.setattr(autopilot, "_scan_for_runner", lambda: 4242)        # only the scan finds it
+    assert orchestrator.cmd_autopilot("status") == {"running": True, "pid": 4242}
+    monkeypatch.setattr(autopilot, "_scan_for_runner", lambda: None)
+    assert orchestrator.cmd_autopilot("status") == {"running": False, "pid": None}
+
+
 def test_clear_pid_if_mine_only_removes_own(tmp_path, monkeypatch):
     pid_file = tmp_path / ".autopilot.pid"
     monkeypatch.setattr(autopilot, "pid_path", lambda: str(pid_file))

@@ -865,6 +865,33 @@ def cmd_mode(new_mode: Optional[str] = None) -> str:
     return m
 
 
+def cmd_autopilot(action: str = "status") -> dict:
+    """`factory autopilot status|stop` — see or HARD-stop the dashboard's AUTO runner. stop
+    kills the runner's whole process group (the runner + its conductors/developers, which are
+    in its session) found via the PID file OR a process scan — so it works even when the PID
+    file was lost and the board shows 'idle' for a still-alive orphan."""
+    import signal
+    from . import autopilot
+    pid = autopilot.runner_alive() or autopilot._scan_for_runner()
+    if action == "stop":
+        if pid:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)   # the runner + every worker it spawned
+            except (OSError, ProcessLookupError):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        try:
+            os.remove(autopilot.pid_path())
+        except OSError:
+            pass
+        print(f"[autopilot] stopped runner {pid if pid else '(none found)'} + its workers")
+        return {"stopped": True, "pid": pid}
+    print(f"[autopilot] {'running — pid ' + str(pid) if pid else 'idle (no runner)'}")
+    return {"running": pid is not None, "pid": pid}
+
+
 def _dup_title(title: str, existing_text: str) -> bool:
     """True when `title` matches an already-open issue in `existing_text` (the bulleted
     '- #N: title [labels]' list from fetch_issues) — normalized case/space, either string
@@ -1121,6 +1148,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     mod = sub.add_parser("mode")            # the auto/shift autonomy toggle
     mod.add_argument("set", nargs="?", choices=["auto", "shift"],
                      help="set the autonomy mode (omit to just read it)")
+    apc = sub.add_parser("autopilot")       # see / hard-stop the dashboard AUTO runner
+    apc.add_argument("action", nargs="?", choices=["status", "stop"], default="status")
     iss = sub.add_parser("issue")           # dedup'd issue-filing for the fleet
     iss.add_argument("action", choices=["create"])
     iss.add_argument("--title", required=True)
@@ -1238,6 +1267,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         wall_clock_s=a.wall_clock, prod=a.prod, real=a.real)
         elif a.cmd == "mode":
             cmd_mode(a.set)
+        elif a.cmd == "autopilot":
+            cmd_autopilot(a.action)
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":
