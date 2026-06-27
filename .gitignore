@@ -19,3 +19,8 @@ updates/*.md
 blog/*.md
 # the factory's own development diary (narrative entries + raw events) — local only
 .dev-diary/
+# runtime control artifacts — kill-switch, live mode flag, supervisor lock, generated dashboard snapshot — local only
+STOP
+.factory-mode
+.autopilot.pid.lock
+logs/fleet.html
