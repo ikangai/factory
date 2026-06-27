@@ -88,7 +88,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           claude_bin: str = "claude", real: bool = False,
                           develop_fn: Optional[Callable] = None,
                           max_tasks: Optional[int] = None,
-                          max_parallel: Optional[int] = None) -> int:
+                          max_parallel: Optional[int] = None,
+                          scope_judge: Optional[Callable] = None) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -114,6 +115,16 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         print("[execute] STOP engaged — not dispatching.", flush=True)
         return 0
 
+    if scope_judge is not None:                            # GSD spec-driven pre-dispatch scope check:
+        from ..reporting import scope_check                # reject/split over-broad briefs BEFORE a
+        before = len(claimed)                              # worker is spent (kills no_candidate upstream)
+        claimed = scope_check.prefilter(store, claimed, shift_id=shift_id, judge=scope_judge)
+        if len(claimed) != before:
+            print(f"[execute] scope check: {before - len(claimed)} task(s) rejected/split, "
+                  f"{len(claimed)} dispatching.", flush=True)
+        if not claimed:
+            return 0
+
     from ..reporting import factory_memory                  # factory memory: lessons → each worker
     dev_card = factory_memory.memory_card(store, "developer")
 
@@ -126,6 +137,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if killswitch.is_halted():                   # STOP tripped before this one started
             return task, {"action": "halted"}
         text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
+        if task.get("spec"):                          # scope check passed a sharpened contract
+            from ..reporting import scope_check
+            text += scope_check.spec_brief(task["spec"])
         print(f"[execute] ▶ {task['id']}: {task['title']}", flush=True)
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,

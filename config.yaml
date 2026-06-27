@@ -122,6 +122,13 @@ super_worker:
   # threshold — so the generative loop runs deterministically, not at the conductor's
   # discretion. Set to 0 to disable rail-driven research.
   refill_threshold: 2
+  # GSD spec-driven pre-dispatch scope check: before a developer worker is spent, a fast
+  # read-only judge decides whether each claimed task is ONE bounded, landable, testable
+  # change (pass | split | reject). Kills no_candidate upstream where rejection is free.
+  # Fail-open (a judge error -> dispatch anyway). OFF by default; flip to true to enable.
+  scope_check: false
+  scope_check_max_turns: 6
+  scope_check_timeout_s: 180
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:
