@@ -125,8 +125,8 @@ super_worker:
   # GSD spec-driven pre-dispatch scope check: before a developer worker is spent, a fast
   # read-only judge decides whether each claimed task is ONE bounded, landable, testable
   # change (pass | split | reject). Kills no_candidate upstream where rejection is free.
-  # Fail-open (a judge error -> dispatch anyway). OFF by default; flip to true to enable.
-  scope_check: false
+  # Fail-open (a judge error -> dispatch anyway). Enabled 2026-06-27 (operator).
+  scope_check: true
   scope_check_max_turns: 6
   scope_check_timeout_s: 180
 
