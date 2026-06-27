@@ -129,6 +129,10 @@ super_worker:
   scope_check: true
   scope_check_max_turns: 6
   scope_check_timeout_s: 180
+  # GSD spec-bound acceptance gate: a candidate that changes SOURCE code but ships NO test is
+  # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
+  # Test-only / docs-only / empty diffs pass. OFF by default; flip to true to enforce.
+  require_test: false
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:

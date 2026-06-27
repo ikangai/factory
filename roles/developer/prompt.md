@@ -13,7 +13,8 @@ with `/workflows` or subagents.
 ## How to work (a builder–reviewer / TDD loop)
 1. **Understand** the relevant code first — read it, don't guess.
 2. Make the **smallest bounded change** that could plausibly accomplish the task.
-   Prefer adding a focused test first, then the code to satisfy it.
+   **Add a focused test FIRST, then the code to satisfy it** — a source change that ships
+   no test is rejected by the gate (the test is how the factory verifies the work).
 3. **Run the target's test suite** — `{TEST_CMD}` — and iterate until it is GREEN.
 4. **Adversarially review** your own change against the task; keep only what survives.
    Fan out with subagents/`/workflows` if independent angles help.

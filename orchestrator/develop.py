@@ -231,10 +231,12 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             cand_wt = os.path.join(work, "wt")
             adapter.add_worktree(main_repo, cand_wt, branch)
             try:
+                require_test = bool((config.load_config().get("super_worker", {}) or {})
+                                    .get("require_test", False))   # GSD spec-bound acceptance gate
                 res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
-                    changed_paths=changed, label=branch)
+                    changed_paths=changed, label=branch, require_test=require_test)
                 res["learnings"] = learnings
                 return res
             finally:

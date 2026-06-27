@@ -28,7 +28,8 @@ from ..common import code_gate, frozen_source, killswitch
 def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    champion_scores: dict, grade_fn: Callable[[str], dict],
                    changed_paths=None, diff_text: str = None,
-                   label: str = "candidate", regression_tol: float = 0.0) -> dict:
+                   label: str = "candidate", regression_tol: float = 0.0,
+                   require_test: bool = False) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -48,6 +49,14 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         changed_paths=changed, frozen_patterns=adapter.frozen_paths())
     if not frozen_ok:
         return {"action": "discarded", "stage": "frozen", "violations": violations}
+
+    # 1.5 spec-bound acceptance (GSD): a code change must SHIP A TEST — the gate measures
+    #     fulfillment, not just non-regression. Config-gated; cheap (diff-level), before tests.
+    if require_test:
+        from ..reporting import acceptance
+        ok, why = acceptance.acceptance_ok(changed)
+        if not ok:
+            return {"action": "discarded", "stage": "no_test", "why": why}
 
     # 2. the target's own tests — the hard correctness gate. Skip the (expensive)
     #    scenario eval if they're red.

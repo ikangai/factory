@@ -159,6 +159,8 @@ _DISCARD_BY_STAGE = {
              "pass; encode the acceptance as a focused test FIRST, then satisfy it.",
     "frozen": "a candidate was discarded for touching the FROZEN safety surface — keep changes "
               "off frozen files entirely.",
+    "no_test": "a candidate was discarded for shipping a source change with NO test — write the "
+               "acceptance test FIRST, then the code (the gate requires a test).",
 }
 
 
