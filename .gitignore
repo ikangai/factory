@@ -22,5 +22,5 @@ blog/*.md
 # runtime control artifacts — kill-switch, live mode flag, supervisor lock, generated dashboard snapshot — local only
 STOP
 .factory-mode
-.autopilot.pid.lock
+.autopilot.pid*
 logs/fleet.html

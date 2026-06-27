@@ -780,10 +780,75 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
             root = config.get_adapter().entry()[0]
             print(f"[run] real-clive: {res['shipped']} merge(s) on branch factory/auto — review: "
                   f"git -C {root} log --oneline factory/auto   (revert/cherry-pick as you like)")
+            grad = _graduate_after_shift(store, real=real, shipped=res.get("shipped", 0))
+            if grad.get("action") == "synced":
+                touched = sum(1 for r in grad.get("synced", [])
+                              if r.get("action") in ("comment", "close"))
+                print(f"[run] graduated → pushed {grad.get('n_commits', 0)} commit(s) to origin; "
+                      f"{touched} issue(s) synced")
+            elif grad.get("action") in ("skip", "error"):
+                print(f"[run] graduate: {grad['action']} "
+                      f"({grad.get('reason') or grad.get('error', '')})")
         if m["recommend_stop"]:
             print(f"[run] ⏸  STEADY STATE for {plateau_k} shifts — nothing left toward the "
                   f"mission. Awaiting a mission revision (re-steer: factory run --mission \"…\").")
     return res
+
+
+def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
+    """`factory graduate [--dry-run]` — the operator's manual handle on the same flow the
+    autopilot runs after a shift ships: ff base→factory/auto, push base to origin, and
+    sync the target's GitHub issues for the pushed commits (keyword-gated close).
+    --dry-run previews the range + issue actions, mutating nothing."""
+    from ..reporting import issue_sync
+    repo = config.target_repo_slug()
+    if not repo:
+        print("[graduate] no target repo resolved (set target.repo in config.yaml) — skipping.")
+        return None
+    root = config.get_adapter().entry()[0]
+    base = config.target_config().get("base_branch") or "chore/extract-factory"
+    res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
+                                       dry_run=dry_run)
+    action = res.get("action")
+    if action in ("synced", "dry_run"):
+        synced = res.get("synced", [])
+        for r in synced:
+            if r.get("action") in ("comment", "close"):
+                print(f"[graduate]   #{r['issue']}: {r['action']} ({len(r.get('commits', []))} commit(s))")
+        verb = "would push" if dry_run else "pushed"
+        touched = sum(1 for r in synced if r.get("action") in ("comment", "close"))
+        print(f"[graduate] {verb} {res.get('n_commits', 0)} commit(s) over {res.get('range', '')}; "
+              f"{touched} issue(s) {'to sync' if dry_run else 'synced'}.")
+    else:
+        print(f"[graduate] {action}: {res.get('reason') or res.get('error', '')}")
+    return res
+
+
+def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
+                          graduate_fn=None, repo: Optional[str] = None,
+                          root: Optional[str] = None, base: Optional[str] = None,
+                          stop_check=None) -> dict:
+    """After a shift ships in REAL mode, graduate (ff base→factory/auto) + push to
+    origin + sync the target's GitHub issues (design:
+    docs/plans/2026-06-27-factory-auto-issue-sync-design.md). Fail-CLOSED and NEVER
+    raises — any graduate/sync error is logged and swallowed so it cannot kill the
+    autonomous loop. Skips entirely unless real AND something shipped."""
+    if not (real and shipped):
+        return {"action": "skip", "reason": "not-real-or-nothing-shipped"}
+    try:
+        from ..reporting import issue_sync
+        from ..common import killswitch
+        graduate_fn = graduate_fn or issue_sync.graduate_and_push
+        repo = repo if repo is not None else config.target_repo_slug()
+        if not repo:
+            return {"action": "skip", "reason": "no-repo"}
+        root = root or config.get_adapter().entry()[0]
+        base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
+        return graduate_fn(root=root, base=base, repo=repo, store=store,
+                           stop_check=stop_check or killswitch.is_halted)
+    except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
+        print(f"[run] graduate+sync skipped (non-fatal error): {e}")
+        return {"action": "error", "error": str(e)}
 
 
 def _should_idle(store: Blackboard, plateau_k: int) -> bool:
@@ -1152,6 +1217,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="set the autonomy mode (omit to just read it)")
     apc = sub.add_parser("autopilot")       # see / hard-stop the dashboard AUTO runner
     apc.add_argument("action", nargs="?", choices=["status", "stop"], default="status")
+    grd = sub.add_parser("graduate")        # ff base->factory/auto + push + sync the target's issues
+    grd.add_argument("--dry-run", action="store_true",
+                     help="preview the push range + issue actions without mutating anything")
     iss = sub.add_parser("issue")           # dedup'd issue-filing for the fleet
     iss.add_argument("action", choices=["create"])
     iss.add_argument("--title", required=True)
@@ -1271,6 +1339,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_mode(a.set)
         elif a.cmd == "autopilot":
             cmd_autopilot(a.action)
+        elif a.cmd == "graduate":
+            cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":

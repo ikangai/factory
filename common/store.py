@@ -395,3 +395,20 @@ class Blackboard:
         for r in rows:
             r["metrics"] = json.loads(r.pop("metrics_json"))
         return rows
+
+    # -- auto issue-sync: idempotency ledger --------------------------------
+    def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
+        """True if this (issue, commit) pair has already been synced — the guard that
+        keeps a resume/re-run from double-commenting or re-closing an issue."""
+        return self._one(
+            "SELECT 1 FROM issue_sync WHERE issue_number = ? AND commit_sha = ?",
+            (issue_number, commit_sha)) is not None
+
+    def record_issue_sync(self, issue_number: int, commit_sha: str, action: str,
+                          url: str = "") -> None:
+        """Record that (issue, commit) was synced. INSERT OR REPLACE so a re-record of
+        the same pair (e.g. a retried sync) is a harmless no-op rather than an error."""
+        self._exec(
+            "INSERT OR REPLACE INTO issue_sync(issue_number, commit_sha, action, url, "
+            "created_at) VALUES (?,?,?,?,?)",
+            (issue_number, commit_sha, action, url, now_iso()))

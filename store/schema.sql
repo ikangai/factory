@@ -183,6 +183,18 @@ CREATE TABLE IF NOT EXISTS mission_status (
     at           TEXT NOT NULL
 );
 
+-- Auto issue-sync ledger: which (target-repo issue, graduated commit) pairs the
+-- factory has already commented/closed on, so a resume/re-run never double-posts.
+-- (design: docs/plans/2026-06-27-factory-auto-issue-sync-design.md)
+CREATE TABLE IF NOT EXISTS issue_sync (
+    issue_number INTEGER NOT NULL,
+    commit_sha   TEXT NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('comment','close')),
+    url          TEXT NOT NULL DEFAULT '',     -- comment/issue URL gh returned
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (issue_number, commit_sha)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume

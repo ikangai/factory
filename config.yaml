@@ -27,6 +27,11 @@ target:
   # Toolset handed to the candidate unless a candidate spec's open block
   # actuates a different one.
   default_toolset: "minimal"
+  # The graduation/release branch graduated work fast-forwards onto and is pushed
+  # to origin. `factory graduate` (and the autopilot after a shift ships) does:
+  # ff base_branch -> factory/auto, push origin base_branch, then sync the target's
+  # GitHub issues for the pushed commits. Defaults to chore/extract-factory.
+  base_branch: "chore/extract-factory"
 
 # --- environment provisioning (§6, §11) ------------------------------------
 env:
