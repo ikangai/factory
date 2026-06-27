@@ -8,6 +8,8 @@ with `/workflows` or subagents.
 ## Your task
 {TASK}
 
+{MEMORY}
+
 ## How to work (a builder–reviewer / TDD loop)
 1. **Understand** the relevant code first — read it, don't guess.
 2. Make the **smallest bounded change** that could plausibly accomplish the task.
@@ -39,3 +41,14 @@ One short paragraph: what you changed and why, and confirm the tests pass. The f
 grades your BRANCH — the diff, the target's tests, and the scenario suite — and a gate
 (no human) decides whether to merge it. So the working code and the green suite are what
 matter, not the prose.
+
+Then, if you discovered a **durable, reusable lesson** another developer would benefit from
+(where a helper lives, a gotcha in this code, a pattern that worked), end with a `LEARNINGS:`
+section — one bullet per lesson (or `LEARNINGS: none`). You can't write the factory's memory
+from this clone, so this is how your lesson gets recorded; the factory stores it and shows it
+to the next developer. Record signal, not a play-by-play.
+
+```
+LEARNINGS:
+- <one durable, reusable lesson>
+```

@@ -23,6 +23,8 @@ by the backlog above.
 ## Already in the backlog (do NOT propose duplicates of these)
 {BACKLOG}
 
+{MEMORY}
+
 ## How to work
 - **Start from the open issues** above — they're real, filed, mission-relevant work. Then
   look beyond them for gaps the issues miss.
@@ -42,7 +44,11 @@ handle. Post ONE short line when you START (what you're investigating) and ONE w
 the live feed. Two posts — don't let it distract from the research.
 
 ## Final message (REQUIRED)
-End with exactly one fenced JSON block — the factory adds each entry to the backlog:
+End with exactly one fenced JSON block — the factory adds each `directions` entry to the
+backlog and stores each `learnings` entry in the factory's research memory (shown to future
+researchers under **"What you've learned so far"** above). Put a durable, reusable research
+lesson in `learnings` (a fruitful source, a dead end to avoid, a recurring gap) — `[]` if
+none. Record signal, not a summary.
 ```json
-{"directions": [{"title": "<short imperative task, e.g. 'add bounded retry to pane reconnect'>", "detail": "<what + why, grounded in what you read/found; one bounded change>"}]}
+{"directions": [{"title": "<short imperative task, e.g. 'add bounded retry to pane reconnect'>", "detail": "<what + why, grounded in what you read/found; one bounded change>"}], "learnings": ["<one durable research lesson>"]}
 ```

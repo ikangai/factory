@@ -56,7 +56,8 @@ def factory_worktree(adapter, *, branch: str = "factory/auto") -> str:
 
 def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
                  real: bool = False, grade_fn: Optional[Callable] = None,
-                 champion_scores: Optional[dict] = None, merge_lock=None) -> dict:
+                 champion_scores: Optional[dict] = None, merge_lock=None,
+                 memory: str = "") -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -71,14 +72,14 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
             main = factory_worktree(adapter)             # persistent — do NOT delete
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf, as_user=as_user,
-                                 claude_bin=claude_bin, merge_lock=merge_lock)
+                                 claude_bin=claude_bin, merge_lock=merge_lock, memory=memory)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
         adapter.clone(main)
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf,
-                                 as_user=as_user, claude_bin=claude_bin)
+                                 as_user=as_user, claude_bin=claude_bin, memory=memory)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -113,6 +114,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         print("[execute] STOP engaged — not dispatching.", flush=True)
         return 0
 
+    from ..reporting import factory_memory                  # factory memory: lessons → each worker
+    dev_card = factory_memory.memory_card(store, "developer")
+
     merge_lock = threading.Lock() if real else None  # serialize the shared factory/auto merge
     workers = max(1, min(max_parallel or len(claimed), len(claimed)))
     print(f"[execute] dispatching {len(claimed)} task(s) — up to {workers} super-worker(s) "
@@ -125,7 +129,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         print(f"[execute] ▶ {task['id']}: {task['title']}", flush=True)
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
-                             merge_lock=merge_lock)
+                             merge_lock=merge_lock, memory=dev_card)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             return task, {"action": "error", "error": str(e)}
 
@@ -135,6 +139,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     shipped = 0                                       # close out on the MAIN thread (single-writer)
     for task, res in results:
         action = res.get("action")
+        for lesson in res.get("learnings") or []:     # record the developer's emitted learnings
+            factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
@@ -150,13 +156,17 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 reason = f"{reason} ({res['stage']})"
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
             print(f"[execute]   {task['id']} → {reason} — blocked", flush=True)
+            fl = factory_memory.lesson_for_block(action)   # factory failure-memory (canned, deduped)
+            if fl:
+                factory_memory.record_learning(store, "factory", fl, scope="blocked",
+                                               shift_id=shift_id)
     return shipped
 
 
 def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: dict,
                       grade_fn: Callable[[str], dict], as_user: Optional[str] = None,
                       claude_bin: str = "claude", label: Optional[str] = None,
-                      merge_lock=None) -> dict:
+                      merge_lock=None, memory: str = "") -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -180,18 +190,23 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             except Exception as e:  # noqa: BLE001
                 return {"action": "discarded", "stage": "chown", "error": str(e)}
 
-        develop_candidate(dev_clone, task=task, branch=branch,
+        dev = develop_candidate(dev_clone, task=task, branch=branch,
                           test_cmd=" ".join(adapter.test_command()),
-                          frozen=adapter.frozen_paths(), as_user=as_user, claude_bin=claude_bin)
+                          frozen=adapter.frozen_paths(), as_user=as_user,
+                          claude_bin=claude_bin, memory=memory)
+        # The developer can't write the factory DB from its clone (Guest-House user in prod),
+        # so it emits learnings in its reply; carry them out for the MAIN thread to record.
+        from ..reporting import factory_memory
+        learnings = factory_memory.parse_learnings(dev.get("reply", ""))
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
-            return {"action": "no_candidate", "branch": branch}   # NO branch; don't diff a missing ref
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # NO branch
         try:
             changed = adapter.changed_paths(dev_clone, base, branch)
         except subprocess.CalledProcessError:          # 2nd exit-128 site: branch exists but the diff
-            return {"action": "no_candidate", "branch": branch}   # can't resolve/run → no usable candidate
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # unresolvable
         if not changed:                                # the worker made no committed change
-            return {"action": "no_candidate", "branch": branch}
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings}
 
         # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
         # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
@@ -201,10 +216,12 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             cand_wt = os.path.join(work, "wt")
             adapter.add_worktree(main_repo, cand_wt, branch)
             try:
-                return code_round.run_code_round(
+                res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch)
+                res["learnings"] = learnings
+                return res
             finally:
                 try:
                     adapter.remove_worktree(main_repo, cand_wt)

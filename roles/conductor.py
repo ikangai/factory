@@ -44,11 +44,13 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
     target = mission.get("target_repo") or config.target_repo_slug()   # robust fallback if unset
     issues = fetch_issues(target) or "(none fetched)"
+    from ..reporting import factory_memory                  # factory memory: prior lessons → context
     return (common._load_prompt("conductor")
             .replace("{MISSION}", mission.get("statement", ""))
             .replace("{TARGET_REPO}", target or "(none set)")
             .replace("{BUDGET}", f"{token_budget:,} tokens")
             .replace("{RESUME}", resume)
+            .replace("{MEMORY}", factory_memory.memory_card(store, "conductor"))
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
             .replace("{DIGESTS}", digests))

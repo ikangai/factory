@@ -16,6 +16,8 @@ Token budget (a guideline — the harness enforces a hard wall-clock from outsid
 Resume note from the prior shift:
 {RESUME}
 
+{MEMORY}
+
 Open backlog:
 {BACKLOG}
 
@@ -57,6 +59,13 @@ in your planning where they fit the mission):
 6. **Mission-check** — judge progress vs the mission. It is a *status*, never a silent
    "done": if the backlog is empty AND research is dry AND nothing is improving, say so in
    the report — don't invent busywork. **The mission, not an empty queue, is the terminator.**
+7. **Record what you learned (factory memory)** — when you discover a *durable, reusable*
+   lesson — a gotcha, where a helper lives, a planning pattern that works, a failure mode to
+   avoid — save it so future shifts inherit it instead of relearning:
+   `./bin/factory learn add --role conductor --content "<one-line lesson>"` (use
+   `--role factory` for a cross-cutting lesson every role should see). Past lessons are shown
+   under **"What you've learned so far"** above. Record signal, not noise — one crisp lesson,
+   not a shift summary.
 
 ## Hard rules
 - Work in bounded steps and leave a clear **resume note** — you may be stopped at any time

@@ -49,12 +49,14 @@ def build_research_prompt(store, mission: dict, *, limit: int, issues: str = "")
     backlog = _bullets(store.list_tasks(status="open"), lambda t: f"- {t['title']}",
                        "(empty)")
     target = mission.get("target_repo") or config.target_repo_slug()    # robust fallback if unset
+    from ..reporting import factory_memory                  # factory memory: prior lessons → context
     return (common._load_prompt("research_feed")
             .replace("{MISSION}", mission.get("statement", ""))
             .replace("{TARGET_REPO}", target or "(none set)")
             .replace("{ISSUES}", issues or "(none fetched — propose from the code + the web)")
             .replace("{DIGESTS}", digests)
             .replace("{BACKLOG}", backlog)
+            .replace("{MEMORY}", factory_memory.memory_card(store, "researcher"))
             .replace("{LIMIT}", str(limit)))
 
 
@@ -89,6 +91,12 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     if not isinstance(obj, dict):          # junk reply → no well-formed result; don't consume
         return []
     directions = obj.get("directions", [])
+
+    from ..reporting import factory_memory                  # record the researcher's emitted lessons
+    for lesson in obj.get("learnings", []) or []:
+        if isinstance(lesson, str):
+            factory_memory.record_learning(store, "researcher", lesson,
+                                           shift_id=store.current_shift_id())
 
     added: list[dict] = []
     for d in directions[:limit]:

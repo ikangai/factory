@@ -257,7 +257,7 @@ def worker_bus_env(squad: str) -> dict:
 
 def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
                       frozen, as_user: Optional[str] = None, claude_bin: str = "claude",
-                      timeout: int = 1800) -> dict:
+                      timeout: int = 1800, memory: str = "") -> dict:
     """Run a DEVELOPER super-worker inside `clone_dir` (a clone of the target) toward
     `task`: it makes a bounded code change, gets the target's tests green, and commits to
     `branch`. With `as_user` it runs as the Guest-House user (HARD boundary); without, it
@@ -273,6 +273,7 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
     extra_env = worker_bus_env(f"{base}-{branch.rsplit('-', 1)[-1]}")
     prompt = (_load_prompt("developer")
               .replace("{TASK}", task)
+              .replace("{MEMORY}", memory)
               .replace("{BRANCH}", branch)
               .replace("{TEST_CMD}", test_cmd)
               .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))

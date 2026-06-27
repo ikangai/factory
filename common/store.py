@@ -396,6 +396,32 @@ class Blackboard:
             r["metrics"] = json.loads(r.pop("metrics_json"))
         return rows
 
+    # -- factory memory: per-role learnings ---------------------------------
+    def add_learning(self, role: str, content: str, *, agent: str = "",
+                     scope: str = "general", shift_id: Optional[int] = None) -> int:
+        """Append a learning for `role`. Returns its id. CRUD only — dedup/format live
+        in reporting.factory_memory."""
+        cur = self._exec(
+            "INSERT INTO learnings(role, agent, scope, content, shift_id, uses, "
+            "created_at) VALUES (?,?,?,?,?,0,?)",
+            (role, agent, scope, content, shift_id, now_iso()))
+        return cur.lastrowid
+
+    def learnings_for_role(self, role: str, limit: int = 10) -> list[dict]:
+        """A role's learnings, newest first (id DESC is stable even within one tick)."""
+        return self._all(
+            "SELECT * FROM learnings WHERE role = ? ORDER BY id DESC LIMIT ?",
+            (role, limit))
+
+    def all_learnings(self, limit: int = 50) -> list[dict]:
+        """Every role's learnings, newest first — the factory-wide memory view."""
+        return self._all("SELECT * FROM learnings ORDER BY id DESC LIMIT ?", (limit,))
+
+    def bump_learning_uses(self, ids: Iterable[int]) -> None:
+        """Increment the surfaced-count for the given learnings (cheap relevance signal)."""
+        for lid in ids:
+            self._exec("UPDATE learnings SET uses = uses + 1 WHERE id = ?", (lid,))
+
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
         """True if this (issue, commit) pair has already been synced — the guard that

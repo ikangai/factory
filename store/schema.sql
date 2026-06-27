@@ -183,6 +183,21 @@ CREATE TABLE IF NOT EXISTS mission_status (
     at           TEXT NOT NULL
 );
 
+-- Factory memory: durable learnings each agent role / super-worker reads back to
+-- improve. role in {conductor,developer,researcher,factory}; the factory itself
+-- learns via the 'factory' role. (design: docs/plans/2026-06-27-factory-memory-design.md)
+CREATE TABLE IF NOT EXISTS learnings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    role       TEXT NOT NULL,
+    agent      TEXT NOT NULL DEFAULT '',     -- optional handle/identity
+    scope      TEXT NOT NULL DEFAULT 'general',
+    content    TEXT NOT NULL,
+    shift_id   INTEGER,
+    uses       INTEGER NOT NULL DEFAULT 0,   -- times surfaced into a prompt (relevance signal)
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);
+
 -- Auto issue-sync ledger: which (target-repo issue, graduated commit) pairs the
 -- factory has already commented/closed on, so a resume/re-run never double-posts.
 -- (design: docs/plans/2026-06-27-factory-auto-issue-sync-design.md)
