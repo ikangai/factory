@@ -139,8 +139,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     shipped = 0                                       # close out on the MAIN thread (single-writer)
     for task, res in results:
         action = res.get("action")
-        for lesson in res.get("learnings") or []:     # record the developer's emitted learnings
-            factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
+        if action != "halted":                        # a STOP-braked run is incomplete — don't
+            for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable
+                factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
@@ -156,7 +157,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 reason = f"{reason} ({res['stage']})"
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
             print(f"[execute]   {task['id']} → {reason} — blocked", flush=True)
-            fl = factory_memory.lesson_for_block(action)   # factory failure-memory (canned, deduped)
+            fl = factory_memory.lesson_for_block(action, res.get("stage", ""))  # stage-aware lesson
             if fl:
                 factory_memory.record_learning(store, "factory", fl, scope="blocked",
                                                shift_id=shift_id)

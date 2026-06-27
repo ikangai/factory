@@ -795,15 +795,17 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     return res
 
 
-def cmd_learn(store: Blackboard, action: str, *, role: str = "factory", content: str = "",
+def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, content: str = "",
               scope: str = "general", agent: str = "", limit: int = 20):
-    """`factory learn add --role R --content "…"` / `factory learn list [--role R]` — the
+    """`factory learn add [--role R] --content "…"` / `factory learn list [--role R]` — the
     factory's memory CLI. Agents (the conductor + super-workers via Bash) record durable
     learnings here; the orchestrator injects them back into each role's prompt via
-    reporting.factory_memory.memory_card. Adds are dedup'd. (design:
+    reporting.factory_memory.memory_card. Adds are dedup'd. `add` defaults to the `factory`
+    role; `list` with no role shows EVERY role's learnings. (design:
     docs/plans/2026-06-27-factory-memory-design.md)"""
     from ..reporting import factory_memory
     if action == "add":
+        role = role or "factory"                          # add defaults to the cross-cutting role
         lid = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
                                              shift_id=store.current_shift_id())
         if lid is None:
@@ -1249,8 +1251,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="preview the push range + issue actions without mutating anything")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
     lrn.add_argument("action", choices=["add", "list"])
-    lrn.add_argument("--role", default="factory",
-                     help="conductor | developer | researcher | factory (default: factory)")
+    lrn.add_argument("--role", default=None,
+                     help="conductor | developer | researcher | factory "
+                          "(add defaults to factory; list with no role shows ALL roles)")
     lrn.add_argument("--content", default="", help="the learning to record (for add)")
     lrn.add_argument("--scope", default="general", help="free tag, e.g. no_candidate / graduation")
     lrn.add_argument("--agent", default="", help="optional agent handle/identity")

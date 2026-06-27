@@ -93,10 +93,9 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     directions = obj.get("directions", [])
 
     from ..reporting import factory_memory                  # record the researcher's emitted lessons
-    for lesson in obj.get("learnings", []) or []:
-        if isinstance(lesson, str):
-            factory_memory.record_learning(store, "researcher", lesson,
-                                           shift_id=store.current_shift_id())
+    for lesson in factory_memory.coerce_learnings(obj.get("learnings")):  # guard non-list JSON drift
+        factory_memory.record_learning(store, "researcher", lesson,
+                                       shift_id=store.current_shift_id())
 
     added: list[dict] = []
     for d in directions[:limit]:

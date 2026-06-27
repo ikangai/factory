@@ -233,3 +233,106 @@ def test_execute_records_developer_and_factory_learnings(tmp_path):
                    for r in s.learnings_for_role("developer"))         # developer's emitted lesson
         assert any("no_candidate" in r["content"]
                    for r in s.learnings_for_role("factory"))           # canned factory failure-memory
+
+
+# ============================================================================
+# Review-fix regression tests (xhigh review of the feature, 2026-06-27)
+# ============================================================================
+
+# -- parse_learnings: numbered lists, prose intro, last-section-wins ----------
+def test_parse_learnings_numbered_list():
+    assert factory_memory.parse_learnings("LEARNINGS:\n1. first lesson\n2. second lesson") == [
+        "first lesson", "second lesson"]
+
+
+def test_parse_learnings_paren_numbered_list():
+    assert factory_memory.parse_learnings("LEARNINGS:\n1) a\n2) b") == ["a", "b"]
+
+
+def test_parse_learnings_prose_intro_then_bullets():
+    assert factory_memory.parse_learnings("LEARNINGS:\nHere are the lessons:\n- A\n- B") == ["A", "B"]
+
+
+def test_parse_learnings_takes_last_section_ignoring_earlier_prose_learnings_line():
+    reply = ("Learnings: I found a bug in the tokenizer\n- not a real lesson\n\n"
+             "final summary paragraph.\n\nLEARNINGS:\n- the real durable lesson")
+    assert factory_memory.parse_learnings(reply) == ["the real durable lesson"]
+
+
+# -- _is_dup: length-ratio gate so a short generic doesn't swallow specifics --
+def test_is_dup_short_generic_does_not_swallow_long_specific():
+    existing = [{"content": "narrow the brief"}]
+    assert factory_memory._is_dup(
+        "narrow the brief to one file and split the rest into a sequenced follow-up",
+        existing) is False
+
+
+def test_is_dup_exact_and_close_still_dedup():
+    assert factory_memory._is_dup("narrow the brief", [{"content": "narrow the brief"}]) is True
+    assert factory_memory._is_dup("narrow the briefs", [{"content": "narrow the brief"}]) is True
+
+
+def test_record_learning_dedups_identical_non_ascii(tmp_path):
+    with _store(tmp_path) as s:
+        a = factory_memory.record_learning(s, "developer", "日本語のレッスンを学んだ")
+        b = factory_memory.record_learning(s, "developer", "日本語のレッスンを学んだ")
+        assert a is not None and b is None                  # dedup must fire for non-ASCII too
+
+
+# -- coerce_learnings: researcher JSON shape guard ---------------------------
+def test_coerce_learnings_rejects_non_list():
+    assert factory_memory.coerce_learnings("narrow the briefs") == []   # a string, not a list
+    assert factory_memory.coerce_learnings(None) == []
+
+
+def test_coerce_learnings_filters_to_nonempty_strings():
+    assert factory_memory.coerce_learnings(["a", "", None, "b", 3, "  "]) == ["a", "b"]
+
+
+# -- lesson_for_block: revert_failed + stage-aware discard -------------------
+def test_lesson_for_block_revert_failed_has_a_lesson():
+    assert factory_memory.lesson_for_block("revert_failed")
+
+
+def test_lesson_for_block_discarded_is_stage_aware():
+    tests_lesson = factory_memory.lesson_for_block("discarded", "tests")
+    generic = factory_memory.lesson_for_block("discarded")
+    assert tests_lesson and tests_lesson != generic and "test" in tests_lesson.lower()
+
+
+# -- store: batched + empty-safe bump ----------------------------------------
+def test_bump_learning_uses_empty_is_noop(tmp_path):
+    with _store(tmp_path) as s:
+        s.bump_learning_uses([])                            # must not raise
+
+
+# -- CLI: list defaults to ALL roles, add defaults to factory ----------------
+def test_cmd_learn_list_default_shows_all_roles(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        s.add_learning("conductor", "cond lesson")
+        s.add_learning("developer", "dev lesson")
+        orch.cmd_learn(s, "list")
+        out = capsys.readouterr().out
+        assert "cond lesson" in out and "dev lesson" in out
+
+
+def test_cmd_learn_add_defaults_to_factory_role(tmp_path):
+    with _store(tmp_path) as s:
+        orch.cmd_learn(s, "add", content="a factory-level lesson")
+        assert s.learnings_for_role("factory")[0]["content"] == "a factory-level lesson"
+
+
+# -- execute: don't record learnings for a STOP-halted run -------------------
+def test_execute_does_not_record_learnings_for_halted(tmp_path):
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        tid = "task-bbbb2222"
+        s.add_task(tid, "x", source="human")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "halted", "learnings": ["should not be recorded on a halt"]}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        assert s.learnings_for_role("developer") == []

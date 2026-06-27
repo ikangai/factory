@@ -418,9 +418,14 @@ class Blackboard:
         return self._all("SELECT * FROM learnings ORDER BY id DESC LIMIT ?", (limit,))
 
     def bump_learning_uses(self, ids: Iterable[int]) -> None:
-        """Increment the surfaced-count for the given learnings (cheap relevance signal)."""
-        for lid in ids:
-            self._exec("UPDATE learnings SET uses = uses + 1 WHERE id = ?", (lid,))
+        """Increment the surfaced-count for the given learnings (cheap relevance signal). One
+        batched UPDATE+commit (not one transaction per id) — a memory_card surfaces up to 16
+        rows on every prompt build, so the per-id loop was 16 commits per build."""
+        ids = list(ids)
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self._exec(f"UPDATE learnings SET uses = uses + 1 WHERE id IN ({placeholders})", ids)
 
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
