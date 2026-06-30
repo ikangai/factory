@@ -73,7 +73,7 @@ def prefilter(store, tasks: list[dict], *, shift_id, judge) -> list[dict]:
             if v["spec"]:                          # persist it (GSD #2 typed column) — durable
                 store.set_task_spec(t["id"], v["spec"])
             kept = dict(t)
-            kept["spec"] = v["spec"]
+            kept["spec"] = v["spec"] or t.get("spec") or {}   # don't clobber a durable authored spec
             keep.append(kept)
     return keep
 
@@ -117,11 +117,18 @@ def spec_detail_suffix(spec) -> str:
 
 
 def _within_surface(path: str, surface: str) -> bool:
+    """Is `path` within the declared `surface`? Matches by PATH COMPONENT, not bare substring
+    (so 'api.py' does not match 'rapid_api.py'). A surface naming a dir/path must appear as a
+    component; a bare filename matches by basename (allowing an extensionless surface, e.g.
+    'llm' → 'llm.py')."""
     p = (path or "").lower().replace("\\", "/")
-    s = (surface or "").lower().strip()
+    s = (surface or "").lower().strip().strip("/")
     if not s:
         return True
-    return s in p or p.rsplit("/", 1)[-1] == s.rsplit("/", 1)[-1]
+    if "/" in s:                                   # surface names a dir/path → a path component
+        return p == s or p.endswith("/" + s) or ("/" + s + "/") in p or p.startswith(s + "/")
+    base, sbase = p.rsplit("/", 1)[-1], s.rsplit("/", 1)[-1]
+    return base == sbase or base.startswith(sbase + ".")
 
 
 def spec_fulfillment(spec, changed_paths) -> tuple[bool, str]:
@@ -146,12 +153,13 @@ def add_subtasks(store, subtasks) -> int:
     CHECK) with each one's spec folded into its detail. Returns the count added. Shared by the
     scope-check `split` path and no_candidate decomposition."""
     n = 0
-    for s in (subtasks or []):
+    for s in (subtasks if isinstance(subtasks, list) else []):   # a non-list (LLM drift) → []
         if not (isinstance(s, dict) and (s.get("title") or "").strip()):
             continue
-        spec = {"target_surface": s.get("target_surface", ""), "acceptance": s.get("acceptance", ""),
-                "out_of_scope": s.get("out_of_scope", "")}
-        detail = (s.get("detail", "") or "") + spec_detail_suffix(spec)
+        spec = {k: v for k, v in {                               # drop blank fields → {} not {"":""}
+            "target_surface": s.get("target_surface", ""), "acceptance": s.get("acceptance", ""),
+            "out_of_scope": s.get("out_of_scope", "")}.items() if v}
+        detail = (s.get("detail", "") or "").strip() + spec_detail_suffix(spec)
         store.add_task(f"task-{uuid.uuid4().hex[:8]}", s["title"].strip(),
                        source="worker", detail=detail, spec=spec)   # typed spec (GSD #2)
         n += 1

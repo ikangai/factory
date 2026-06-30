@@ -138,9 +138,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if killswitch.is_halted():                   # STOP tripped before this one started
             return task, {"action": "halted"}
         text = task["title"] + ((": " + task["detail"]) if task.get("detail") else "")
-        if task.get("spec"):                          # scope check passed a sharpened contract
-            from ..reporting import scope_check
-            text += scope_check.spec_brief(task["spec"])
+        if task.get("spec") and "SPEC:" not in (task.get("detail") or ""):   # avoid a double-fold:
+            from ..reporting import scope_check                              # detail may already
+            text += scope_check.spec_brief(task["spec"])                     # carry the spec block
         print(f"[execute] ▶ {task['id']}: {task['title']}", flush=True)
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,

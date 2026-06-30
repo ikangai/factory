@@ -754,7 +754,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         from .develop import execute_claimed_tasks
         max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
         max_parallel = int(sw.get("max_parallel", 3))       # …run that many super-workers at once
-        sj = dc = None                                  # GSD spec-driven checks (config-gated, off by default)
+        sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if sw.get("scope_check") or sw.get("auto_decompose"):
             from ..reporting import scope_check
             if sw.get("scope_check"):                   # #1: pass/split/reject BEFORE dispatch

@@ -68,7 +68,8 @@ def _good_grade(repo):
 
 
 def test_full_turn_develops_grades_and_merges(monkeypatch, tmp_path):
-    ad = FakeAdapter(changed=["src/clive/feature.py"], tests_passed=True)
+    # ships a test alongside the source so the now-default-on require_test gate passes
+    ad = FakeAdapter(changed=["src/clive/feature.py", "tests/test_feature.py"], tests_passed=True)
     monkeypatch.setattr(common, "develop_candidate",
                         lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
 

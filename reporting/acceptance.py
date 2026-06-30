@@ -6,8 +6,10 @@ rejected — so the gate measures task FULFILLMENT (the change is tested), not j
 non-regression. This generalizes GSD's "the worker must satisfy the spec it was given (a
 named test)" into a deterministic, diff-level check.
 
-Test/source classification is a heuristic covering common conventions, overridable per target
-via config (`target.test_path_globs` / `target.source_path_globs` as substrings/suffixes).
+Test/source classification is a heuristic covering common conventions (a tests/ directory, a
+test_*/*_test/*.spec/*.test name). It is NOT yet config-overridable — clive's source is .py and
+its tests live under tests/, so the heuristic fits; broaden it here if you point the factory at a
+target with other conventions.
 
 design: docs/plans/2026-06-27-gsd-spec-driven-integration.md
 """
@@ -25,9 +27,11 @@ def _norm(path: str) -> str:
 def _is_test(path: str) -> bool:
     p = _norm(path)
     base = p.rsplit("/", 1)[-1]
-    return ("/tests/" in p or p.startswith("tests/")
-            or base.startswith("test_")
-            or p.endswith(_TEST_SUFFIXES)
+    if "/tests/" in p or p.startswith("tests/"):      # the strong signal — a tests/ directory
+        return True
+    if "/src/" in p or p.startswith("src/"):          # a module under src/ is SOURCE, even if
+        return False                                  # named test_* (a production test-helper)
+    return (base.startswith("test_") or p.endswith(_TEST_SUFFIXES)
             or ".test." in base or ".spec." in base)
 
 
