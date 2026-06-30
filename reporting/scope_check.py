@@ -114,6 +114,31 @@ def spec_detail_suffix(spec) -> str:
     return ("\n\nSPEC:\n" + "\n".join(f"- {b}" for b in bits)) if bits else ""
 
 
+def _within_surface(path: str, surface: str) -> bool:
+    p = (path or "").lower().replace("\\", "/")
+    s = (surface or "").lower().strip()
+    if not s:
+        return True
+    return s in p or p.rsplit("/", 1)[-1] == s.rsplit("/", 1)[-1]
+
+
+def spec_fulfillment(spec, changed_paths) -> tuple[bool, str]:
+    """Did the delivered diff stay within the spec's declared `target_surface`? Returns
+    (matched, reason). A SOURCE path outside the declared surface is spec-creep — a signal the
+    target_surface estimate was too narrow. Test/docs paths can't stray. No declared surface →
+    matched (nothing to check). Feeds self-tuning learnings back to the factory."""
+    surface = (spec.get("target_surface") if isinstance(spec, dict) else "") or ""
+    surface = surface.strip()
+    if not surface:
+        return True, ""
+    from . import acceptance                            # reuse the source/test classifier
+    stray = [p for p in (changed_paths or [])
+             if acceptance._is_source(p) and not _within_surface(p, surface)]
+    if stray:
+        return False, f"declared target_surface '{surface}' but the diff also touched {stray[:3]}"
+    return True, ""
+
+
 def add_subtasks(store, subtasks) -> int:
     """Add the titled sub-tasks as OPEN tasks (source='worker' to satisfy the tasks.source
     CHECK) with each one's spec folded into its detail. Returns the count added. Shared by the

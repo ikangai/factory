@@ -162,6 +162,16 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                                   shift_id=shift_id)
             shipped += 1
             print(f"[execute]   {task['id']} → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
+            spec = task.get("spec")                    # GSD #6: spec-fulfillment feedback
+            if spec and res.get("changed_paths") is not None:
+                from ..reporting import scope_check
+                matched, _why = scope_check.spec_fulfillment(spec, res["changed_paths"])
+                if not matched:
+                    factory_memory.record_learning(
+                        store, "factory",
+                        "a task delivered changes BEYOND its declared target_surface — size "
+                        "target_surface to the real change so the scope check stays accurate",
+                        scope="spec_creep", shift_id=shift_id)
         elif action == "halted":                      # STOP — leave in_progress for requeue
             print(f"[execute]   {task['id']} → skipped (STOP)", flush=True)
         else:                                         # no_candidate/discarded/auto_reverted/error
@@ -252,6 +262,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch, require_test=require_test)
                 res["learnings"] = learnings
+                res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 return res
             finally:
                 try:
