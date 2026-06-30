@@ -131,13 +131,13 @@ super_worker:
   scope_check_timeout_s: 180
   # GSD spec-bound acceptance gate: a candidate that changes SOURCE code but ships NO test is
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
-  # Test-only / docs-only / empty diffs pass. OFF by default; flip to true to enforce.
-  require_test: false
+  # Test-only / docs-only / empty diffs pass. Enabled 2026-06-30 (operator).
+  require_test: true
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits
   # BEFORE dispatch; this splits AFTER a worker fails). Fail-safe (no split -> canned lesson).
-  auto_decompose: false
+  auto_decompose: true
   decompose_max_turns: 8
   decompose_timeout_s: 240
 
