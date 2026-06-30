@@ -754,13 +754,16 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         from .develop import execute_claimed_tasks
         max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
         max_parallel = int(sw.get("max_parallel", 3))       # …run that many super-workers at once
-        sj = None                                       # GSD spec-driven scope check (config-gated, off by default)
-        if sw.get("scope_check"):
+        sj = dc = None                                  # GSD spec-driven checks (config-gated, off by default)
+        if sw.get("scope_check") or sw.get("auto_decompose"):
             from ..reporting import scope_check
-            sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
+            if sw.get("scope_check"):                   # #1: pass/split/reject BEFORE dispatch
+                sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
+            if sw.get("auto_decompose"):                # #4: split a no_candidate AFTER the worker fails
+                dc = lambda task: scope_check.decompose_judge(task, as_user=as_user, claude_bin=claude_bin)
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
-            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj)
+            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)

@@ -133,6 +133,13 @@ super_worker:
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
   # Test-only / docs-only / empty diffs pass. OFF by default; flip to true to enforce.
   require_test: false
+  # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
+  # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
+  # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits
+  # BEFORE dispatch; this splits AFTER a worker fails). Fail-safe (no split -> canned lesson).
+  auto_decompose: false
+  decompose_max_turns: 8
+  decompose_timeout_s: 240
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:

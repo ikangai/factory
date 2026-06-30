@@ -59,12 +59,10 @@ def prefilter(store, tasks: list[dict], *, shift_id, judge) -> list[dict]:
                 store, "factory", f"a task was scope-rejected before dispatch — {reason}",
                 scope="scope_check", shift_id=shift_id)
         elif v["decision"] == "split":
-            for sub in v["subtasks"]:                 # source must satisfy the tasks.source CHECK
-                store.add_task(f"task-{uuid.uuid4().hex[:8]}", sub["title"].strip(),
-                               source="worker", detail=(sub.get("detail") or "").strip())
+            n = add_subtasks(store, v["subtasks"])    # source='worker' + spec folded into detail
             store.set_task_status(
                 t["id"], "blocked",
-                result=f"scope-split into {len(v['subtasks'])}: {v['reason']}"[:200],
+                result=f"scope-split into {n}: {v['reason']}"[:200],
                 shift_id=shift_id)
             factory_memory.record_learning(
                 store, "factory",
@@ -114,6 +112,64 @@ def spec_detail_suffix(spec) -> str:
     if spec.get("out_of_scope"):
         bits.append(f"Out of scope: {spec['out_of_scope']}")
     return ("\n\nSPEC:\n" + "\n".join(f"- {b}" for b in bits)) if bits else ""
+
+
+def add_subtasks(store, subtasks) -> int:
+    """Add the titled sub-tasks as OPEN tasks (source='worker' to satisfy the tasks.source
+    CHECK) with each one's spec folded into its detail. Returns the count added. Shared by the
+    scope-check `split` path and no_candidate decomposition."""
+    n = 0
+    for s in (subtasks or []):
+        if not (isinstance(s, dict) and (s.get("title") or "").strip()):
+            continue
+        spec = {"target_surface": s.get("target_surface", ""), "acceptance": s.get("acceptance", ""),
+                "out_of_scope": s.get("out_of_scope", "")}
+        detail = (s.get("detail", "") or "") + spec_detail_suffix(spec)
+        store.add_task(f"task-{uuid.uuid4().hex[:8]}", s["title"].strip(),
+                       source="worker", detail=detail)
+        n += 1
+    return n
+
+
+def decompose_no_candidate(store, task: dict, *, shift_id, decomposer) -> int:
+    """A worker returned no_candidate (the brief was too big to land). Split it into a
+    sequenced chain of single-surface sub-tasks (open, source='worker') and return the count
+    added — turning the failure into forward progress. `decomposer(task) -> raw {subtasks:…}`
+    is injected (production: one LLM call). Returns 0 on a decomposer error or empty result,
+    so the caller falls back to the canned no_candidate lesson. Fail-safe."""
+    try:
+        raw = decomposer(task)
+    except Exception:                                  # noqa: BLE001 — never block the close-out
+        return 0
+    n = add_subtasks(store, raw.get("subtasks") if isinstance(raw, dict) else None)
+    if n:
+        from . import factory_memory
+        factory_memory.record_learning(
+            store, "factory",
+            "a no_candidate brief was auto-decomposed into smaller single-surface sub-tasks — "
+            "write tasks that small up front to skip the wasted worker run",
+            scope="decompose", shift_id=shift_id)
+    return n
+
+
+def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
+    """Production decomposer: one LLM call over roles/decompose/prompt.md → a raw dict with a
+    `subtasks` chain. Returns {} on any failure so decompose_no_candidate falls back."""
+    from ..roles import common
+    from ..common import config, paths
+    sw = config.load_config().get("super_worker", {}) or {}
+    text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
+    prompt = common._load_prompt("decompose").replace("{TASK}", text)
+    try:
+        reply, _t, _c = common.claude_super(
+            prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
+            as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
+            max_turns=int(sw.get("decompose_max_turns", 8)),
+            timeout=int(sw.get("decompose_timeout_s", 240)))
+        obj = common._parse_obj(reply)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001 — fall back
+        return {}
 
 
 def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):

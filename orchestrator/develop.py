@@ -89,7 +89,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           develop_fn: Optional[Callable] = None,
                           max_tasks: Optional[int] = None,
                           max_parallel: Optional[int] = None,
-                          scope_judge: Optional[Callable] = None) -> int:
+                          scope_judge: Optional[Callable] = None,
+                          decomposer: Optional[Callable] = None) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -169,6 +170,19 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 reason = f"error: {str(res['error'])[:180]}"
             elif res.get("stage"):
                 reason = f"{reason} ({res['stage']})"
+            decomposed = 0                            # GSD #4: turn no_candidate into forward progress
+            if action == "no_candidate" and decomposer is not None:
+                from ..reporting import scope_check
+                decomposed = scope_check.decompose_no_candidate(
+                    store, task, shift_id=shift_id, decomposer=decomposer)
+            if decomposed:
+                store.set_task_status(
+                    task["id"], "blocked",
+                    result=f"no_candidate → decomposed into {decomposed} sub-tasks"[:200],
+                    shift_id=shift_id)
+                print(f"[execute]   {task['id']} → no_candidate, auto-decomposed into "
+                      f"{decomposed} sub-task(s) — blocked", flush=True)
+                continue                              # decomposition replaces the canned lesson
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
             print(f"[execute]   {task['id']} → {reason} — blocked", flush=True)
             fl = factory_memory.lesson_for_block(action, res.get("stage", ""))  # stage-aware lesson
