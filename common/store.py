@@ -55,7 +55,16 @@ class Blackboard:
     def init_db(self) -> None:
         with open(paths.SCHEMA_SQL, "r", encoding="utf-8") as fh:
             self.conn.executescript(fh.read())
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive column migrations for DBs created before a column existed — SQLite has no
+        ADD COLUMN IF NOT EXISTS, and CREATE TABLE IF NOT EXISTS won't alter an existing table.
+        Idempotent: each ALTER runs only when the column is absent."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if cols and "spec_json" not in cols:           # tasks exists but predates the typed spec
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}'")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -257,21 +266,37 @@ class Blackboard:
 
     # -- tasks: the backlog -------------------------------------------------
     def add_task(self, id: str, title: str, *, source: str, detail: str = "",
-                 source_ref: str = "") -> None:
+                 source_ref: str = "", spec: Optional[dict] = None) -> None:
         ts = now_iso()
         self._exec(
-            "INSERT INTO tasks(id, title, detail, source, source_ref, status, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,'open',?,?)",
-            (id, title, detail, source, source_ref, ts, ts))
+            "INSERT INTO tasks(id, title, detail, source, source_ref, status, spec_json, "
+            "created_at, updated_at) VALUES (?,?,?,?,?,'open',?,?,?)",
+            (id, title, detail, source, source_ref, json.dumps(spec or {}), ts, ts))
+
+    def set_task_spec(self, id: str, spec: Optional[dict]) -> None:
+        """Persist a task's typed spec (target_surface/acceptance/…) — durable across shifts,
+        so the scope check's verdict outlives the shift it ran in."""
+        self._exec("UPDATE tasks SET spec_json = ?, updated_at = ? WHERE id = ?",
+                   (json.dumps(spec or {}), now_iso(), id))
+
+    @staticmethod
+    def _with_spec(row: Optional[dict]) -> Optional[dict]:
+        if row is not None and "spec_json" in row:
+            try:
+                row["spec"] = json.loads(row.get("spec_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty spec
+                row["spec"] = {}
+        return row
 
     def get_task(self, id: str) -> Optional[dict]:
-        return self._one("SELECT * FROM tasks WHERE id = ?", (id,))
+        return self._with_spec(self._one("SELECT * FROM tasks WHERE id = ?", (id,)))
 
     def list_tasks(self, status: Optional[str] = None) -> list[dict]:
         if status:
-            return self._all("SELECT * FROM tasks WHERE status = ? ORDER BY created_at",
-                             (status,))
-        return self._all("SELECT * FROM tasks ORDER BY created_at")
+            rows = self._all("SELECT * FROM tasks WHERE status = ? ORDER BY created_at", (status,))
+        else:
+            rows = self._all("SELECT * FROM tasks ORDER BY created_at")
+        return [self._with_spec(r) for r in rows]
 
     def set_task_status(self, id: str, status: str, *, result: Optional[str] = None,
                         shift_id: Optional[int] = None) -> None:
@@ -323,11 +348,13 @@ class Blackboard:
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""
         if shift_id is not None:
-            return self._all(
+            rows = self._all(
                 "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') "
                 "AND shift_id = ? ORDER BY created_at", (shift_id,))
-        return self._all(
-            "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') ORDER BY created_at")
+        else:
+            rows = self._all(
+                "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') ORDER BY created_at")
+        return [self._with_spec(r) for r in rows]
 
     def requeue_shift_tasks(self, shift_id: int) -> int:
         """Return a shift's in-flight (claimed/in_progress) tasks to 'open' so the next

@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status     TEXT NOT NULL DEFAULT 'open'
                  CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
     result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
+    spec_json  TEXT NOT NULL DEFAULT '{}',      -- GSD typed spec: target_surface/acceptance/out_of_scope
     -- the shift that last worked it. NULL until a shift picks it up; FK is safe because
     -- shifts are never DELETEd (a killed shift is UPDATEd to 'error', so it still exists).
     shift_id   INTEGER REFERENCES shifts(id),

@@ -108,7 +108,7 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
                 "acceptance": d.get("acceptance", ""), "out_of_scope": d.get("out_of_scope", "")}
         detail = (d.get("detail", "") or "") + scope_check.spec_detail_suffix(spec)
         tid = f"task-{uuid.uuid4().hex[:8]}"
-        store.add_task(tid, title, source="research", detail=detail)
+        store.add_task(tid, title, source="research", detail=detail, spec=spec)  # typed spec (GSD #2)
         existing.add(title.lower())
         added.append({"id": tid, "title": title})
         if scope_check.is_spec_complete(spec):

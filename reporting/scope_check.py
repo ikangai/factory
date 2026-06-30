@@ -70,6 +70,8 @@ def prefilter(store, tasks: list[dict], *, shift_id, judge) -> list[dict]:
                 "change so they don't need splitting",
                 scope="scope_check", shift_id=shift_id)
         else:                                      # pass → dispatch, carrying the sharpened spec
+            if v["spec"]:                          # persist it (GSD #2 typed column) — durable
+                store.set_task_spec(t["id"], v["spec"])
             kept = dict(t)
             kept["spec"] = v["spec"]
             keep.append(kept)
@@ -151,7 +153,7 @@ def add_subtasks(store, subtasks) -> int:
                 "out_of_scope": s.get("out_of_scope", "")}
         detail = (s.get("detail", "") or "") + spec_detail_suffix(spec)
         store.add_task(f"task-{uuid.uuid4().hex[:8]}", s["title"].strip(),
-                       source="worker", detail=detail)
+                       source="worker", detail=detail, spec=spec)   # typed spec (GSD #2)
         n += 1
     return n
 
