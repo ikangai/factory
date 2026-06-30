@@ -37,8 +37,11 @@ in your planning where they fit the mission):
 2. **Plan** — pick a *small* set (1–3) of open backlog tasks to work THIS shift, each "one
    bounded change", newest evidence first. The backlog lines below show each task's **id**.
    Prefer reopening/refining tasks that were `blocked` last shift (check `./bin/factory
-   task list`). If you see a concrete gap the backlog misses, add it with
-   `./bin/factory task add "<title>" --source worker`.
+   task list`). If you see a concrete gap the backlog misses, add it **spec-shaped** —
+   `./bin/factory task add "<title>" --source worker --detail "<what + why. Target surface:
+   <the ONE file/area>. Acceptance: <observable proof, ideally a named test>>"`. A bounded
+   task naming a single surface + acceptance sails through the scope check; a vague or
+   multi-surface one gets split or rejected before a worker is spent on it.
 3. **Claim the tasks to work** — `./bin/factory task claim <id>` for each. **That is all you
    do to dispatch.** ‼️ **You do NOT run `develop-once` yourself — do not call it, do not
    background anything, do not wait.** After you finish this shift, the factory

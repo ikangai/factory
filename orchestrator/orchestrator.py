@@ -689,18 +689,20 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
 
 
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
-             source: str = "human", result: str = "", status: Optional[str] = None) -> None:
+             source: str = "human", result: str = "", status: Optional[str] = None,
+             detail: str = "") -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
-    `task add "<title>"`, `task claim <id>`, `task done <id> [--result <sha>]`,
-    `task block <id> [--result why]`. claim/done STAMP the running shift, so the loop can
-    tell what a shift shipped (the basis for mission-progress)."""
+    `task add "<title>" [--detail "<spec/brief>"]`, `task claim <id>`,
+    `task done <id> [--result <sha>]`, `task block <id> [--result why]`. claim/done STAMP the
+    running shift, so the loop can tell what a shift shipped (the basis for mission-progress).
+    `--detail` carries the bounded brief/spec to the developer (it used to be dropped)."""
     if action == "list":
         for t in store.list_tasks(status=status):
             print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
     elif action == "add":
         import uuid
         tid = f"task-{uuid.uuid4().hex[:8]}"
-        store.add_task(tid, rest or "(untitled)", source=source)
+        store.add_task(tid, rest or "(untitled)", source=source, detail=detail)
         print(f"[task] added {tid}: {rest}")
     elif action == "claim":
         store.set_task_status(rest, "in_progress", shift_id=store.current_shift_id())
@@ -1274,6 +1276,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
     tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
     tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
+    tsk.add_argument("--detail", default="", help="bounded brief/spec for `task add` (target surface + acceptance)")
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")
@@ -1390,7 +1393,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
-                     result=a.result, status=a.status)
+                     result=a.result, status=a.status, detail=a.detail)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

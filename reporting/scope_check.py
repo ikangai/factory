@@ -94,6 +94,28 @@ def spec_brief(spec: dict) -> str:
             if bits else "")
 
 
+def is_spec_complete(spec) -> bool:
+    """A task spec is 'complete' when it names BOTH a single target_surface and an acceptance
+    (the observable that proves done) — the minimum contract for a bounded, verifiable task."""
+    return bool(isinstance(spec, dict) and (spec.get("target_surface") or "").strip()
+                and (spec.get("acceptance") or "").strip())
+
+
+def spec_detail_suffix(spec) -> str:
+    """Render a spec as a suffix to fold into a task's `detail` at authorship ("" when empty),
+    so target_surface + acceptance travel with the task to the developer + the scope check."""
+    if not isinstance(spec, dict):
+        return ""
+    bits = []
+    if spec.get("target_surface"):
+        bits.append(f"Target surface: {spec['target_surface']}")
+    if spec.get("acceptance"):
+        bits.append(f"Acceptance: {spec['acceptance']}")
+    if spec.get("out_of_scope"):
+        bits.append(f"Out of scope: {spec['out_of_scope']}")
+    return ("\n\nSPEC:\n" + "\n".join(f"- {b}" for b in bits)) if bits else ""
+
+
 def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     """Production judge: one cheap LLM call over roles/scope_check/prompt.md → a raw verdict
     dict (parsed). Returns {} on any failure so prefilter fails open."""

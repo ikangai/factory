@@ -97,15 +97,25 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
         factory_memory.record_learning(store, "researcher", lesson,
                                        shift_id=store.current_shift_id())
 
+    from ..reporting import scope_check                    # fold the emitted spec into the detail
     added: list[dict] = []
+    complete = 0
     for d in directions[:limit]:
         title = (d.get("title") or "").strip() if isinstance(d, dict) else ""
         if not title or title.lower() in existing:        # skip blanks + backlog duplicates
             continue
+        spec = {"target_surface": d.get("target_surface", ""),
+                "acceptance": d.get("acceptance", ""), "out_of_scope": d.get("out_of_scope", "")}
+        detail = (d.get("detail", "") or "") + scope_check.spec_detail_suffix(spec)
         tid = f"task-{uuid.uuid4().hex[:8]}"
-        store.add_task(tid, title, source="research", detail=(d.get("detail", "") or ""))
+        store.add_task(tid, title, source="research", detail=detail)
         existing.add(title.lower())
         added.append({"id": tid, "title": title})
+        if scope_check.is_spec_complete(spec):
+            complete += 1
+    if added:                                             # spec-lint: surface authorship quality
+        print(f"[research] {complete}/{len(added)} new directions are spec-complete "
+              f"(target_surface + acceptance)", flush=True)
 
     for dg in digests:                                    # well-formed result → close the loop
         store.mark_digest_consumed(dg["id"])

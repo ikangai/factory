@@ -49,6 +49,11 @@ backlog and stores each `learnings` entry in the factory's research memory (show
 researchers under **"What you've learned so far"** above). Put a durable, reusable research
 lesson in `learnings` (a fruitful source, a dead end to avoid, a recurring gap) — `[]` if
 none. Record signal, not a summary.
+
+Make each direction **spec-shaped** so the developer gets a real contract: `target_surface`
+(the ONE file/area the change should stay within) and `acceptance` (the concrete, observable
+proof it's done — ideally a named test). A direction with both is a clean, bounded task the
+scope check passes straight through; vague directions get split or rejected downstream.
 ```json
-{"directions": [{"title": "<short imperative task, e.g. 'add bounded retry to pane reconnect'>", "detail": "<what + why, grounded in what you read/found; one bounded change>"}], "learnings": ["<one durable research lesson>"]}
+{"directions": [{"title": "<short imperative task>", "detail": "<what + why, grounded in what you read/found; one bounded change>", "target_surface": "<one file/area, e.g. session/reconnect.py>", "acceptance": "<observable proof, e.g. 'tests/test_reconnect.py::test_bounded_retry passes'>"}], "learnings": ["<one durable research lesson>"]}
 ```
