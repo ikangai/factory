@@ -201,6 +201,28 @@ def test_execute_dispatches_by_profile_and_ledgers_it(tmp_path):
     s.close()
 
 
+def test_execute_threads_require_test_to_the_gate(tmp_path):
+    """Task 6.1: require_test is threaded from the run entry through execute_claimed_tasks into the
+    developer pipeline (so a store override can retune it) instead of being re-read from config
+    inside develop_and_merge."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "x", source="issue")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    seen = {}
+
+    def fake(text, **k):
+        seen.update(k)
+        return {"action": "merged", "merge_sha": "s"}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake, require_test=True)
+    assert seen["require_test"] is True
+    s.close()
+
+
 def test_execute_claimed_tasks_captures_the_block_reason(tmp_path):
     """A bare 'error' is undiagnosable — when develop_task raises, the exception message
     is threaded into the task result so the operator + the conductor can see WHY."""

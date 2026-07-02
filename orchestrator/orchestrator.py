@@ -984,24 +984,30 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     if real:
         print("[run] REAL mode: gated merges land on branch factory/auto in the REAL target "
               "(git-reversible; your working branch is untouched).")
+    # Whitelisted runtime knobs resolve store override → config.yaml → default (Task 6.1), so the
+    # board can retune the next shift. _k() reads the store override each run start.
+    _k = lambda key, default: config.resolve_setting(store, f"super_worker.{key}", default)[0]
     if executor is None:                               # the deterministic rail EXECUTES claimed tasks
         from .develop import execute_claimed_tasks
-        max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
-        max_parallel = int(sw.get("max_parallel", 3))       # …run that many super-workers at once
+        max_tasks = _k("max_tasks_per_shift", 3)        # unattended: cap per-shift fan-out
+        max_parallel = _k("max_parallel", 3)            # …run that many super-workers at once
+        require_test = _k("require_test", False)         # GSD spec-bound acceptance gate (threaded)
+        scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
-        if sw.get("scope_check") or sw.get("auto_decompose"):
+        if scope_on or decompose_on:
             from ..reporting import scope_check
-            if sw.get("scope_check"):                   # #1: pass/split/reject BEFORE dispatch
+            if scope_on:                                # #1: pass/split/reject BEFORE dispatch
                 sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
-            if sw.get("auto_decompose"):                # #4: split a no_candidate AFTER the worker fails
+            if decompose_on:                            # #4: split a no_candidate AFTER the worker fails
                 dc = lambda task: scope_check.decompose_judge(task, as_user=as_user, claude_bin=claude_bin)
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
-            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc)
+            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
+            require_test=require_test)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
-    refill_threshold = int(sw.get("refill_threshold", 2))
+    refill_threshold = _k("refill_threshold", 2)
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
                     refill=refill, refill_threshold=refill_threshold,

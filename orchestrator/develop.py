@@ -58,7 +58,8 @@ def factory_worktree(adapter, *, branch: str = "factory/auto") -> str:
 def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
                  real: bool = False, grade_fn: Optional[Callable] = None,
                  champion_scores: Optional[dict] = None, merge_lock=None,
-                 memory: str = "", profile_overlay: str = "", model: str = "") -> dict:
+                 memory: str = "", profile_overlay: str = "", model: str = "",
+                 require_test: Optional[bool] = None) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -74,7 +75,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf, as_user=as_user,
                                  claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
-                                 profile_overlay=profile_overlay, model=model)
+                                 profile_overlay=profile_overlay, model=model,
+                                 require_test=require_test)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
@@ -82,7 +84,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf,
                                  as_user=as_user, claude_bin=claude_bin, memory=memory,
-                                 profile_overlay=profile_overlay, model=model)
+                                 profile_overlay=profile_overlay, model=model,
+                                 require_test=require_test)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -93,7 +96,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           max_tasks: Optional[int] = None,
                           max_parallel: Optional[int] = None,
                           scope_judge: Optional[Callable] = None,
-                          decomposer: Optional[Callable] = None) -> int:
+                          decomposer: Optional[Callable] = None,
+                          require_test: Optional[bool] = None) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -167,7 +171,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
                              merge_lock=merge_lock, memory=dev_card,
-                             profile_overlay=prof["overlay"], model=prof["model"])
+                             profile_overlay=prof["overlay"], model=prof["model"],
+                             require_test=require_test)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             return task, {"action": "error", "error": str(e)}
 
@@ -239,7 +244,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                       grade_fn: Callable[[str], dict], as_user: Optional[str] = None,
                       claude_bin: str = "claude", label: Optional[str] = None,
                       merge_lock=None, memory: str = "",
-                      profile_overlay: str = "", model: str = "") -> dict:
+                      profile_overlay: str = "", model: str = "",
+                      require_test: Optional[bool] = None) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -295,12 +301,14 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             try:
                 adapter.fetch_candidate(main_repo, dev_clone, branch)
                 adapter.add_worktree(main_repo, cand_wt, branch)
-                require_test = bool((config.load_config().get("super_worker", {}) or {})
-                                    .get("require_test", False))   # GSD spec-bound acceptance gate
+                # GSD spec-bound acceptance gate. Threaded from the run entry (Task 6.1) so a
+                # store override can retune it; None = fall back to config.yaml (unchanged default).
+                rt = require_test if require_test is not None else bool(
+                    (config.load_config().get("super_worker", {}) or {}).get("require_test", False))
                 res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
-                    changed_paths=changed, label=branch, require_test=require_test)
+                    changed_paths=changed, label=branch, require_test=rt)
                 res["learnings"] = learnings
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)

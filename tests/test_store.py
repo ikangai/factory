@@ -546,6 +546,20 @@ def test_add_profile_replace_false_never_clobbers_or_resurrects(store):
     assert p["active"] == 1 and p["overlay"] == "NEW" and p["model"] == "fast"
 
 
+def test_resolve_setting_override_beats_config_beats_default(store):
+    """Task 6.1: a whitelisted knob resolves store override → config.yaml → default, cast to the
+    knob's type (bool from 'false'/'true', int from a string)."""
+    from factory.common import config
+    # require_test is set in config.yaml → 'config'; max_parallel isn't → 'default'
+    assert config.resolve_setting(store, "super_worker.require_test", False) == (True, "config")
+    assert config.resolve_setting(store, "super_worker.max_parallel", 3) == (3, "default")
+    # a store override wins and is cast per SETTINGS_SPEC
+    store.set_setting("super_worker.require_test", "false")
+    store.set_setting("super_worker.max_parallel", "1")
+    assert config.resolve_setting(store, "super_worker.require_test", False) == (False, "override")
+    assert config.resolve_setting(store, "super_worker.max_parallel", 3) == (1, "override")
+
+
 def test_settings_overrides_roundtrip(store):
     assert store.get_setting("super_worker.max_parallel") is None
     store.set_setting("super_worker.max_parallel", "3")
