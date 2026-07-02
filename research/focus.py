@@ -64,6 +64,18 @@ def read_mission(mission_path: str) -> str | None:
     return " ".join(body.split()) if body else None
 
 
+def read_material(mission_path: str) -> str | None:
+    """The raw `## Material from the human` section body from MISSION.md (the pointers/links
+    the operator dropped for the researcher), or None. Distinct from ingest.parse_material,
+    which FETCHES those items — here the researcher just receives the human's raw material."""
+    try:
+        with open(mission_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    return _section_body(text, "Material from the human")
+
+
 def write_mission(mission_path: str, statement: str) -> None:
     """Rewrite MISSION.md's `## Mission` section body to `statement`, leaving the REST of the
     file byte-identical (other sections, the human's material). Creates the file / appends the

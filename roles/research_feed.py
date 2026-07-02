@@ -74,6 +74,10 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
 
     issues = fetch_issues(mission.get("target_repo") or config.target_repo_slug())  # real filed problems
     prompt = build_research_prompt(store, mission, limit=limit, issues=issues)
+    from ..research.focus import read_material                      # human-dropped pointers (Task 1.3)
+    material = read_material(paths.factory("MISSION.md"))
+    if material:                                                    # weigh what the human handed us
+        prompt += ("\n\n## Material from the human (they dropped these — weigh them):\n" + material)
     target_root = config.get_adapter().entry()[0]         # the REAL target repo (not the parent dir)
     reply, tokens, cost = common.claude_super(
         prompt, workdir=target_root,                      # reads the target to find real gaps
