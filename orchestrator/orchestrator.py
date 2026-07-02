@@ -719,9 +719,9 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
     """Agent timesheet: who worked when, how long, at what spend, to what verdict — an aligned
     table of shift-attributed engagements + the all-time per-role rollup (incl. legacy)."""
     from ..reporting import timesheets
-    rows = timesheets.timesheet(store, limit=limit)
-    if shift is not None:
-        rows = [r for r in rows if r["shift"] == shift]
+    # Filter by shift IN THE QUERY, not after LIMIT — a Python post-filter over the newest
+    # `limit` rows silently returns empty for an older shift once the ledger outgrows the window.
+    rows = timesheets.timesheet(store, limit=limit, shift_id=shift)
     print(f"{'shift':>5}  {'agent':<22}  {'task':<26}  {'min':>5}  {'tokens':>8}  {'$':>7}  verdict")
     for r in rows:
         print(f"{r['shift'] or '':>5}  {r['agent'][:22]:<22}  {(r['task_title'] or '')[:26]:<26}  "
@@ -734,6 +734,34 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
 
 
 _MILESTONE_STATUS = ("planned", "active", "delivered", "dropped")
+
+
+def _parse_milestone_id(token: str) -> Optional[int]:
+    """Accept the milestone id in either form the tools DISPLAY: bare `3` or `M3`/`m3`
+    (plan list + the conductor's {PLAN} render both print 'M<id>', so the write commands must
+    take that back). Returns the int, or None if it isn't a milestone id."""
+    s = (token or "").strip()
+    if s[:1] in ("M", "m"):
+        s = s[1:]
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tokens(token: str) -> Optional[int]:
+    """Parse a token count, accepting the human/LLM shorthand `60k` / `1.5m` as well as a bare
+    integer. Returns None if it can't be parsed (so the caller reports a clean error, not a crash)."""
+    s = (token or "").strip().lower().replace(",", "").replace("_", "")
+    mult = 1
+    if s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    elif s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    try:
+        return int(round(float(s) * mult))
+    except (TypeError, ValueError):
+        return None
 
 
 def cmd_plan(store: Blackboard, action: str, *, rest: Optional[list] = None,
@@ -774,24 +802,36 @@ def cmd_plan(store: Blackboard, action: str, *, rest: Optional[list] = None,
         if len(rest) < 2 or rest[1] not in _MILESTONE_STATUS:
             print("[plan] usage: plan status <milestone-id> <" + "|".join(_MILESTONE_STATUS) + ">")
             return
-        store.set_milestone_status(int(rest[0]), rest[1])
-        print(f"[plan] milestone {rest[0]} → {rest[1]}")
+        mid = _parse_milestone_id(rest[0])
+        if mid is None or store.get_milestone(mid) is None:  # don't print a false success on a
+            print(f"[plan] no milestone matches '{rest[0]}' — see `plan list` (0 rows)")  # missing id
+            return
+        store.set_milestone_status(mid, rest[1])
+        print(f"[plan] milestone M{mid} → {rest[1]} (1 row)")
     elif action == "link":
         if len(rest) < 2:
             print("[plan] usage: plan link <task-id> <milestone-id>"); return
         if not _need_task(rest[0]):
             return
-        store.set_task_milestone(rest[0], int(rest[1]))
-        print(f"[plan] linked {rest[0]} → milestone {rest[1]} (1 row)")
+        mid = _parse_milestone_id(rest[1])
+        if mid is None or store.get_milestone(mid) is None:  # a dangling link is silent corruption
+            print(f"[plan] no milestone matches '{rest[1]}' — see `plan list` (0 rows)")
+            return
+        store.set_task_milestone(rest[0], mid)
+        print(f"[plan] linked {rest[0]} → milestone M{mid} (1 row)")
     elif action == "estimate":
         if len(rest) < 2:
             print("[plan] usage: plan estimate <task-id> <est-tokens> [--profile NAME]"); return
         if not _need_task(rest[0]):
             return
-        store.set_task_estimate(rest[0], int(rest[1]))
+        est = _parse_tokens(rest[1])
+        if est is None:
+            print(f"[plan] can't parse '{rest[1]}' as a token count (try 60000 or 60k) (0 rows)")
+            return
+        store.set_task_estimate(rest[0], est)
         if profile:
             store.set_task_profile(rest[0], profile)
-        print(f"[plan] estimated {rest[0]} at {int(rest[1]):,} tokens"
+        print(f"[plan] estimated {rest[0]} at {est:,} tokens"
               + (f", profile={profile}" if profile else "") + " (1 row)")
 
 

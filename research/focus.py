@@ -80,8 +80,13 @@ def write_mission(mission_path: str, statement: str) -> None:
     """Rewrite MISSION.md's `## Mission` section body to `statement`, leaving the REST of the
     file byte-identical (other sections, the human's material). Creates the file / appends the
     section when absent. The board editor + the `--mission` CLI path both call this so a steer
-    reaches the file and survives the next run-start sync (read_mission)."""
-    statement = statement.strip()
+    reaches the file and survives the next run-start sync (read_mission).
+
+    The statement is COLLAPSED to a single line (exactly what read_mission returns), so a steer
+    that contains a markdown heading or a blank-line paragraph can't inject a `## …` at line
+    start — which read_mission would otherwise treat as the next section, truncating the body and
+    silently re-steering the loop to the truncated text at the next run start."""
+    statement = " ".join(statement.split())
     try:
         with open(mission_path, "r", encoding="utf-8") as fh:
             text = fh.read()

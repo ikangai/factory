@@ -250,12 +250,21 @@ class Blackboard:
             (shift_id,))
         return r or {"tokens": 0, "cost": 0.0, "seconds": 0.0}
 
-    def ledger_rows(self, limit: int = 200) -> list[dict]:
+    def ledger_rows(self, limit: int = 200, shift_id: Optional[int] = None) -> list[dict]:
         """Shift-attributed ledger engagements (conductor-loop only), newest first — the
-        timesheet source (reporting/timesheets.py shapes them; SQL stays in this CRUD layer)."""
+        timesheet source (reporting/timesheets.py shapes them; SQL stays in this CRUD layer).
+        `shift_id` filters to one shift IN THE QUERY, so `timesheet --shift N` never loses an
+        older shift's rows to the LIMIT truncation. `id DESC` breaks same-timestamp ties so
+        newest-first is deterministic even within one microsecond."""
+        if shift_id is not None:
+            return self._all(
+                "SELECT at, role_or_run, tokens, cost, seconds, notes, shift_id, profile "
+                "FROM budget_ledger WHERE shift_id = ? ORDER BY at DESC, id DESC LIMIT ?",
+                (shift_id, limit))
         return self._all(
             "SELECT at, role_or_run, tokens, cost, seconds, notes, shift_id, profile "
-            "FROM budget_ledger WHERE shift_id IS NOT NULL ORDER BY at DESC LIMIT ?", (limit,))
+            "FROM budget_ledger WHERE shift_id IS NOT NULL ORDER BY at DESC, id DESC LIMIT ?",
+            (limit,))
 
     def ledger_by_role(self) -> list[dict]:
         """All-time per-role rollup over the WHOLE ledger (incl. legacy old-loop rows),
@@ -393,6 +402,12 @@ class Blackboard:
         """The TRUE total shift count (the fleet view lists only the last N)."""
         return self._one("SELECT COUNT(*) AS n FROM shifts")["n"]
 
+    def shifts_token_total(self) -> int:
+        """Cumulative tokens_used across ALL shifts — the truthful lifetime token total for
+        the board KPI (the fleet view sums only its last-N window, which undercounts once the
+        history grows beyond it)."""
+        return int(self._one("SELECT COALESCE(SUM(tokens_used),0) AS n FROM shifts")["n"])
+
     def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
         """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
         skips end_shift) still leaves a usable figure for the next shift's resume math."""
@@ -449,6 +464,19 @@ class Blackboard:
             "FROM tasks WHERE milestone_id = ?", (milestone_id,))
         return {"done": int(r["done"] or 0), "total": int(r["total"] or 0)}
 
+    def milestone_effort(self, milestone_id: int) -> dict:
+        """Estimated vs actual tokens for a milestone's linked tasks: est = SUM(tasks.est_tokens);
+        actual = SUM(ledger tokens for those tasks' developer engagements). The estimate-vs-reality
+        signal the conductor revises the plan against (Task 2.4)."""
+        est = self._one(
+            "SELECT COALESCE(SUM(est_tokens),0) AS n FROM tasks WHERE milestone_id = ?",
+            (milestone_id,))["n"]
+        actual = self._one(
+            "SELECT COALESCE(SUM(bl.tokens),0) AS n FROM budget_ledger bl "
+            "JOIN tasks t ON bl.role_or_run = 'developer:' || t.id WHERE t.milestone_id = ?",
+            (milestone_id,))["n"]
+        return {"est_tokens": int(est or 0), "actual_tokens": int(actual or 0)}
+
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""
         if shift_id is not None:
@@ -485,8 +513,11 @@ class Blackboard:
         for sh in orphans:
             self.requeue_shift_tasks(sh["id"])
             note = sh["resume_note"] or f"shift {sh['id']} {reason}; reconciled on resume"
+            # The ledger holds the crashed shift's real spend (researcher/conductor rows land
+            # before the kill), so fold it in — the stale in-row figure is usually 0.
+            ledgered = int(self.shift_spend(sh["id"])["tokens"])
             self.end_shift(sh["id"], status="error", resume_note=note,
-                           tokens_used=sh["tokens_used"])
+                           tokens_used=max(int(sh["tokens_used"] or 0), ledgered))
         return orphans
 
     # -- digests: the research<->dev feedback loop --------------------------

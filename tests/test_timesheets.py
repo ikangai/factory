@@ -12,13 +12,30 @@ def test_timesheet_shapes_engagements_newest_first(store):
     store.add_budget("researcher", 50, 0.005)          # legacy: no shift — excluded from timesheet
 
     rows = timesheets.timesheet(store)
+    # ORDERING is the contract: the LAST shift-attributed row inserted (developer:task-a) comes
+    # first (newest-first, id DESC breaks a same-timestamp tie). Pins it against a dropped/flipped
+    # ORDER BY — a dict-by-agent collapse would silently lose this.
+    agent_order = [r["agent"] for r in rows]
+    assert agent_order == ["developer:task-a", "conductor"]   # newest first; legacy row excluded
     agents = {r["agent"]: r for r in rows}
-    assert "developer:task-a" in agents and "conductor" in agents
-    assert "researcher" not in agents                  # shift_id IS NULL → not a timesheet row
     d = agents["developer:task-a"]
     assert d["role"] == "developer" and d["task_title"] == "add retry"
     assert d["profile"] == "python-dev" and d["verdict"] == "merged"
     assert d["shift"] == a and d["seconds"] == 30 and d["tokens"] == 400
+
+
+def test_timesheet_shift_filter_is_applied_in_query_not_after_limit(store):
+    """--shift must filter in the query, not after LIMIT: an older shift's rows survive even when
+    newer shifts have pushed them past the limit window."""
+    old = store.start_shift(token_budget=1)
+    store.add_budget("conductor", 10, 0.0, shift_id=old, seconds=1, notes="shift lead")
+    new = store.start_shift(token_budget=1)
+    for _ in range(5):
+        store.add_budget("conductor", 20, 0.0, shift_id=new, seconds=1, notes="shift lead")
+
+    # limit=3 would drop the single old-shift row entirely with a post-filter (all newest are `new`).
+    rows = timesheets.timesheet(store, limit=3, shift_id=old)
+    assert [r["shift"] for r in rows] == [old] and rows[0]["tokens"] == 10
 
 
 def test_by_agent_rolls_up_the_whole_ledger_incl_legacy(store):

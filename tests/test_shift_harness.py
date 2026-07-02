@@ -126,6 +126,32 @@ def test_run_shift_timeout_is_recorded(tmp_path, monkeypatch):
         assert res["action"] == "timed_out" and s.last_shift()["status"] == "timed_out"
 
 
+def test_run_shift_abnormal_end_reports_ledgered_spend_to_the_brake(tmp_path, monkeypatch):
+    """A conductor that spends (its own row + the refill) then dies must not close the shift with
+    tokens_used=0 — the loop's cumulative token brake would under-count on every crash/timeout."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+
+    def refill(store):
+        store.add_budget("researcher", 300, 0.0, shift_id=store.current_shift_id(), seconds=5)
+
+    for conductor_end in ("timeout", "error"):
+        s = Blackboard(str(tmp_path / f"{conductor_end}.db")); s.init_db()
+        try:
+            s.set_mission("x")
+
+            def dies(store, *, shift_id, mission, token_budget, wall_clock_s):
+                store.add_budget("conductor", 200, 0.0, shift_id=shift_id, seconds=3)
+                raise (TimeoutError() if conductor_end == "timeout" else RuntimeError("boom"))
+
+            res = shiftmod.run_shift(s, token_budget=10_000, conductor=dies,
+                                     refill=refill, refill_threshold=1)
+            sh = s.last_shift()
+        finally:
+            s.close()
+        assert res["tokens_used"] == 500 and sh["tokens_used"] == 500   # 300 refill + 200 conductor
+        assert res["action"] == ("timed_out" if conductor_end == "timeout" else "error")
+
+
 def test_run_shift_requeues_claimed_work_when_the_conductor_errors(tmp_path, monkeypatch):
     """A conductor that claims a task then dies must not strand it in_progress — the next
     shift would never pick it up (this shift is 'error', not 'running', so reap skips it)."""

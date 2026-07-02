@@ -11,10 +11,11 @@ rollup 'all-time (incl. legacy)' wherever it renders so the two views don't look
 from __future__ import annotations
 
 
-def timesheet(store, limit: int = 200) -> list[dict]:
-    """Shift-attributed engagements, newest first. developer:<task> rows carry the task title."""
+def timesheet(store, limit: int = 200, shift_id: int | None = None) -> list[dict]:
+    """Shift-attributed engagements, newest first. developer:<task> rows carry the task title.
+    `shift_id` filters to one shift in the query (so it survives the LIMIT, not after it)."""
     out = []
-    for r in store.ledger_rows(limit):
+    for r in store.ledger_rows(limit, shift_id=shift_id):
         role, _, ref = r["role_or_run"].partition(":")
         task = store.get_task(ref) if role == "developer" and ref else None
         out.append({"shift": r["shift_id"], "agent": r["role_or_run"], "role": role,

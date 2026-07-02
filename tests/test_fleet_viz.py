@@ -128,6 +128,21 @@ def test_fleet_json_cost_kpi_and_per_shift_cost(tmp_path, monkeypatch):
     assert costs[a] == pytest.approx(0.05) and costs[b] == pytest.approx(0.02)
 
 
+def test_fleet_json_total_tokens_counts_shifts_beyond_the_window(tmp_path, monkeypatch):
+    """kpi.total_tokens must sum ALL shifts' tokens_used, not just the last-30 view window — the
+    old window-sum undercounts ~2x once history grows past N. 31 shifts > the 30-shift window, so
+    a window-sum would read 30000 while the true lifetime total is 31000."""
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        s.set_mission("m", target_repo="r")
+        for _ in range(31):                                      # legacy shape: tokens on the shift row,
+            sh = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])   # no ledger rows
+            s.end_shift(sh, status="completed", tokens_used=1000)
+        j = fleet_viz.fleet_json(s)
+    assert j["kpi"]["shifts"] == 31                              # true count (list is capped at 30)
+    assert j["kpi"]["total_tokens"] == 31000                     # ALL shifts, not the 30-shift window
+
+
 def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch):
     """The CEO view: KPIs (shipped/shifts/tokens/exec/workers/research), the built ledger
     (what was shipped, with shas), and a mission-momentum verdict."""
@@ -168,9 +183,16 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
     from http.server import ThreadingHTTPServer
     from factory.common import mode as modemod
     from factory.dashboard import fleet_server
+    from factory.orchestrator import autopilot
 
     monkeypatch.setattr(modemod, "_mode_path", lambda: str(tmp_path / ".factory-mode"))
     monkeypatch.setattr(fleet_server, "fleet_state", lambda: {"mode": modemod.read_mode()})
+    # HERMETIC: POST mode=auto reaches autopilot.start_runner(), which in prod spawns a REAL
+    # detached `factory run --loop --real` subprocess reading the REAL STOP. Stub it so the
+    # suite never launches a live runner (the fixture's tmp STOP doesn't reach a subprocess).
+    started = {"n": 0}
+    monkeypatch.setattr(autopilot, "start_runner",
+                        lambda *a, **k: started.update(n=started["n"] + 1) or {"started": True})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -182,6 +204,7 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
 
         out = json.loads(post(b'{"mode":"auto"}').read())
         assert out["mode"] == "auto" and modemod.read_mode() == "auto"     # toggled + persisted
+        assert started["n"] == 1                                           # via the STUB, not a real spawn
         try:
             post(b'{"mode":"nonsense"}')
             assert False, "bad mode should 400"
@@ -274,14 +297,41 @@ def test_fleet_server_mission_editor(monkeypatch, tmp_path):
 
         out = json.loads(post(b'{"statement":"make clive bulletproof"}').read())
         assert out["ok"] is True and applied["statement"] == "make clive bulletproof"
-        for bad in (b'{"statement":""}', b'{"statement":"' + b"x" * 2001 + b'"}'):
+        # empty/oversize → 400; and a valid-JSON non-object body or non-string statement must
+        # return 400, not crash the handler thread (dropped connection) with an AttributeError.
+        for bad in (b'{"statement":""}', b'{"statement":"' + b"x" * 2001 + b'"}',
+                    b'"just a string"', b'[1,2,3]', b'{"statement":123}', b'{"statement":["a"]}'):
             try:
                 post(bad)
-                assert False, "invalid statement should 400"
+                assert False, "invalid body should 400"
             except urllib.error.HTTPError as e:
                 assert e.code == 400
     finally:
         httpd.shutdown()
+
+
+def test_set_mission_writes_store_before_file_so_a_busy_store_doesnt_steer(monkeypatch):
+    """#8: _set_mission must set the store BEFORE rewriting MISSION.md — so a store-busy failure
+    (the 503 case) leaves MISSION.md untouched. Otherwise the 'failed, retry' steer would still
+    durably re-steer the loop at the next run start while the board shows the old mission."""
+    import sqlite3
+    import pytest
+    from factory.dashboard import fleet_server
+    from factory.research import focus
+
+    wrote = {"n": 0}
+    monkeypatch.setattr(focus, "write_mission", lambda p, s: wrote.update(n=wrote["n"] + 1))
+
+    class BusyStore:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def init_db(self): pass
+        def set_mission(self, statement): raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fleet_server, "Blackboard", lambda *a, **k: BusyStore())
+    with pytest.raises(sqlite3.OperationalError):
+        fleet_server._set_mission("new steer")
+    assert wrote["n"] == 0                         # MISSION.md untouched → no phantom steer
 
 
 def test_upstream_issues_parses_into_structured_rows(monkeypatch):

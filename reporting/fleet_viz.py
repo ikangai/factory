@@ -165,12 +165,14 @@ def fleet_json(store) -> dict:
     research_shipped = sum(1 for t in research if t["status"] == "done")
 
     durations = [d for d in (_shift_seconds(s) for s in shifts) if d is not None]
-    total_tokens = sum(int(s.get("tokens_used") or 0) for s in shifts)
     shipped = len(done)
     # Ledger-wide totals + per-shift spend (Task 0.7). `shifts` is the last-N window, so the
-    # ledger is the truthful source for cumulative tokens/cost; per-shift cost comes from it too.
+    # ledger is the truthful source for cumulative cost; per-shift cost comes from it too.
     totals = store.budget_totals()
     spend_by_shift = {s["id"]: store.shift_spend(s["id"]) for s in shifts}
+    # Cumulative tokens = ALL shifts' tokens_used (not just the window, which undercounts once
+    # history > N), reconciled with the ledger (in-flight spend not yet folded into a shift row).
+    cumulative_tokens = max(int(store.shifts_token_total()), int(totals["tokens"]))
 
     # CEO KPIs — the numbers worth watching.
     kpi = {
@@ -178,8 +180,8 @@ def fleet_json(store) -> dict:
         "shifts": len(shifts),
         "exec_seconds": int(sum(durations)),                  # total execution time
         "avg_shift_seconds": int(sum(durations) / len(durations)) if durations else 0,
-        "total_tokens": total_tokens,
-        "tokens_per_merge": int(total_tokens / shipped) if shipped else 0,   # efficiency
+        "total_tokens": cumulative_tokens,
+        "tokens_per_merge": int(cumulative_tokens / shipped) if shipped else 0,   # efficiency
         "workers_live": len(live),
         "workers_total": shipped + len(blocked),              # developer dispatches that ran to a verdict
         "research_proposed": len(research),                   # is research producing work?
@@ -188,7 +190,6 @@ def fleet_json(store) -> dict:
         "blocked": len(blocked),
     }
     kpi["shifts"] = store.count_shifts()                       # true count (list is capped at N)
-    kpi["total_tokens"] = max(total_tokens, int(totals["tokens"]))   # ledger is more complete
     kpi["total_cost_usd"] = round(float(totals["cost"]), 2)   # the USD burn meter (Task 0.7)
     # Mission momentum — the honest "how far": are we still advancing, or converged?
     latest = ms[0]["status"] if ms else None

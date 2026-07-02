@@ -247,7 +247,7 @@ function buildLoop(){const g=el('nodes');let p='';PHASES.forEach((ph,i)=>{
 function kpi(lbl,val,sub,cls){return `<div class="kpi ${cls||''}"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="sub">${sub||''}</div></div>`;}
 let editing=false;   // true while the mission editor is open — tick() must not clobber the field
 async function tick(){
-  let d;try{d=await(await fetch('/api/fleet',{cache:'no-store'})).json();}catch(e){el('off').style.display='flex';return;}
+  let d;try{const r=await fetch('/api/fleet',{cache:'no-store'});d=await r.json();if(!r.ok||(d&&d.error))throw new Error((d&&d.error)||('HTTP '+r.status));}catch(e){el('off').style.display='flex';return;}
   el('off').style.display='none';const k=d.kpi||{},mo=d.momentum||{};
   window._mission=d.mission||'';                          // remembered for the editor's prefill
   if(!editing)el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');

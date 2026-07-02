@@ -119,6 +119,32 @@ def test_cmd_plan_add_list_status_and_full_id_discipline(tmp_path, capsys):
         assert s.list_milestones(status="delivered")[0]["id"] == mid
 
 
+def test_cmd_plan_accepts_m_id_form_and_rejects_missing_milestones(tmp_path, capsys):
+    """The write commands must take back the 'M<id>' form the tools DISPLAY (plan list / {PLAN}),
+    must NOT print a false success for a nonexistent milestone (silent-no-op bug class), and
+    estimate accepts the '60k' shorthand a conductor/human will type."""
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        mid = s.add_milestone("M1", mission_id=s.active_mission()["id"])
+        s.add_task("task-abc12345", "slice", source="research")
+        capsys.readouterr()
+
+        orchestrator.cmd_plan(s, "status", rest=[f"M{mid}", "active"])       # 'M<id>' accepted
+        assert "1 row" in capsys.readouterr().out and s.get_milestone(mid)["status"] == "active"
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", f"M{mid}"])  # 'M<id>' accepted
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid
+
+        orchestrator.cmd_plan(s, "status", rest=["999", "delivered"])        # missing → 0 rows
+        assert "0 rows" in capsys.readouterr().out and s.list_milestones(status="delivered") == []
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", "999"])      # missing → 0 rows
+        assert "0 rows" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid           # still the real link
+
+        orchestrator.cmd_plan(s, "estimate", rest=["task-abc12345", "60k"])  # '60k' shorthand
+        assert s.get_task("task-abc12345")["est_tokens"] == 60_000
+
+
 def test_cmd_timesheet_prints_rows_and_rollup(tmp_path, capsys):
     """Task 3.2: the timesheet CLI shows the engagement + the per-role rollup."""
     with _store(tmp_path) as s:

@@ -155,9 +155,15 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     shipped = 0                                       # close out on the MAIN thread (single-writer)
     for task, res in results:
         action = res.get("action")
+        has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
         if action != "halted":                        # a STOP-braked run is incomplete — don't
             for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable
                 factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
+        # Ledger real developer spend on EVERY path that ran the worker — including a mid-round
+        # STOP (run_code_round returns 'halted' AFTER the worker + tests ran, carrying spend)
+        # and a post-dispatch error. A bare PRE-dispatch halt carries no spend keys, so this
+        # stays a no-op there — undercounting exactly when the operator brakes is the bug.
+        if action != "halted" or has_spend:
             store.add_budget(f"developer:{task['id']}", int(res.get("tokens") or 0),
                              float(res.get("cost") or 0.0), notes=action or "",
                              shift_id=shift_id, seconds=float(res.get("seconds") or 0.0))
@@ -261,10 +267,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
         # The slow part (clone + the developer worker) already ran in parallel above.
         with (merge_lock or contextlib.nullcontext()):
-            adapter.fetch_candidate(main_repo, dev_clone, branch)
             cand_wt = os.path.join(work, "wt")
-            adapter.add_worktree(main_repo, cand_wt, branch)
             try:
+                adapter.fetch_candidate(main_repo, dev_clone, branch)
+                adapter.add_worktree(main_repo, cand_wt, branch)
                 require_test = bool((config.load_config().get("super_worker", {}) or {})
                                     .get("require_test", False))   # GSD spec-bound acceptance gate
                 res = code_round.run_code_round(
@@ -275,6 +281,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
                 return res
+            except Exception as e:  # noqa: BLE001 — a fetch/worktree/grade blow-up AFTER the
+                # worker ran still spent it; carry the spend out so the rail ledgers it (Task 0.2)
+                return {"action": "error", "stage": "merge", "error": str(e)[:180],
+                        "learnings": learnings, **spend}
             finally:
                 try:
                     adapter.remove_worktree(main_repo, cand_wt)

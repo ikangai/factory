@@ -1,9 +1,12 @@
 """Live fleet 'mission control' — a tiny localhost server behind `factory viz --serve`.
 
 Serves the animated loop page (dashboard/static/fleet.html) and `/api/fleet`, the JSON
-state the page polls every ~2s. Read-only, bound to localhost, opens its OWN blackboard
-connection per request so the data is always fresh while a run is in flight. No write
-actions at all (unlike the promotion board)."""
+state the page polls every ~2s. Bound to localhost, opens its OWN blackboard connection
+per request so the data is always fresh while a run is in flight. Mostly read-only; the
+one store-writing action is the mission editor (POST /api/mission, CSRF-guarded, per-request
+connection, store-busy → 503) — this server is the FIRST second process to write the live
+blackboard, so every write handler opens a fresh Blackboard and never shares it across the
+ThreadingHTTPServer's threads. STOP/resume/mode toggles write the killswitch/mode files."""
 from __future__ import annotations
 
 import json
@@ -41,15 +44,17 @@ def timesheets_state() -> dict:
 
 
 def _set_mission(statement: str) -> dict:
-    """Apply a mission steer from the board: rewrite MISSION.md's ## Mission (durable, so it
-    survives the next run-start sync) and set the active mission in a FRESH per-request store
-    (ground rule 2 — never share a store across handler threads). Returns the applied state."""
+    """Apply a mission steer from the board: set the active mission in a FRESH per-request store
+    (ground rule 2 — never share a store across handler threads), THEN rewrite MISSION.md's
+    ## Mission (durable, so it survives the next run-start sync). Store-first so a store-busy 503
+    leaves MISSION.md untouched — otherwise a 'failed, retry' would still durably steer the loop
+    at the next run start while the board kept showing the old mission. Returns the applied state."""
     from ..common import paths
     from ..research.focus import write_mission
-    write_mission(paths.factory("MISSION.md"), statement)
     with Blackboard() as store:
         store.init_db()
         store.set_mission(statement)
+    write_mission(paths.factory("MISSION.md"), statement)
     return {"ok": True, "statement": statement}
 
 
@@ -104,7 +109,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(length) or b"{}")
             except (json.JSONDecodeError, ValueError) as e:
                 return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
-            statement = (payload.get("statement") or "").strip()
+            if not isinstance(payload, dict):         # a valid-JSON non-object (list/str/number)
+                return self._send(400, b'{"error":"body must be a JSON object"}', "application/json")
+            raw = payload.get("statement")
+            statement = (raw if isinstance(raw, str) else "").strip()
             if not statement or len(statement) > MAX_MISSION_CHARS:
                 return self._send(400, json.dumps(
                     {"error": f"statement must be 1..{MAX_MISSION_CHARS} chars"}).encode(),
@@ -125,7 +133,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
-            m = modemod.set_mode(payload.get("mode", ""))
+            mode = payload.get("mode", "") if isinstance(payload, dict) else ""
+            m = modemod.set_mode(mode)
         except (json.JSONDecodeError, ValueError) as e:
             return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
         info = {"mode": m}

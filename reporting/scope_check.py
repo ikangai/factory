@@ -29,7 +29,7 @@ def _ledger_judge_spend(store, raw, role: str, notes: str, shift_id) -> None:
         return
     sp = raw["_spend"]
     store.add_budget(role, int(sp.get("tokens") or 0), float(sp.get("cost") or 0.0),
-                     notes=notes, shift_id=shift_id)
+                     notes=notes, shift_id=shift_id, seconds=float(sp.get("seconds") or 0.0))
 
 
 def normalize_verdict(raw) -> dict:
@@ -209,6 +209,8 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("decompose").replace("{TASK}", text)
+    import time
+    t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
             prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
@@ -219,7 +221,8 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fall back
         return {}
-    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0)}   # ledgered by the call site
+    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0),   # ledgered by the call site
+                     "seconds": round(time.monotonic() - t0, 1)}       # real duration (not 0 min)
     return obj
 
 
@@ -231,6 +234,8 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("scope_check").replace("{TASK}", text)
+    import time
+    t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
             prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
@@ -241,5 +246,6 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fail open
         return {}
-    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0)}   # ledgered by the call site
+    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0),   # ledgered by the call site
+                     "seconds": round(time.monotonic() - t0, 1)}       # real duration (not 0 min)
     return obj

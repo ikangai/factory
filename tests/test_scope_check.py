@@ -134,7 +134,9 @@ def test_scope_judge_attaches_its_spend(monkeypatch):
     monkeypatch.setattr(rcommon, "claude_super",
                         lambda *a, **k: ('```json\n{"decision":"pass"}\n```', 55, 0.005))
     v = scope_check.scope_judge({"title": "x"})
-    assert v["decision"] == "pass" and v["_spend"] == {"tokens": 55, "cost": 0.005}
+    assert v["decision"] == "pass"
+    assert v["_spend"]["tokens"] == 55 and v["_spend"]["cost"] == 0.005
+    assert v["_spend"]["seconds"] >= 0            # real duration so timesheets aren't 0-min (#17)
 
 
 def test_decompose_judge_attaches_its_spend(monkeypatch):
@@ -143,7 +145,8 @@ def test_decompose_judge_attaches_its_spend(monkeypatch):
     monkeypatch.setattr(rcommon, "claude_super",
                         lambda *a, **k: ('```json\n{"subtasks":[]}\n```', 33, 0.003))
     obj = scope_check.decompose_judge({"title": "x"})
-    assert obj["_spend"] == {"tokens": 33, "cost": 0.003}
+    assert obj["_spend"]["tokens"] == 33 and obj["_spend"]["cost"] == 0.003
+    assert obj["_spend"]["seconds"] >= 0          # real duration so timesheets aren't 0-min (#17)
 
 
 # -- wiring into execute_claimed_tasks ---------------------------------------

@@ -44,10 +44,13 @@ def test_build_conductor_prompt_includes_the_plan(tmp_path, monkeypatch):
                               acceptance="pass 3x", budget_tokens=800_000, planned_order=1)
         s.add_task("t1", "slice", source="research")
         s.set_task_milestone("t1", mid)
+        s.set_task_estimate("t1", 50_000)                        # the conductor's estimate
         cur = s.start_shift(token_budget=1, mission_id=m)
+        s.add_budget("developer:t1", 32_000, 0.3, shift_id=cur, notes="merged")   # the ACTUAL spend
         p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
     assert "M1: recovery" in p                                   # the plan is rendered
     assert "0/1 tasks" in p or "0/1" in p                        # per-milestone progress
+    assert "est 50,000 vs actual 32,000" in p                    # Task 2.4: estimates vs actuals
     assert "plan estimate" in p and "plan link" in p             # the plan CLI is in the contract
 
 

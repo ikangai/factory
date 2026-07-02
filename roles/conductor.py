@@ -32,15 +32,19 @@ def _bullets(rows, fmt, empty: str) -> str:
 
 
 def _plan_bullets(store) -> str:
-    """Render the plan (milestones + per-milestone progress + budget) for the {PLAN} seam."""
+    """Render the plan for the {PLAN} seam: per-milestone progress, budget, and — the signal
+    the conductor revises the plan against (Task 2.4) — the linked tasks' estimated vs ACTUAL
+    tokens (`./bin/factory timesheet` has the per-engagement breakdown)."""
     ms = store.list_milestones()
     if not ms:
         return "(no plan yet — draft 2-4 milestones with `./bin/factory plan add …`)"
     lines = []
     for m in ms:
         p = store.milestone_progress(m["id"])
+        e = store.milestone_effort(m["id"])
         line = (f"- M{m['id']} [{m['status']}] {m['title']} — {p['done']}/{p['total']} tasks, "
-                f"budget {m['budget_tokens']:,} tok")
+                f"budget {m['budget_tokens']:,} tok, "
+                f"est {e['est_tokens']:,} vs actual {e['actual_tokens']:,} tok")
         if m.get("deliverable"):
             line += f"; deliverable: {m['deliverable']}"
         if m.get("acceptance"):
