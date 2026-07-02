@@ -340,6 +340,33 @@ def test_halted_kill_switch(monkeypatch, tmp_path):
     assert res["action"] == "halted" and ad.calls == []
 
 
+def test_rail_ledgers_every_developer_dispatch(tmp_path):
+    """Task 0.3: the rail records tokens/cost/seconds per task, per shift, for every
+    non-halted verdict — merged and no_candidate ledgered, halted NOT (nothing ran)."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db")); s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for tid, title in [("m", "merge me"), ("n", "no cand"), ("h", "halt me")]:
+        s.add_task(tid, title, source="issue")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+    def fake(text, **k):
+        if "merge me" in text:
+            return {"action": "merged", "merge_sha": "abc", "tokens": 500, "cost": 0.02, "seconds": 3.0}
+        if "no cand" in text:
+            return {"action": "no_candidate", "tokens": 120, "cost": 0.006, "seconds": 1.5}
+        return {"action": "halted"}                    # a mid-flight STOP for this one worker
+
+    execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    led = {e["role_or_run"]: e for e in s.budget_entries()}
+    assert led["developer:m"]["tokens"] == 500 and led["developer:m"]["shift_id"] == sh
+    assert led["developer:m"]["cost"] == 0.02 and led["developer:m"]["seconds"] == 3.0
+    assert led["developer:n"]["tokens"] == 120 and led["developer:n"]["shift_id"] == sh
+    assert "developer:h" not in led                    # halted never ran → not ledgered
+    s.close()
+
+
 def test_no_candidate_carries_developer_spend(monkeypatch, tmp_path):
     """Task 0.2: the developer's tokens/cost/seconds ride out on the no_candidate path
     (previously dropped — nothing reached the ledger)."""

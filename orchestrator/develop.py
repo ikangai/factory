@@ -158,6 +158,10 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if action != "halted":                        # a STOP-braked run is incomplete — don't
             for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable
                 factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
+            store.add_budget(f"developer:{task['id']}", int(res.get("tokens") or 0),
+                             float(res.get("cost") or 0.0), notes=action or "",
+                             shift_id=shift_id, seconds=float(res.get("seconds") or 0.0))
+            # (profile left at '' here — Task 5.4 passes the real name)
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
