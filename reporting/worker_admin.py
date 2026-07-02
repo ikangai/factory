@@ -35,12 +35,14 @@ def validate_add(name: str, model: str, overlay: str) -> str | None:
 def cap_error(store, name: str, cfg: dict | None = None) -> str | None:
     """Return an error if adding a NEW active profile would exceed the cap, else None. generalist
     never counts (it's the fail-open default — re-adding it to tune the persona is always allowed).
-    Re-adding an already-active name is not a new slot."""
+    Re-adding an already-active name is not a new slot. The cap resolves store override →
+    config.yaml → default (so the board's runtime knob is actually honored, not just displayed)."""
     if name == "generalist":
         return None
+    cap = config.resolve_setting(store, "super_worker.max_profiles", max_profiles(cfg))[0]
     active = {p["name"] for p in store.list_profiles(active_only=True) if p["name"] != "generalist"}
-    if name not in active and len(active) >= max_profiles(cfg):
-        return f"active profile cap reached ({max_profiles(cfg)}) — retire one first"
+    if name not in active and len(active) >= cap:
+        return f"active profile cap reached ({cap}) — retire one first"
     return None
 
 

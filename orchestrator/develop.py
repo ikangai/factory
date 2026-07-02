@@ -265,7 +265,10 @@ def _review_candidate(dev_clone: str, base: str, branch: str, task: str) -> tupl
         return None, spend                              # unparseable → fail-open (approve-by-default)
     try:
         obj = json.loads(raw)
-        return {"approve": bool(obj.get("approve")), "reason": str(obj.get("reason", ""))}, spend
+        # FAIL-OPEN: only an EXPLICIT boolean false rejects. A missing/null/misspelled approve key
+        # (a reviewer output hiccup) must NOT block a legitimate merge.
+        approved = obj.get("approve", True) is not False
+        return {"approve": approved, "reason": str(obj.get("reason", ""))}, spend
     except Exception:  # noqa: BLE001
         return None, spend
 

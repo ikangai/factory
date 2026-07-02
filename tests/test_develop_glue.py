@@ -236,6 +236,18 @@ def test_reviewer_fails_open_on_transport_failure(monkeypatch, tmp_path):
     assert res["action"] == "merged"                         # fail-open → merged despite no verdict
 
 
+def test_reviewer_missing_approve_key_fails_open(monkeypatch, tmp_path):
+    """Review #2 (Phase 8): a parseable verdict that OMITS/nulls the approve key is a reviewer
+    output hiccup, not a rejection — it must fail open (merge), not discard a good candidate."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"reason": "looks good"}', 20, 0.0))   # no approve key
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"                         # missing key → approve, not reject
+
+
 def test_reviewer_off_by_default_never_runs(monkeypatch, tmp_path):
     """Phase 8 is config-gated OFF: with reviewer unset, the review transport is never invoked."""
     ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)

@@ -62,6 +62,8 @@ def test_post_settings_whitelist_and_type_validation(monkeypatch, tmp_path):
         assert _post(port, "/api/settings", {"key": "super_worker.max_parallel", "value": "-1"})[0] == 400
         # a bad bool → 400
         assert _post(port, "/api/settings", {"key": "super_worker.require_test", "value": "maybe"})[0] == 400
+        # an unhashable (list) key → 400, NOT a TypeError that crashes the handler (review #3)
+        assert _post(port, "/api/settings", {"key": ["super_worker.max_parallel"], "value": "2"})[0] == 400
     finally:
         httpd.shutdown()
 

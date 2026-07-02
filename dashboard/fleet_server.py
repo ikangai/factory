@@ -187,7 +187,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, b'{"error":"body must be a JSON object"}', "application/json")
             try:
                 if path == "/api/settings":
-                    info = _apply_setting(payload.get("key", ""), payload.get("value"))
+                    # str()-coerce the key (like the worker path) — an unhashable JSON list/object
+                    # key must become an unknown-key 400, not a `key not in dict` TypeError crash.
+                    info = _apply_setting(str(payload.get("key", "")), payload.get("value"))
                 else:
                     info = _apply_worker(str(payload.get("action", "")),
                                          str(payload.get("name", "")),

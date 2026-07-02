@@ -216,12 +216,11 @@ def test_cmd_worker_add_list_retire_and_guardrails(tmp_path, capsys):
         assert [p["name"] for p in s.list_profiles(active_only=True)] == []
 
 
-def test_cmd_worker_add_respects_the_active_cap(tmp_path, capsys, monkeypatch):
-    """Task 5.5: `worker add` beyond super_worker.max_profiles fails with 'retire one first'
-    (generalist doesn't count against the cap)."""
-    from factory.reporting import worker_admin
-    monkeypatch.setattr(worker_admin, "max_profiles", lambda cfg=None: 2)
+def test_cmd_worker_add_respects_the_active_cap(tmp_path, capsys):
+    """Task 5.5: `worker add` beyond the active cap fails with 'retire one first' (generalist
+    doesn't count). The cap honors a store override (review #2 — the board's knob is effective)."""
     with _store(tmp_path) as s:
+        s.set_setting("super_worker.max_profiles", "2")      # board override → cap = 2
         orchestrator.cmd_worker(s, "add", rest=["p1"], model="standard")
         orchestrator.cmd_worker(s, "add", rest=["p2"], model="standard")
         capsys.readouterr()

@@ -479,7 +479,10 @@ function researchRender(rb,d){
 
 function shiftsRender(d){
   const sh=d.shifts||[];
+  // remember which rows the user expanded so the 10s auto-refresh doesn't collapse them
+  const open=new Set(Array.from(document.querySelectorAll('#shifts .shift-row.open')).map(r=>r.dataset.shift));
   el('shifts').innerHTML=sh.length?sh.map(s=>`<div class="shift-row" data-shift="${esc(s.id)}"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep" title="${esc(s.report||'')}">${esc(s.report||'(no report)')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
+  if(open.size)document.querySelectorAll('#shifts .shift-row').forEach(r=>{if(open.has(r.dataset.shift))r.classList.add('open');});
 }
 
 // -- per-tab fetchers ---------------------------------------------------------
