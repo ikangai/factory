@@ -250,6 +250,24 @@ class Blackboard:
             (shift_id,))
         return r or {"tokens": 0, "cost": 0.0, "seconds": 0.0}
 
+    def ledger_rows(self, limit: int = 200) -> list[dict]:
+        """Shift-attributed ledger engagements (conductor-loop only), newest first — the
+        timesheet source (reporting/timesheets.py shapes them; SQL stays in this CRUD layer)."""
+        return self._all(
+            "SELECT at, role_or_run, tokens, cost, seconds, notes, shift_id, profile "
+            "FROM budget_ledger WHERE shift_id IS NOT NULL ORDER BY at DESC LIMIT ?", (limit,))
+
+    def ledger_by_role(self) -> list[dict]:
+        """All-time per-role rollup over the WHOLE ledger (incl. legacy old-loop rows),
+        highest-spend first. role = the part before ':' in role_or_run (developer:<task> → developer)."""
+        return self._all(
+            "SELECT CASE WHEN instr(role_or_run,':')>0 "
+            "         THEN substr(role_or_run,1,instr(role_or_run,':')-1) "
+            "         ELSE role_or_run END AS role, "
+            "COUNT(*) AS engagements, COALESCE(SUM(tokens),0) AS tokens, "
+            "COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(seconds),0) AS seconds "
+            "FROM budget_ledger GROUP BY role ORDER BY tokens DESC")
+
     def budget_entries(self) -> list[dict]:
         return self._all("SELECT * FROM budget_ledger ORDER BY at")
 
