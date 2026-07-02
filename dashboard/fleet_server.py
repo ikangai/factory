@@ -50,6 +50,63 @@ def evm_state() -> dict:
         return evm.evm(store)
 
 
+def resources_state() -> dict:
+    from ..reporting import resources
+    with Blackboard() as store:
+        store.init_db()
+        return resources.resources(store)
+
+
+def _apply_setting(key: str, value) -> dict:
+    """Validate + persist a whitelisted runtime override (Task 6.2). Raises ValueError (→400) on a
+    bad key/value, sqlite3.OperationalError (→503) on a busy store. Takes effect at the NEXT shift
+    (that's when cmd_run resolves knobs), so we say so honestly."""
+    from ..common import config
+    if key not in config.SETTINGS_SPEC:
+        raise ValueError(f"unknown setting {key!r}")
+    kind = config.SETTINGS_SPEC[key]
+    if kind is bool:
+        low = str(value).strip().lower()
+        if low not in ("true", "false"):
+            raise ValueError("bool setting must be 'true' or 'false'")
+        stored = low
+    else:                                             # int knob: non-negative integers only
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("int setting must be an integer")
+        if n < 0:
+            raise ValueError("int setting must be >= 0")
+        stored = str(n)
+    with Blackboard() as store:
+        store.init_db()
+        store.set_setting(key, stored)
+    return {"key": key, "value": stored, "applied_at": "next shift"}
+
+
+def _apply_worker(action: str, name: str, *, description: str = "", overlay: str = "",
+                  model: str = "") -> dict:
+    """add/retire a worker profile via the SAME guardrails as the CLI (worker_admin — one policy).
+    Raises ValueError (→400) on a guard failure, sqlite3.OperationalError (→503) on a busy store."""
+    from ..reporting import worker_admin
+    with Blackboard() as store:
+        store.init_db()
+        if action == "add":
+            err = worker_admin.validate_add(name, model, overlay) or worker_admin.cap_error(store, name)
+            if err:
+                raise ValueError(err)
+            store.add_profile(name, description=description, overlay=overlay, model=model,
+                              created_by="operator")
+            return {"action": "add", "name": name}
+        if action == "retire":
+            err = worker_admin.retire_error(store, name)
+            if err:
+                raise ValueError(err)
+            store.retire_profile(name)
+            return {"action": "retire", "name": name}
+        raise ValueError(f"unknown worker action {action!r}")
+
+
 def _set_mission(statement: str) -> dict:
     """Apply a mission steer from the board: set the active mission in a FRESH per-request store
     (ground rule 2 — never share a store across handler threads), THEN rewrite MISSION.md's
@@ -84,7 +141,8 @@ class Handler(BaseHTTPRequestHandler):
             with open(page, "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
         api = {"/api/fleet": fleet_state, "/api/plan": plan_state,
-               "/api/timesheets": timesheets_state, "/api/evm": evm_state}
+               "/api/timesheets": timesheets_state, "/api/evm": evm_state,
+               "/api/resources": resources_state}
         if path in api:
             try:
                 body = json.dumps(api[path](), default=str).encode("utf-8")
@@ -106,10 +164,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/mode", "/api/stop", "/api/resume", "/api/mission"):
+        if path not in ("/api/mode", "/api/stop", "/api/resume", "/api/mission",
+                        "/api/settings", "/api/worker"):
             return self._send(404, b'{"error":"unknown write action"}', "application/json")
         if not self._local_origin():
             return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
+        if path in ("/api/settings", "/api/worker"):   # runtime knobs + workforce (Task 6.2)
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError) as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            if not isinstance(payload, dict):
+                return self._send(400, b'{"error":"body must be a JSON object"}', "application/json")
+            try:
+                if path == "/api/settings":
+                    info = _apply_setting(payload.get("key", ""), payload.get("value"))
+                else:
+                    info = _apply_worker(str(payload.get("action", "")),
+                                         str(payload.get("name", "")),
+                                         description=str(payload.get("description", "")),
+                                         overlay=str(payload.get("overlay", "")),
+                                         model=str(payload.get("model", "")))
+            except ValueError as e:                    # a guard rejection → 400
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except sqlite3.OperationalError:           # store busy (WAL cross-process contention)
+                return self._send(503, b'{"error":"store busy, retry"}', "application/json")
+            return self._send(200, json.dumps(info).encode(), "application/json")
         if path == "/api/mission":            # the human's steering wheel, live on the board
             length = int(self.headers.get("Content-Length", 0) or 0)
             try:
