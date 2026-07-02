@@ -54,6 +54,25 @@ def test_build_conductor_prompt_includes_the_plan(tmp_path, monkeypatch):
     assert "plan estimate" in p and "plan link" in p             # the plan CLI is in the contract
 
 
+def test_build_conductor_prompt_includes_the_workforce(tmp_path, monkeypatch):
+    """Task 5.6: the contract renders the active bench ({WORKERS}) with per-profile outcomes and
+    the staffing levers, so the conductor assigns/generates/retires profiles on evidence."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("make clive reliable")
+        s.add_profile("python-dev", description="Python specialist", model="standard",
+                      overlay="senior python")
+        s.add_task("t1", "slice", source="research")
+        s.set_task_estimate("t1", 100_000)
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        s.add_budget("developer:t1", 50_000, 0.3, shift_id=cur, notes="merged", profile="python-dev")
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "python-dev" in p and "1 eng" in p and "100% merged" in p     # bench + outcomes rendered
+    assert "worker add" in p and "worker retire" in p                    # the staffing levers
+    assert "--profile" in p                                              # assign a profile per task
+
+
 def test_build_conductor_prompt_empty_plan_prompts_to_draft(tmp_path, monkeypatch):
     from factory.roles import research_feed
     monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")

@@ -53,6 +53,28 @@ def _plan_bullets(store) -> str:
     return "\n".join(lines)
 
 
+def _workers_bullets(store) -> str:
+    """Render the active bench for the {WORKERS} seam (Task 5.6): each profile's tier + outcome
+    stats (engagements, merge rate, tokens, estimate accuracy) so the conductor assigns, generates
+    and retires profiles on EVIDENCE (the timesheet), not guesswork."""
+    from ..reporting import timesheets
+    profs = store.list_profiles(active_only=True)
+    if not profs:
+        return ("(no bench yet — it seeds at run start; generate specialists with "
+                "`./bin/factory worker add <name> --description … --overlay … --model standard`)")
+    roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+    lines = []
+    for p in profs:
+        o = roll.get(p["name"], {})
+        eng, merged = int(o.get("engagements", 0)), int(o.get("merged", 0))
+        rate = f"{100 * merged // eng}%" if eng else "—"
+        acc = o.get("est_accuracy")
+        acc_s = f"{acc:.1f}x actual/est" if acc is not None else "no est data"
+        lines.append(f"- {p['name']} [{p.get('model') or 'frontier'}] — {(p.get('description') or '')[:60]}; "
+                     f"{eng} eng, {rate} merged, {int(o.get('tokens', 0)):,} tok, {acc_s}")
+    return "\n".join(lines)
+
+
 def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget: int) -> str:
     """Fill the conductor contract with this shift's live context from the store + the
     target's open GitHub issues (so planning is issue-aware, not just backlog-aware)."""
@@ -77,6 +99,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
             .replace("{PLAN}", _plan_bullets(store))
+            .replace("{WORKERS}", _workers_bullets(store))
             .replace("{DIGESTS}", digests))
 
 

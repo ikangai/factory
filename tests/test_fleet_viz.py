@@ -273,6 +273,20 @@ def test_fleet_server_timesheets_endpoint(monkeypatch):
         httpd.shutdown()
 
 
+def test_fleet_json_carries_the_worker_bench(tmp_path):
+    """Task 5.7: fleet_json exposes a compact profiles list (bench + per-profile outcomes) for
+    the Resources tab."""
+    with _store(tmp_path) as s:
+        sid = s.start_shift(token_budget=1)
+        s.add_profile("python-dev", description="py", model="standard", overlay="x")
+        s.add_task("t1", "slice", source="research")
+        s.add_budget("developer:t1", 400, 0.04, shift_id=sid, notes="merged", profile="python-dev")
+        j = fleet_viz.fleet_json(s)
+    prof = {p["name"]: p for p in j["profiles"]}
+    assert prof["python-dev"]["model"] == "standard" and prof["python-dev"]["active"] is True
+    assert prof["python-dev"]["engagements"] == 1 and prof["python-dev"]["merged"] == 1
+
+
 def test_fleet_server_evm_endpoint(monkeypatch):
     """Task 4.2: GET /api/evm serves evm(store) — the totals + per-milestone breakdown."""
     import json

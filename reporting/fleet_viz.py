@@ -138,6 +138,23 @@ def plan_list(store) -> list[dict]:
             for m in store.list_milestones()]
 
 
+def profiles_compact(store) -> list[dict]:
+    """The worker bench for the board (Task 5.7): each profile merged with its outcome rollup —
+    tier, active flag, engagements, merge/block counts, spend, estimate accuracy. The Resources
+    tab renders this; it's the evidence behind the conductor's profile generation/retirement."""
+    from . import timesheets
+    roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+    out = []
+    for p in store.list_profiles(active_only=False):
+        o = roll.get(p["name"], {})
+        out.append({"name": p["name"], "model": p.get("model") or "frontier",
+                    "active": bool(p["active"]), "description": p.get("description", ""),
+                    "engagements": int(o.get("engagements", 0)), "merged": int(o.get("merged", 0)),
+                    "blocked": int(o.get("blocked", 0)), "tokens": int(o.get("tokens", 0)),
+                    "cost": round(float(o.get("cost", 0)), 2), "est_accuracy": o.get("est_accuracy")})
+    return out
+
+
 def fleet_json(store) -> dict:
     """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
     counts, the DERIVED current loop phase, the shifts (compact), live workers, the
@@ -243,6 +260,7 @@ def fleet_json(store) -> dict:
         "mission_status": [{"status": r["status"], "shift": r.get("shift_id"),
                             "rationale": r.get("rationale", "")} for r in ms],
         "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
+        "profiles": profiles_compact(store),  # worker bench + outcomes (Resources tab; Task 5.7)
         "digests": [d["summary"][:140] for d in state["digests"]],
     }
 

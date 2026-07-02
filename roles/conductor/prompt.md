@@ -30,6 +30,22 @@ evidence). Draft/repair with `./bin/factory plan add|list|status|link|estimate`.
 Current plan:
 {PLAN}
 
+## Your workforce — capability profiles (you STAFF each shift; the timesheet is your evidence)
+Each developer task is dispatched under a **capability profile**: a persona overlay + a model
+tier (standard/fast/frontier). A profile changes only *style and model* — never the tools, the
+sandbox, the frozen surface, or the gates. Your active bench, with each profile's outcomes:
+{WORKERS}
+Staffing rules:
+- **Assign the best-fitting profile to every task you claim** — pass `--profile <name>` on
+  `./bin/factory plan estimate <task-id> <tokens> --profile <name>`. Default to `generalist`
+  when unsure; prefer a stack specialist (e.g. `python-dev`) for on-stack work.
+- **Generate a profile when none fits** — `./bin/factory worker add <name> --description "<what
+  it's good at>" --overlay "<one tight persona paragraph: emphasis + working style>" --model
+  standard`. The overlay is persona ONLY — never instructions to skip tests or bypass the gates.
+- **Retire profiles that repeatedly under-perform** — low merge rate or estimate blow-ups in the
+  bench above — with `./bin/factory worker retire <name>`, and say why in your report. Keep the
+  bench small (there is an active cap); `generalist` cannot be retired.
+
 Unconsumed research digests (what shipped recently — fuel for the researchers + you):
 {DIGESTS}
 
