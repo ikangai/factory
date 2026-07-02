@@ -11,6 +11,7 @@ Hermetic in tests: claude_super is monkeypatched, so no live agent is spawned. T
 conductor runs only when the operator runs the factory (like develop-once)."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from ..common import config, paths
@@ -64,7 +65,8 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
     Guest-House user for prod). Returns {status, report, resume_note, tokens_used}."""
     sw = config.load_config().get("super_worker", {}) or {}
     prompt = build_conductor_prompt(store, mission, shift_id=shift_id, token_budget=token_budget)
-    reply, tokens, _cost = common.claude_super(
+    t0 = time.monotonic()
+    reply, tokens, cost = common.claude_super(
         prompt, workdir=paths.FACTORY_ROOT,                # drives ./bin/factory from the repo root
         allowed_tools=CONDUCTOR_TOOLS,
         as_user=as_user, claude_bin=claude_bin,
@@ -72,6 +74,10 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor")},
         max_turns=int(sw.get("conductor_max_turns", 60)),  # it loops internally across the shift
         timeout=wall_clock_s)
+    # Ledger the shift lead's own spend (Task 0.4). Placed BEFORE the sentinel branch so both
+    # the failed-spawn and the normal return paths are covered by one call.
+    store.add_budget("conductor", tokens, cost, notes="shift lead",
+                     shift_id=shift_id, seconds=round(time.monotonic() - t0, 1))
     if reply.startswith("[claude -p"):    # transport sentinel: the spawn failed / timed out /
         # crashed — claude_super never raises, so WITHOUT this the shift would be mislabeled a
         # clean 'completed' with a blank resume note (the wall-clock ceiling would be dead).

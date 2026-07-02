@@ -97,6 +97,36 @@ def test_run_conductor_surfaces_a_failed_spawn_as_error_not_completed(tmp_path, 
     assert out["status"] == "error" and "wall-clock" in out["resume_note"]   # honest, not a fake success
 
 
+def test_run_conductor_ledgers_its_own_spend(tmp_path, monkeypatch):
+    """Task 0.4: the conductor records its own tokens/cost/seconds against the shift
+    (the cost was previously discarded and nothing reached budget_ledger)."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: ('{"status":"completed"}', 777, 0.03))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=10)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "conductor"]
+    assert len(rows) == 1
+    assert rows[0]["tokens"] == 777 and rows[0]["cost"] == 0.03
+    assert rows[0]["shift_id"] == cur and rows[0]["seconds"] >= 0
+
+
+def test_run_conductor_ledgers_even_a_failed_spawn(tmp_path, monkeypatch):
+    """Task 0.4: a timed-out/crashed spawn still spent tokens — the single ledger call
+    sits before the sentinel branch so both return paths are covered."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: ("[claude -p unavailable: timeout]", 42, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=1)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "conductor"]
+    assert len(rows) == 1 and rows[0]["tokens"] == 42 and rows[0]["shift_id"] == cur
+
+
 def test_run_conductor_is_dev_mode_same_user_by_default(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(common, "claude_super",
