@@ -27,6 +27,26 @@ def panel_models() -> list[dict[str, Any]]:
     return list(load_panel().get("panel", []))
 
 
+def resolve_model(tier: str) -> str:
+    """Resolve a worker profile's tier alias to a concrete model id via the config whitelist.
+
+    '' / 'frontier' → '' (the account's default model — the frontier tier, reserved for judgment
+    work). A known alias → its mapped id. An UNKNOWN/unresolvable alias FAILS OPEN DOWNWARD to the
+    `standard` id and prints a warning — a typo must never silently upgrade a worker to frontier;
+    it returns '' only when `standard` itself is unmapped. So a bad profile can never brick a
+    dispatch, and can never sneak a worker onto the reserved frontier tier."""
+    models = load_config().get("models", {}) or {}
+    tier = (tier or "").strip()
+    if tier in ("", "frontier"):
+        return models.get("frontier", "") or ""
+    if tier in models:
+        return models[tier] or ""
+    std = models.get("standard", "") or ""
+    print(f"[config] unknown model tier {tier!r} — failing open to standard "
+          f"({std or 'account default'}), never up to frontier")
+    return std
+
+
 def target_config() -> dict[str, Any]:
     """Resolved config for the TARGET program the factory optimises.
 

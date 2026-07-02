@@ -140,6 +140,21 @@ super_worker:
   auto_decompose: true
   decompose_max_turns: 8
   decompose_timeout_s: 240
+  # Cap on ACTIVE worker capability profiles (Phase 5) — `worker add` beyond this fails with
+  # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
+  # it (it's the fail-open default and can't be retired).
+  max_profiles: 12
+
+# --- model tiers (worker routing, Phase 5) ----------------------------------
+# Worker profiles name a TIER, never a raw model id. '' = the account's default model
+# (frontier — reserved for JUDGMENT: the conductor, the scope/decompose judges, the reviewer).
+# Aliases must be models the WORKER account (the Guest-House user's subscription) can actually
+# run; an unresolvable alias fails open to `standard` with a warning (never silently up to
+# frontier — a typo must not upgrade a worker's model). '' only if `standard` is itself unmapped.
+models:
+  frontier: ""
+  standard: "claude-sonnet-4-6"
+  fast: "claude-haiku-4-5"
 
 # --- held-out hygiene (§7) --------------------------------------------------
 held_out:
