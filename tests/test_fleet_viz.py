@@ -308,6 +308,27 @@ def test_fleet_server_evm_endpoint(monkeypatch):
         httpd.shutdown()
 
 
+def test_fleet_server_research_endpoint(monkeypatch):
+    """Task 7.5: GET /api/research → {briefs:[...]} (reuses summary.gather_research_briefs)."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "research_state",
+                        lambda: {"briefs": [{"title": "retry loop", "technique": "backoff",
+                                             "citation": "arxiv:1"}]})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/research").read())
+        assert out["briefs"][0]["title"] == "retry loop"
+    finally:
+        httpd.shutdown()
+
+
 def test_fleet_server_mission_editor(monkeypatch, tmp_path):
     """Task 1.2: POST /api/mission validates (1..2000 chars) and applies via _set_mission
     (which rewrites MISSION.md + sets the store mission). Empty/oversize → 400."""

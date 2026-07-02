@@ -125,9 +125,10 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .irow .ilbl{font-size:10px;color:#a78bfa;border:1px solid #4c1d95;border-radius:4px;padding:1px 6px;white-space:nowrap}
 
 /* shifts */
-.shift-row{display:grid;grid-template-columns:54px 92px 1fr;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #101830;font-size:13px}
+.shift-row{display:grid;grid-template-columns:54px 92px 1fr;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #101830;font-size:13px;cursor:pointer}
 .shift-row .id{font-weight:800}.shift-row .meta{font-size:11px;color:var(--muted)}
 .shift-row .rep{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shift-row.open .rep{white-space:normal;overflow:visible}
 .badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;border:1px solid}
 .b-completed{color:#22c55e;border-color:#22c55e55;background:#22c55e12}.b-running{color:#fbbf24;border-color:#fbbf2455;background:#fbbf2212}
 .b-error,.b-timed_out{color:#f43f5e;border-color:#f43f5e55}.b-halted{color:#a78bfa;border-color:#a78bfa55}
@@ -139,6 +140,49 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
 .full{margin-top:16px}
 #stamp{position:fixed;bottom:8px;right:14px;font-size:11px;color:#46556f}
 .off{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#070b16ee;color:var(--muted)}
+
+/* tabs (Phase 7 — Mission Control multi-view) */
+.tabs{display:flex;gap:4px;margin:4px 0 14px;border-bottom:1px solid var(--line)}
+.tabbtn{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);
+  padding:9px 15px;font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.4px;cursor:pointer;transition:all .15s}
+.tabbtn:hover{color:var(--ink)}
+.tabbtn.active{color:#7dd3fc;border-bottom-color:#38bdf8}
+/* plan / evm */
+.evmtot{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.evmtot .t{background:#0e1626;border:1px solid var(--line);border-radius:8px;padding:9px 12px}
+.evmtot .t .l{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.evmtot .t .v{font-size:22px;font-weight:800;margin-top:3px;letter-spacing:-.5px}
+.mcard{background:#0e1626;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px;border-left:3px solid #475569}
+.mcard.s-active{border-left-color:#fb923c}.mcard.s-delivered{border-left-color:#22c55e}.mcard.s-planned{border-left-color:#38bdf8}.mcard.s-dropped{border-left-color:#475569;opacity:.55}
+.mcard .mh{display:flex;align-items:baseline;gap:10px}.mcard .mh .mt{font-weight:700;flex:1;min-width:0}
+.mcard .mh .mst{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.mcard .md{font-size:12px;color:var(--muted);margin-top:4px}
+.bar{height:7px;background:#0b1220;border-radius:99px;overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;border-radius:99px}
+.bar.ev>i{background:linear-gradient(90deg,#22c55e,#16a34a)}.bar.ac>i{background:linear-gradient(90deg,#fb923c,#f97316)}
+.esttbl,.tstbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.esttbl td,.esttbl th,.tstbl td,.tstbl th{text-align:left;padding:6px 8px;border-bottom:1px solid #101830}
+.esttbl th,.tstbl th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:700}
+.esttbl .num,.tstbl .num{text-align:right;font-variant-numeric:tabular-nums}
+/* resources */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.pcard{background:#0e1626;border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+.pcard.retired{opacity:.5}
+.pcard .ph{display:flex;align-items:center;gap:8px}.pcard .pn{font-weight:700}
+.pcard .tier{font-size:10px;text-transform:uppercase;letter-spacing:.5px;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#a78bfa}
+.pcard .pd{font-size:11px;color:var(--muted);margin:5px 0}
+.pcard .pstat{font-size:11px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
+.pcard .retire{margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:5px;font-size:10px;padding:1px 7px;cursor:pointer}
+.pcard .retire:hover{border-color:#f43f5e;color:#f43f5e}
+.rolecard{display:inline-flex;flex-direction:column;gap:2px}
+.addform{margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+.addform summary{cursor:pointer;color:#7dd3fc;font-size:12px;font-weight:700}
+.addrow{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
+.addrow input,.addrow select,#wp-overlay{background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;font-size:12px}
+.addrow input{flex:1;min-width:120px}#wp-overlay{width:100%;margin-bottom:8px;resize:vertical}
+.capsrow{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #101830;font-size:12.5px}
+.capsrow label{flex:1}.capsrow .ov{font-size:10px;color:#fb923c;text-transform:uppercase}
+.capsrow input[type=number]{width:80px;background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:4px 7px;font:inherit}
 </style>
 </head>
 <body>
@@ -162,9 +206,19 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
     <button class="stopbtn" id="stopbtn" title="Halt the fleet now (STOP)">⛔&nbsp;Stop</button>
   </header>
 
-  <!-- CEO KPI strip -->
+  <!-- CEO KPI strip (visible on every tab) -->
   <div class="kpis" id="kpis"></div>
 
+  <nav class="tabs" id="tabs">
+    <button class="tabbtn active" data-tab="overview">Overview</button>
+    <button class="tabbtn" data-tab="plan">Plan</button>
+    <button class="tabbtn" data-tab="resources">Resources</button>
+    <button class="tabbtn" data-tab="timesheets">Timesheets</button>
+    <button class="tabbtn" data-tab="research">Research</button>
+    <button class="tabbtn" data-tab="shifts">Shifts</button>
+  </nav>
+
+  <section id="tab-overview" class="tabsec">
   <div class="cols">
     <div class="panel stage-wrap">
       <h3>The loop — what's happening now</h3>
@@ -216,15 +270,59 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
     <div id="issues"><div class="muted">no issues</div></div>
   </div>
 
-  <div class="panel full">
-    <h3>Shifts — every conductor run</h3>
-    <div id="shifts"><div class="muted">no shifts yet</div></div>
-  </div>
+  </section><!-- /tab-overview -->
 
-  <div class="panel full">
-    <h3>Research — is it finding new work? <span class="muted" id="research-h"></span></h3>
-    <div id="digests"><div class="muted">no research digests yet</div></div>
-  </div>
+  <section id="tab-plan" class="tabsec" style="display:none">
+    <div class="panel full"><h3>Earned value — the plan vs the actuals</h3>
+      <div id="evm-tot" class="evmtot"><div class="muted">no plan yet</div></div>
+      <div class="muted" style="font-size:12px;margin:12px 0 4px">cumulative token burn per shift</div>
+      <div class="spark" id="evm-spark"></div></div>
+    <div class="panel full"><h3>Milestones — the plan <span class="muted" id="plan-h"></span></h3>
+      <div id="plan-cards"><div class="muted">no plan yet — the conductor drafts milestones</div></div></div>
+    <div class="panel full"><h3>Estimate vs actual — the conductor's calibration signal</h3>
+      <div id="evm-est"><div class="muted">no estimated+worked tasks yet</div></div></div>
+  </section>
+
+  <section id="tab-resources" class="tabsec" style="display:none">
+    <div class="panel full"><h3>Worker profiles — the bench <span class="muted" id="prof-h"></span></h3>
+      <div id="prof-cards" class="cards"></div>
+      <details class="addform"><summary>+ generate a profile</summary>
+        <div class="addrow">
+          <input id="wp-name" placeholder="slug (e.g. python-dev)">
+          <input id="wp-desc" placeholder="description (what it's good at)">
+          <select id="wp-model"><option value="">frontier</option><option value="standard" selected>standard</option><option value="fast">fast</option></select>
+        </div>
+        <textarea id="wp-overlay" rows="2" maxlength="2000" placeholder="persona overlay — emphasis + working style ONLY (never bypass-tests instructions)"></textarea>
+        <div><button class="msave" id="wp-add">Add profile</button> <span class="merr" id="wp-err"></span></div>
+      </details></div>
+    <div class="panel full"><h3>Runtime knobs <span class="muted">— applies at the next shift</span></h3>
+      <div id="caps-form"></div>
+      <div style="margin-top:10px"><button class="msave" id="caps-save">Save knobs</button> <span class="merr" id="caps-err"></span></div></div>
+    <div class="panel full"><h3>Roles — the live conductor engine</h3>
+      <div id="role-cards" class="cards"></div>
+      <details id="legacy-box" style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">legacy roles (the pre-conductor engine)</summary>
+        <div id="legacy-roles" class="muted" style="margin-top:6px"></div></details></div>
+  </section>
+
+  <section id="tab-timesheets" class="tabsec" style="display:none">
+    <div class="panel full"><h3>Rollup <span class="muted">— per role (all-time incl. legacy) &amp; per profile</span></h3>
+      <div id="ts-roll"><div class="muted">no engagements yet</div></div></div>
+    <div class="panel full"><h3>Engagements — who worked when, how long, at what spend, to what verdict</h3>
+      <div id="ts-rows"><div class="muted">no engagements yet</div></div></div>
+  </section>
+
+  <section id="tab-research" class="tabsec" style="display:none">
+    <div class="panel full"><h3>Staged research briefs <span class="muted" id="rb-h"></span></h3>
+      <div id="rb-briefs"><div class="muted">no staged briefs</div></div></div>
+    <div class="panel full"><h3>Research → shipped funnel</h3><div id="rb-funnel" class="muted">—</div></div>
+    <div class="panel full"><h3>Digests — what shipped recently (fuel for the researchers)</h3>
+      <div id="digests"><div class="muted">no research digests yet</div></div></div>
+  </section>
+
+  <section id="tab-shifts" class="tabsec" style="display:none">
+    <div class="panel full"><h3>Shifts — every conductor run <span class="muted">(click a row for the report)</span></h3>
+      <div id="shifts"><div class="muted">no shifts yet</div></div></div>
+  </section>
 </div>
 <div class="off" id="off">factory server unreachable — is <code>&nbsp;factory viz --serve&nbsp;</code> running?</div>
 <div id="stamp"></div>
@@ -245,11 +343,18 @@ function buildLoop(){const g=el('nodes');let p='';PHASES.forEach((ph,i)=>{
     `<text class="lbl" x="${x}" y="${y+45}">${ph.lbl}</text>`+(ph.key==='develop'?`<text class="devbadge" x="${x+23}" y="${y-21}" id="devbadge"></text>`:'');
   g.appendChild(n);});document.querySelector('.flow').setAttribute('d',p+' Z');}
 function kpi(lbl,val,sub,cls){return `<div class="kpi ${cls||''}"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="sub">${sub||''}</div></div>`;}
-let editing=false;   // true while the mission editor is open — tick() must not clobber the field
-async function tick(){
-  let d;try{const r=await fetch('/api/fleet',{cache:'no-store'});d=await r.json();if(!r.ok||(d&&d.error))throw new Error((d&&d.error)||('HTTP '+r.status));}catch(e){el('off').style.display='flex';return;}
-  el('off').style.display='none';const k=d.kpi||{},mo=d.momentum||{};
-  window._mission=d.mission||'';                          // remembered for the editor's prefill
+function tot(l,v){return `<div class="t"><div class="l">${l}</div><div class="v">${v}</div></div>`;}
+function bar(cls,pct){return `<div class="bar ${cls}"><i style="width:${Math.max(0,Math.min(100,pct||0))}%"></i></div>`;}
+let editing=false;   // true while the mission editor is open — the header refresh must not clobber the field
+
+async function fetchJSON(p){const r=await fetch(p,{cache:'no-store'});const d=await r.json().catch(()=>null);
+  if(!r.ok||(d&&d.error))throw new Error((d&&d.error)||('HTTP '+r.status));return d;}
+
+// The HEADER (mission, verdict, mode, STOP, KPI strip) is visible on every tab — kept live by a
+// slow global tick + the Overview 2s tick. Split out of the per-tab renderers.
+function headerRender(d){
+  const k=d.kpi||{},mo=d.momentum||{};
+  window._mission=d.mission||'';
   if(!editing)el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
   const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
   document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
@@ -261,7 +366,6 @@ async function tick(){
   }else{aps.textContent='';aps.className='apstat';}
   if(d.halted){sb.textContent='▶ Resume';sb.dataset.halted='1';sb.classList.add('halted');}
   else{sb.textContent='⛔ Stop';sb.dataset.halted='0';sb.classList.remove('halted');}
-  // KPI strip
   el('kpis').innerHTML=
     kpi('🚢 Shipped','<span>'+(k.shipped||0)+'</span>',(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked','hero')+
     kpi('🔄 Shifts',k.shifts||0,(d.running_shift?'shift '+d.running_shift+' running':'idle'))+
@@ -271,64 +375,156 @@ async function tick(){
     kpi('👷 Workers',(k.workers_live||0),(k.workers_total||0)+' dispatched total')+
     kpi('🔬 Research',(k.research_proposed||0)+'→'+(k.research_shipped||0),
         (k.research_proposed>0?'<span class="good">finding work</span>':'<span class="bad">dry</span>'));
-  // loop
+  el('stamp').textContent='updated '+new Date().toLocaleTimeString();
+}
+
+function overviewRender(d){
+  const mo=d.momentum||{},k=d.kpi||{};
   document.querySelectorAll('.node').forEach(n=>n.classList.toggle('active',n.dataset.key===d.phase));
   el('loop').classList.toggle('alive',d.phase&&d.phase!=='idle');
   el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(k.shifts||'—');
   el('hub-phase').textContent=d.phase||'idle';
   const dev=(d.live||[]).filter(w=>w.role==='developer worker').length;el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
   el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${esc(String(w.role).split(' ')[0])}">${esc(w.role)}</b> <span class="muted">pid ${esc(w.pid)}${w.where?(' · …/'+esc(String(w.where).split('/').pop())):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
-  // momentum
   el('momentum-verdict').textContent=mo.verdict||'—';
   const ser=mo.merges_series||[],smax=Math.max(1,...ser);
   el('spark').innerHTML=ser.length?ser.map((n,i)=>`<div class="s ${(d.running_shift&&i===ser.length-1)?'run':''}" title="${n} merged" style="height:${8+82*n/smax}%"><span>${n||''}</span></div>`).join(''):'<span class="muted">—</span>';
   const SC={advancing:'#22c55e',steady_state:'#f59e0b',blocked:'#f43f5e',reached:'#a78bfa'};
   el('strip').innerHTML=(mo.status_series||[]).map(s=>`<span class="ms" title="${esc(s)}" style="background:${SC[s]||'#475569'}"></span>`).join('')||'<span class="muted">—</span>';
-  // built ledger
   el('built-count').textContent=(d.built||[]).length?('· '+d.built.length):'';
   el('built').innerHTML=(d.built||[]).length?d.built.map(b=>`<div class="row"><span class="ok">✓</span><span class="ttl">${esc(b.title)}</span>${b.sha?`<code>${esc(b.sha)}</code>`:''}<span class="src">${esc(b.source)}</span></div>`).join(''):'<div class="muted">nothing shipped yet</div>';
-  // backlog & plan
   const bk=d.backlog||[];el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
   el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||esc(t.status);
     const why=(t.status==='blocked'&&t.result)?` <span class="muted">— ${esc(t.result)}</span>`:'';
     return `<div class="brow b-${esc(t.status)}" title="${esc(t.detail||t.title)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}${why}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
-  // collaboration — agora bus
   const c=d.collab||{};
   el('collab-h').textContent=c.active?(`· ● active · ${c.total} msgs · ${c.mentions} @mentions · ${(c.live||0)} live / ${(c.agents||[]).length} agents (rest are past shifts)`):'· idle (no bus activity)';
   el('collab-agents').innerHTML=(c.agents||[]).length?c.agents.map(a=>`<span class="agent ${a.live?'live':''}"><span class="dot"></span><span class="h">${esc(a.handle)}</span>${a.squad?`<span class="sq">${esc(String(a.squad).replace('factory-',''))}</span>`:''}</span>`).join(''):'<span class="muted">no agents on the bus</span>';
   el('collab-edges').innerHTML=(c.edges||[]).map(e=>`<span class="edge">${esc(e.from)} → @${esc(e.to)}${e.n>1?(' ×'+e.n):''}</span>`).join('');
   el('collab-feed').innerHTML=(c.messages||[]).length?c.messages.map(m=>{const sys=m.kind==='system'||m.sender==='system';const to=(m.to&&m.to.length)?` <span class="mto">→ @${m.to.map(esc).join(' @')}</span>`:'';return `<div class="msg ${sys?'sys':''}"><span class="mt">${esc(String(m.ts||'').substr(11,5))}</span><span class="mfrom">${esc(m.sender)}</span>${to}<span class="mbody">${esc(m.body)}</span></div>`;}).join(''):'<div class="muted">no bus activity yet</div>';
-  // upstream issues — the feed into research + the conductor
   const iss=d.issues||{};
   el('issues-h').textContent=iss.count?(`· ${iss.count} open · ${esc(iss.repo)} · every shift's research + planning sees these`):(iss.repo?'· none open':'· (gh/network needed)');
   el('issues').innerHTML=(iss.issues||[]).length?iss.issues.map(it=>`<div class="irow"><a class="inum" href="https://github.com/${esc(iss.repo)}/issues/${esc(it.number)}" target="_blank" rel="noopener">#${esc(it.number)}</a><span class="ititle">${esc(it.title)}</span>${it.labels?`<span class="ilbl">${esc(it.labels)}</span>`:''}</div>`).join(''):'<div class="muted">no open issues fetched (needs gh + network)</div>';
-  // shifts
-  el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
-  // research
-  el('research-h').textContent=`· ${k.research_proposed||0} proposed, ${k.research_shipped||0} shipped`;
-  el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';
-  el('stamp').textContent='updated '+new Date().toLocaleTimeString();
 }
+
+function planRender(plan,e){
+  plan=plan||[];e=e||{};
+  el('plan-h').textContent=plan.length?('· '+plan.length):'';
+  const mev={};(e.milestones||[]).forEach(m=>mev[m.id]=m);
+  el('evm-tot').innerHTML=e.pv?
+    tot('PV planned',fmtN(e.pv)+' tok')+tot('EV earned',fmtN(e.ev)+' tok')+tot('AC actual',fmtN(e.ac_tokens)+' tok')+
+    tot('% complete',e.percent_complete!=null?Math.round(e.percent_complete*100)+'%':'—')+
+    tot('CPI',e.cpi!=null?e.cpi.toFixed(2):'—')+tot('Overhead',fmtN(e.overhead_tokens||0)+' tok')
+    :'<div class="muted">no plan yet — the conductor drafts milestones toward the mission</div>';
+  const ser=(e.series&&e.series.ac_cumulative)||[],smax=Math.max(1,...ser);
+  el('evm-spark').innerHTML=ser.length?ser.map(n=>`<div class="s" title="${fmtN(n)} tok" style="height:${8+82*n/smax}%"></div>`).join(''):'<span class="muted">—</span>';
+  el('plan-cards').innerHTML=plan.length?plan.map(m=>{
+    const ev=mev[m.id]||{},pr=m.progress||{done:0,total:0};
+    return `<div class="mcard s-${esc(m.status)}"><div class="mh"><span class="mt">${esc(m.title)}</span>`+
+      `<span class="mst">${esc(m.status)} · ${pr.done}/${pr.total} tasks · ${fmtN(m.budget_tokens||0)} tok</span></div>`+
+      (m.deliverable?`<div class="md">📦 ${esc(m.deliverable)}</div>`:'')+
+      (m.acceptance?`<div class="md">✓ ${esc(m.acceptance)}</div>`:'')+
+      `<div class="md">progress</div>${bar('ev',pr.total?100*pr.done/pr.total:0)}`+
+      `<div class="md">burn — ${fmtN(ev.ac_tokens||0)} / ${fmtN(m.budget_tokens||0)} tok</div>`+
+      bar('ac',m.budget_tokens?100*(ev.ac_tokens||0)/m.budget_tokens:0)+`</div>`;
+  }).join(''):'<div class="muted">no plan yet — the conductor drafts milestones</div>';
+  const es=e.estimates||[];
+  el('evm-est').innerHTML=es.length?
+    '<table class="esttbl"><tr><th>task</th><th class="num">est</th><th class="num">actual</th><th class="num">ratio</th></tr>'+
+    es.map(r=>`<tr><td>${esc(r.title||r.task)}</td><td class="num">${fmtN(r.est)}</td><td class="num">${fmtN(r.actual)}</td><td class="num">${(r.est?r.actual/r.est:0).toFixed(1)}×</td></tr>`).join('')+'</table>'
+    :'<div class="muted">no estimated+worked tasks yet</div>';
+}
+
+function resourcesRender(r){
+  r=r||{};const profs=r.profiles||[];
+  el('prof-h').textContent=profs.length?('· '+profs.filter(p=>p.active).length+' active'):'';
+  el('prof-cards').innerHTML=profs.length?profs.map(p=>{
+    const acc=p.est_accuracy!=null?p.est_accuracy.toFixed(1)+'×':'—';
+    const completed=(p.merged||0)+(p.blocked||0),rateS=completed?Math.round(100*(p.merged||0)/completed)+'%':'—';
+    const retire=(p.name!=='generalist'&&p.active)?`<button class="retire" data-retire="${esc(p.name)}">retire</button>`:'';
+    return `<div class="pcard ${p.active?'':'retired'}"><div class="ph"><span class="pn">${esc(p.name)}</span><span class="tier">${esc(p.model)}</span>${retire}</div>`+
+      `<div class="pd">${esc(p.description||'')}</div>`+
+      `<div class="pstat"><span>${p.engagements||0} eng</span><span>${rateS} merged</span><span>${fmtN(p.tokens||0)} tok</span><span>est ${acc}</span>${p.active?'':'<span>retired</span>'}</div></div>`;
+  }).join(''):'<div class="muted">no profiles — the bench seeds at run start</div>';
+  el('role-cards').innerHTML=(r.roles||[]).map(x=>`<div class="pcard"><div class="ph"><span class="pn">${esc(x.name)}</span><span class="tier">${esc(x.model_tier)}</span></div>`+
+    `<div class="pstat"><span>${esc(x.transport)}</span>${x.wired?'<span class="good">wired</span>':'<span class="bad">missing</span>'}</div><div class="pd">${esc(x.prompt_path)}</div></div>`).join('');
+  el('legacy-roles').textContent=(r.legacy||[]).join(', ')||'(none)';
+  const caps=r.caps||{};
+  el('caps-form').innerHTML=Object.keys(caps).map(kk=>{const c=caps[kk];const ov=c.overridden?'<span class="ov">override</span>':'';
+    const inp=(typeof c.value==='boolean')?`<input type="checkbox" data-cap="${esc(kk)}" ${c.value?'checked':''}>`
+      :`<input type="number" min="0" data-cap="${esc(kk)}" value="${esc(c.value)}">`;
+    return `<div class="capsrow"><label>${esc(kk)}</label>${ov}${inp}</div>`;}).join('')||'<div class="muted">no knobs</div>';
+}
+
+function timesheetsRender(t){
+  t=t||{};const byA=t.by_agent||[],byP=t.by_profile||[],rows=t.rows||[];
+  el('ts-roll').innerHTML=
+    '<table class="tstbl"><tr><th>role</th><th class="num">eng</th><th class="num">tokens</th><th class="num">$</th><th class="num">min</th></tr>'+
+    (byA.length?byA.map(a=>`<tr><td>${esc(a.role)}</td><td class="num">${a.engagements||0}</td><td class="num">${fmtN(a.tokens||0)}</td><td class="num">$${(a.cost||0).toFixed(2)}</td><td class="num">${((a.seconds||0)/60).toFixed(1)}</td></tr>`).join(''):'<tr><td colspan="5" class="muted">none</td></tr>')+'</table>'+
+    (byP.length?'<div class="muted" style="margin:10px 0 4px">per profile</div><table class="tstbl"><tr><th>profile</th><th class="num">eng</th><th class="num">merged</th><th class="num">tokens</th><th class="num">est acc</th></tr>'+
+      byP.map(p=>`<tr><td>${esc(p.profile)}</td><td class="num">${p.engagements||0}</td><td class="num">${p.merged||0}</td><td class="num">${fmtN(p.tokens||0)}</td><td class="num">${p.est_accuracy!=null?p.est_accuracy.toFixed(1)+'×':'—'}</td></tr>`).join('')+'</table>':'');
+  el('ts-rows').innerHTML=rows.length?
+    '<table class="tstbl"><tr><th>shift</th><th>agent</th><th>task</th><th class="num">min</th><th class="num">tokens</th><th class="num">$</th><th>verdict</th></tr>'+
+    rows.map(r=>`<tr><td>S${esc(r.shift)}</td><td>${esc(r.agent)}</td><td>${esc(r.task_title||'')}</td><td class="num">${((r.seconds||0)/60).toFixed(1)}</td><td class="num">${fmtN(r.tokens||0)}</td><td class="num">$${(r.cost||0).toFixed(2)}</td><td>${esc(r.verdict||'')}</td></tr>`).join('')+'</table>'
+    :'<div class="muted">no engagements yet</div>';
+}
+
+function researchRender(rb,d){
+  rb=rb||{};d=d||{};const briefs=rb.briefs||[],rs=d.research||{},k=d.kpi||{};
+  el('rb-h').textContent=briefs.length?('· '+briefs.length+' staged'):'';
+  el('rb-briefs').innerHTML=briefs.length?briefs.map(b=>`<div class="brow"><span class="btitle">${esc(b.title||b.summary||'(brief)')}</span>${b.technique?`<span class="src2">${esc(b.technique)}</span>`:''}${b.citation?`<span class="ilbl">${esc(b.citation)}</span>`:''}</div>`).join(''):'<div class="muted">no staged briefs</div>';
+  el('rb-funnel').textContent=`${rs.proposed!=null?rs.proposed:(k.research_proposed||0)} proposed → ${rs.shipped!=null?rs.shipped:(k.research_shipped||0)} shipped`;
+  el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';
+}
+
+function shiftsRender(d){
+  const sh=d.shifts||[];
+  el('shifts').innerHTML=sh.length?sh.map(s=>`<div class="shift-row" data-shift="${esc(s.id)}"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep" title="${esc(s.report||'')}">${esc(s.report||'(no report)')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
+}
+
+// -- per-tab fetchers ---------------------------------------------------------
+async function refreshOverview(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);overviewRender(d);}catch(e){el('off').style.display='flex';}}
+async function refreshPlan(){try{const [p,e]=await Promise.all([fetchJSON('/api/plan'),fetchJSON('/api/evm')]);planRender(p,e);}catch(e){}}
+async function refreshResources(){try{resourcesRender(await fetchJSON('/api/resources'));}catch(e){}}
+async function refreshTimesheets(){try{timesheetsRender(await fetchJSON('/api/timesheets'));}catch(e){}}
+async function refreshResearch(){try{const [rb,d]=await Promise.all([fetchJSON('/api/research'),fetchJSON('/api/fleet')]);researchRender(rb,d);}catch(e){}}
+async function refreshShifts(){try{shiftsRender(await fetchJSON('/api/fleet'));}catch(e){}}
+const REFRESH={overview:refreshOverview,plan:refreshPlan,resources:refreshResources,timesheets:refreshTimesheets,research:refreshResearch,shifts:refreshShifts};
+
+let tabTimer=null,curTab='overview';
+function activateTab(name){
+  if(!REFRESH[name])name='overview';
+  curTab=name;
+  document.querySelectorAll('.tabsec').forEach(s=>s.style.display=(s.id==='tab-'+name)?'':'none');
+  document.querySelectorAll('.tabbtn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  if(location.hash!=='#'+name)location.hash=name;
+  if(tabTimer)clearInterval(tabTimer);
+  REFRESH[name]();
+  tabTimer=setInterval(REFRESH[name],name==='overview'?2000:10000);   // one tab interval alive at a time
+}
+
+// -- wiring -------------------------------------------------------------------
 buildLoop();
+document.querySelectorAll('.tabbtn').forEach(b=>b.addEventListener('click',()=>activateTab(b.dataset.tab)));
+window.addEventListener('hashchange',()=>{const n=location.hash.replace('#','');if(n&&n!==curTab)activateTab(n);});
 document.querySelectorAll('.mbtn').forEach(b=>b.addEventListener('click',async()=>{
   try{
     const r=await fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});
     const j=await r.json();
     if(j.autopilot&&j.autopilot.error){const a=el('apstat');a.textContent='⚠ start failed: '+j.autopilot.error;a.className='apstat warn';}
   }catch(e){}
-  tick();
+  headerTick();
 }));
 el('stopbtn').addEventListener('click',async()=>{
   const halted=el('stopbtn').dataset.halted==='1';
   try{await fetch(halted?'/api/resume':'/api/stop',{method:'POST'});}catch(e){}
-  tick();
+  headerTick();
 });
 // Mission editor — the human's steering wheel, inline (no window.prompt). While open,
-// `editing` pauses the mission-line refresh so tick() can't clobber what's being typed.
+// `editing` pauses the mission-line refresh so the header tick can't clobber what's being typed.
 function closeMissionEditor(){editing=false;el('mission-err').textContent='';el('mission-editor').style.display='none';el('mission').style.display='';el('mission-edit').style.display='';}
 el('mission-edit').addEventListener('click',()=>{
-  editing=true;
-  el('mission-input').value=window._mission||'';
+  editing=true;el('mission-input').value=window._mission||'';
   el('mission-editor').style.display='';el('mission').style.display='none';el('mission-edit').style.display='none';
   el('mission-input').focus();
 });
@@ -341,9 +537,41 @@ el('mission-save').addEventListener('click',async()=>{
     const r=await fetch('/api/mission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({statement})});
     if(!r.ok){const j=await r.json().catch(()=>({}));err.textContent=j.error||('error '+r.status);return;}
   }catch(e){err.textContent='network error';return;}
-  closeMissionEditor();tick();
+  closeMissionEditor();headerTick();
 });
-tick();setInterval(tick,2000);
+// Resources tab — add / retire a profile, save runtime knobs (shared guardrails with the CLI).
+el('wp-add').addEventListener('click',async()=>{
+  const err=el('wp-err');err.textContent='';
+  const body={action:'add',name:el('wp-name').value.trim(),description:el('wp-desc').value.trim(),
+              overlay:el('wp-overlay').value,model:el('wp-model').value};
+  try{const r=await fetch('/api/worker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){const j=await r.json().catch(()=>({}));err.textContent=j.error||('error '+r.status);return;}
+  }catch(e){err.textContent='network error';return;}
+  el('wp-name').value=el('wp-desc').value=el('wp-overlay').value='';refreshResources();
+});
+el('prof-cards').addEventListener('click',async e=>{
+  const name=e.target&&e.target.dataset&&e.target.dataset.retire;if(!name)return;
+  try{await fetch('/api/worker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'retire',name})});}catch(e){}
+  refreshResources();
+});
+el('caps-save').addEventListener('click',async()=>{
+  const err=el('caps-err');err.textContent='';const inputs=document.querySelectorAll('#caps-form [data-cap]');
+  for(const i of inputs){
+    const key='super_worker.'+i.dataset.cap;
+    const value=(i.type==='checkbox')?(i.checked?'true':'false'):i.value;
+    try{const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})});
+      if(!r.ok){const j=await r.json().catch(()=>({}));err.textContent=(j.error||('error '+r.status))+' ('+i.dataset.cap+')';return;}
+    }catch(e){err.textContent='network error';return;}
+  }
+  err.textContent='saved — applies next shift';refreshResources();
+});
+// Shifts tab — click a row to expand the full report.
+el('shifts').addEventListener('click',e=>{const row=e.target.closest&&e.target.closest('.shift-row');if(row)row.classList.toggle('open');});
+
+// The header stays live on EVERY tab via a slow global tick; the active tab drives its own content.
+async function headerTick(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);}catch(e){el('off').style.display='flex';}}
+headerTick();setInterval(headerTick,10000);
+activateTab((location.hash||'').replace('#','')||'overview');
 </script>
 </body>
 </html>

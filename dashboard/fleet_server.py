@@ -40,7 +40,15 @@ def timesheets_state() -> dict:
     from ..reporting import timesheets
     with Blackboard() as store:
         store.init_db()
-        return {"rows": timesheets.timesheet(store), "by_agent": timesheets.by_agent(store)}
+        return {"rows": timesheets.timesheet(store), "by_agent": timesheets.by_agent(store),
+                "by_profile": timesheets.by_profile(store)}
+
+
+def research_state() -> dict:
+    """Staged research briefs for the board's Research tab (Task 7.5). Filesystem read-only —
+    reuses reporting.summary.gather_research_briefs rather than duplicating the gather."""
+    from ..reporting.summary import gather_research_briefs
+    return {"briefs": gather_research_briefs()}
 
 
 def evm_state() -> dict:
@@ -142,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
         api = {"/api/fleet": fleet_state, "/api/plan": plan_state,
                "/api/timesheets": timesheets_state, "/api/evm": evm_state,
-               "/api/resources": resources_state}
+               "/api/resources": resources_state, "/api/research": research_state}
         if path in api:
             try:
                 body = json.dumps(api[path](), default=str).encode("utf-8")
