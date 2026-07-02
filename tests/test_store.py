@@ -497,3 +497,75 @@ def test_context_manager_closes_cleanly(tmp_path):
         assert reopened.get_candidate("c") is not None
     finally:
         reopened.close()
+
+
+# -- worker capability profiles (Phase 5) -----------------------------------
+
+def test_worker_profiles_crud(store):
+    store.add_profile("python-dev", description="Python/pytest specialist for the clive codebase",
+                      model="standard", overlay="You are a senior Python engineer.")
+    store.add_profile("prompt-pro", description="LLM prompt engineering", model="frontier",
+                      overlay="Prompt specialist.", created_by="conductor")
+    assert {p["name"] for p in store.list_profiles()} == {"python-dev", "prompt-pro"}
+    store.retire_profile("prompt-pro")
+    assert [p["name"] for p in store.list_profiles(active_only=True)] == ["python-dev"]
+    assert store.get_profile("python-dev")["model"] == "standard"
+    # a retired profile still resolves by name (history references it) but is inactive
+    assert store.get_profile("prompt-pro")["active"] == 0
+
+
+def test_generalist_profile_is_guaranteed_even_before_seeding(store):
+    """get_profile('')/get_profile('generalist') always resolve (a synthetic generalist when no
+    row exists) so a dispatch with an empty/absent profile never crashes pre-seed — but the
+    fallback is NOT a managed row, so it doesn't pollute list_profiles()."""
+    assert store.list_profiles() == []
+    g = store.get_profile("")
+    assert g["name"] == "generalist" and g["model"] == "" and g["overlay"] == ""
+    assert store.get_profile("generalist")["name"] == "generalist"
+    assert store.list_profiles() == []                       # still empty — synthetic, not listed
+    assert store.get_profile("does-not-exist") is None       # any OTHER miss returns None
+
+
+def test_add_profile_rejects_a_bad_slug(store):
+    for bad in ("Bad_Slug", "x", "has space", "UPPER", "a" * 40, "_lead", "-lead"):
+        with pytest.raises(ValueError):
+            store.add_profile(bad, description="d")
+
+
+def test_add_profile_replace_false_never_clobbers_or_resurrects(store):
+    store.add_profile("python-dev", description="orig", overlay="TUNED", model="standard")
+    store.retire_profile("python-dev")
+    # seeder path (replace=False): must NOT resurrect the retired profile nor overwrite the overlay
+    store.add_profile("python-dev", description="seed", overlay="SEED", model="standard",
+                      replace=False)
+    p = store.get_profile("python-dev")
+    assert p["active"] == 0 and p["overlay"] == "TUNED"
+    # CLI/board path (replace=True): an explicit re-add reactivates + overwrites
+    store.add_profile("python-dev", description="new", overlay="NEW", model="fast")
+    p = store.get_profile("python-dev")
+    assert p["active"] == 1 and p["overlay"] == "NEW" and p["model"] == "fast"
+
+
+def test_resolve_setting_override_beats_config_beats_default(store):
+    """Task 6.1: a whitelisted knob resolves store override → config.yaml → default, cast to the
+    knob's type (bool from 'false'/'true', int from a string)."""
+    from factory.common import config
+    # require_test is set in config.yaml → 'config'; max_parallel isn't → 'default'
+    assert config.resolve_setting(store, "super_worker.require_test", False) == (True, "config")
+    assert config.resolve_setting(store, "super_worker.max_parallel", 3) == (3, "default")
+    # a store override wins and is cast per SETTINGS_SPEC
+    store.set_setting("super_worker.require_test", "false")
+    store.set_setting("super_worker.max_parallel", "1")
+    assert config.resolve_setting(store, "super_worker.require_test", False) == (False, "override")
+    assert config.resolve_setting(store, "super_worker.max_parallel", 3) == (1, "override")
+
+
+def test_settings_overrides_roundtrip(store):
+    assert store.get_setting("super_worker.max_parallel") is None
+    store.set_setting("super_worker.max_parallel", "3")
+    store.set_setting("staffing.seeded_for", "acme/py-repo")
+    assert store.get_setting("super_worker.max_parallel") == "3"
+    store.set_setting("super_worker.max_parallel", "5")          # overwrite, not duplicate
+    assert store.get_setting("super_worker.max_parallel") == "5"
+    assert store.all_settings() == {"super_worker.max_parallel": "5",
+                                    "staffing.seeded_for": "acme/py-repo"}

@@ -8,11 +8,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from . import paths
+
+# A profile slug: lowercase, starts alnum, 2–32 chars. Kept tight so a conductor-generated
+# name is always a safe table key / CLI token / filename fragment.
+_PROFILE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+
+# The generalist is the fail-open default: no persona overlay, the account's default (frontier)
+# model — i.e. today's exact dispatch behavior. get_profile('') / get_profile('generalist')
+# always resolve to this even before Task 5.2 seeds a real row, so a dispatch never crashes.
+_GENERALIST_PROFILE = {
+    "name": "generalist",
+    "description": "General-purpose developer — the default dispatch: no persona overlay, "
+                   "the account's default model.",
+    "model": "", "overlay": "", "active": 1, "created_by": "system", "created_at": "",
+}
 
 
 def now_iso() -> str:
@@ -476,6 +491,97 @@ class Blackboard:
             "JOIN tasks t ON bl.role_or_run = 'developer:' || t.id WHERE t.milestone_id = ?",
             (milestone_id,))["n"]
         return {"est_tokens": int(est or 0), "actual_tokens": int(actual or 0)}
+
+    # -- worker capability profiles: the conductor's on-demand workforce -----
+    def add_profile(self, name: str, *, description: str, model: str = "", overlay: str = "",
+                    created_by: str = "operator", replace: bool = True) -> None:
+        """Create/replace a worker capability profile (DATA only: persona overlay + model tier —
+        it can never change the toolset, sandbox, frozen surface or gates). `replace=True`
+        (the CLI/board path) reactivates+overwrites via INSERT OR REPLACE; `replace=False` (the
+        seeder) uses INSERT OR IGNORE so a re-seed can't clobber a conductor-tuned overlay or
+        resurrect a retired profile. Rejects a bad slug so a generated name is always safe."""
+        if not _PROFILE_SLUG_RE.match(name or ""):
+            raise ValueError(f"invalid profile slug {name!r} — need ^[a-z0-9][a-z0-9-]{{1,31}}$")
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        self._exec(
+            f"{verb} INTO worker_profiles(name, description, model, overlay, active, "
+            "created_by, created_at) VALUES (?,?,?,?,1,?,?)",
+            (name, description, model, overlay, created_by, now_iso()))
+
+    def get_profile(self, name: str) -> Optional[dict]:
+        """Resolve a profile by name. '' and 'generalist' ALWAYS resolve — to a synthetic
+        generalist when no row exists yet — so a dispatch with an empty/absent profile never
+        crashes pre-seed. Any other missing name returns None (the caller fails open to
+        generalist). Retired profiles still resolve (history references their names)."""
+        key = name or "generalist"
+        row = self._one("SELECT * FROM worker_profiles WHERE name = ?", (key,))
+        if row is None and key == "generalist":
+            return dict(_GENERALIST_PROFILE)
+        return row
+
+    def list_profiles(self, active_only: bool = False) -> list[dict]:
+        """Profiles, name-ordered. active_only hides retired ones (the board's live bench);
+        the full list is the timesheet/audit view. The synthetic generalist is NOT listed until
+        a real row is seeded (Task 5.2) — it exists as a fallback, not a managed profile."""
+        if active_only:
+            return self._all("SELECT * FROM worker_profiles WHERE active = 1 ORDER BY name")
+        return self._all("SELECT * FROM worker_profiles ORDER BY name")
+
+    def retire_profile(self, name: str) -> None:
+        """Deactivate a profile (never DELETE — the ledger/timesheet reference its name)."""
+        self._exec("UPDATE worker_profiles SET active = 0 WHERE name = ?", (name,))
+
+    def profile_stats(self) -> list[dict]:
+        """Per-profile developer-outcome rollup (grouped by budget_ledger.profile over developer
+        rows): engagements, merged/blocked counts (notes = the verdict), tokens, cost — the
+        workforce-evolution signal (Task 5.7). est_accuracy is layered on in reporting.timesheets
+        (it needs the per-task est join)."""
+        # 'halted' is a STOP-brake artifact (the task is requeued, not failed), so it counts
+        # toward engagements + spend but NOT as a blocked failure — else a mid-round STOP would
+        # phantom-fail a healthy profile and could drive a wrongful retire.
+        return self._all(
+            "SELECT profile, COUNT(*) AS engagements, "
+            "SUM(CASE WHEN notes='merged' THEN 1 ELSE 0 END) AS merged, "
+            "SUM(CASE WHEN notes NOT IN ('merged','','halted') THEN 1 ELSE 0 END) AS blocked, "
+            "COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(cost),0) AS cost "
+            "FROM budget_ledger WHERE role_or_run LIKE 'developer:%' AND profile <> '' "
+            "GROUP BY profile ORDER BY tokens DESC")
+
+    def profile_task_actuals(self) -> list[dict]:
+        """Per (profile, task) actual developer tokens joined to tasks.est_tokens — reporting
+        derives each profile's estimate accuracy (median actual/est) from this. 'developer:' is
+        10 chars, so substr(...,11) is the task id."""
+        return self._all(
+            "SELECT b.profile, substr(b.role_or_run,11) AS task_id, "
+            "COALESCE(SUM(b.tokens),0) AS actual, COALESCE(MAX(t.est_tokens),0) AS est "
+            "FROM budget_ledger b LEFT JOIN tasks t ON t.id = substr(b.role_or_run,11) "
+            "WHERE b.role_or_run LIKE 'developer:%' AND b.profile <> '' "
+            "GROUP BY b.profile, task_id")
+
+    # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
+    def get_setting(self, key: str) -> Optional[str]:
+        r = self._one("SELECT value FROM settings WHERE key = ?", (key,))
+        return r["value"] if r else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._exec("INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?,?,?)",
+                   (key, str(value), now_iso()))
+
+    def all_settings(self) -> dict:
+        return {r["key"]: r["value"] for r in self._all("SELECT key, value FROM settings")}
+
+    def milestone_task_rows(self, milestone_id: int) -> list[dict]:
+        """Per linked task: id, title, est_tokens, status, and the ledgered ACTUAL developer
+        tokens/cost (the developer:<task_id> rows). One query so EVM (reporting/evm.py) can do
+        est-weighted partial credit AND the est-vs-actual table without duplicating SQL — the
+        SQL stays here in the CRUD layer (the Phase 3 convention)."""
+        return self._all(
+            "SELECT t.id, t.title, t.est_tokens, t.status, "
+            "COALESCE((SELECT SUM(b.tokens) FROM budget_ledger b "
+            "          WHERE b.role_or_run = 'developer:' || t.id),0) AS actual_tokens, "
+            "COALESCE((SELECT SUM(b.cost) FROM budget_ledger b "
+            "          WHERE b.role_or_run = 'developer:' || t.id),0) AS actual_cost "
+            "FROM tasks t WHERE t.milestone_id = ? ORDER BY t.created_at", (milestone_id,))
 
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""

@@ -273,6 +273,62 @@ def test_fleet_server_timesheets_endpoint(monkeypatch):
         httpd.shutdown()
 
 
+def test_fleet_json_carries_the_worker_bench(tmp_path):
+    """Task 5.7: fleet_json exposes a compact profiles list (bench + per-profile outcomes) for
+    the Resources tab."""
+    with _store(tmp_path) as s:
+        sid = s.start_shift(token_budget=1)
+        s.add_profile("python-dev", description="py", model="standard", overlay="x")
+        s.add_task("t1", "slice", source="research")
+        s.add_budget("developer:t1", 400, 0.04, shift_id=sid, notes="merged", profile="python-dev")
+        j = fleet_viz.fleet_json(s)
+    prof = {p["name"]: p for p in j["profiles"]}
+    assert prof["python-dev"]["model"] == "standard" and prof["python-dev"]["active"] is True
+    assert prof["python-dev"]["engagements"] == 1 and prof["python-dev"]["merged"] == 1
+
+
+def test_fleet_server_evm_endpoint(monkeypatch):
+    """Task 4.2: GET /api/evm serves evm(store) — the totals + per-milestone breakdown."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "evm_state",
+                        lambda: {"pv": 300_000, "ev": 200_000, "ac_tokens": 70_000,
+                                 "cpi": 2.857, "milestones": [{"id": 1, "title": "M1"}]})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/evm").read())
+        assert out["pv"] == 300_000 and out["milestones"][0]["title"] == "M1"
+    finally:
+        httpd.shutdown()
+
+
+def test_fleet_server_research_endpoint(monkeypatch):
+    """Task 7.5: GET /api/research → {briefs:[...]} (reuses summary.gather_research_briefs)."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "research_state",
+                        lambda: {"briefs": [{"title": "retry loop", "technique": "backoff",
+                                             "citation": "arxiv:1"}]})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/research").read())
+        assert out["briefs"][0]["title"] == "retry loop"
+    finally:
+        httpd.shutdown()
+
+
 def test_fleet_server_mission_editor(monkeypatch, tmp_path):
     """Task 1.2: POST /api/mission validates (1..2000 chars) and applies via _set_mission
     (which rewrites MISSION.md + sets the store mission). Empty/oversize → 400."""

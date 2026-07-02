@@ -29,6 +29,25 @@ def test_develop_candidate_builds_a_task_specific_prompt_with_bash(monkeypatch):
     assert "Bash" in captured["allowed_tools"]                # a developer needs the shell
 
 
+def test_develop_candidate_injects_profile_overlay_and_model(monkeypatch):
+    """Phase 5: the capability profile's overlay is injected at {PROFILE} and its resolved model
+    tier is threaded to the transport. No overlay → a generalist placeholder + the account default."""
+    captured = {}
+
+    def fake_super(prompt, *, model="", **k):
+        captured.update(prompt=prompt, model=model)
+        return ("done", 1, 0.0)
+
+    monkeypatch.setattr(common, "claude_super", fake_super)
+    common.develop_candidate("/clone", task="t", branch="b", test_cmd="pytest", frozen=[],
+                             profile_overlay="PERSONA-MARKER: senior Python engineer",
+                             model="claude-sonnet-4-6")
+    assert "PERSONA-MARKER" in captured["prompt"] and captured["model"] == "claude-sonnet-4-6"
+
+    common.develop_candidate("/clone", task="t", branch="b", test_cmd="pytest", frozen=[])
+    assert "generalist" in captured["prompt"] and captured["model"] == ""
+
+
 def test_develop_candidate_is_a_full_instance_with_web_and_own_squad(monkeypatch):
     captured = {}
     monkeypatch.setattr(common, "claude_super",

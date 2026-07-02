@@ -147,7 +147,7 @@ def _super_worker_env() -> dict:
 def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
                        as_user: Optional[str] = None, claude_bin: str = "claude",
                        settings: str = "", permission_mode: str = "acceptEdits",
-                       json_output: bool = True) -> list[str]:
+                       json_output: bool = True, model: str = "") -> list[str]:
     """`settings=""` → isolated (no plugins/hooks/MCP/skills — the restricted posture).
     `settings="user"` → load the worker's USER plugins/skills/MCP so it can use the agora
     plugin, the diary skill, and MCP servers (e.g. chrome-devtools) like any claude
@@ -166,6 +166,8 @@ def _super_worker_argv(workdir: str, allowed_tools, *, max_turns: int = 24,
     argv += [claude_bin, "-p"]
     if json_output:
         argv += ["--output-format", "json"]
+    if model:                                       # profile-assigned tier (Phase 5); '' = account default
+        argv += ["--model", model]
     argv += ["--setting-sources", settings,        # "" isolated | "user" → plugins/skills/MCP
              "--permission-mode", permission_mode,  # act without approval prompts…
              "--add-dir", workdir,                  # …file tools steered into the workspace
@@ -190,7 +192,7 @@ def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS
                  as_user: Optional[str] = None, claude_bin: str = "claude",
                  settings: str = "", permission_mode: str = "acceptEdits",
                  extra_env: Optional[dict] = None, max_turns: int = 24,
-                 timeout: int = 900) -> tuple[str, int, float]:
+                 timeout: int = 900, model: str = "") -> tuple[str, int, float]:
     """Run a FULL-CAPABILITY `claude -p` super-worker in `workdir` with a curated
     toolset + acceptEdits and a turn cap. Returns (text, tokens, cost). Never crashes —
     a transport error yields the `[claude -p …]` sentinel callers fall back on.
@@ -210,7 +212,7 @@ def claude_super(prompt: str, *, workdir: str, allowed_tools=DEFAULT_SUPER_TOOLS
         p = subprocess.run(_super_worker_argv(workdir, allowed_tools, max_turns=max_turns,
                                               as_user=as_user, claude_bin=claude_bin,
                                               settings=settings, permission_mode=permission_mode,
-                                              json_output=True),
+                                              json_output=True, model=model),
                            input=prompt, capture_output=True, text=True,
                            timeout=timeout, cwd=workdir, env=env)
         if p.returncode == 0 and p.stdout.strip():
@@ -257,13 +259,16 @@ def worker_bus_env(squad: str) -> dict:
 
 def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
                       frozen, as_user: Optional[str] = None, claude_bin: str = "claude",
-                      timeout: int = 1800, memory: str = "") -> dict:
+                      timeout: int = 1800, memory: str = "",
+                      profile_overlay: str = "", model: str = "") -> dict:
     """Run a DEVELOPER super-worker inside `clone_dir` (a clone of the target) toward
     `task`: it makes a bounded code change, gets the target's tests green, and commits to
     `branch`. With `as_user` it runs as the Guest-House user (HARD boundary); without, it
     runs same-user (dev-mode SOFT boundary — supervised, scoped to the disposable clone).
-    Returns {branch, reply, tokens, cost}; the caller (the glue) verifies the branch was
-    actually produced and grades it."""
+    `profile_overlay` is the capability profile's persona block injected at {PROFILE} (Phase 5)
+    and `model` its rail-resolved tier ('' = account default); a profile changes ONLY persona +
+    model — never the toolset/sandbox/frozen surface/gates. Returns {branch, reply, tokens,
+    cost}; the caller (the glue) verifies the branch was actually produced and grades it."""
     sw = config.load_config().get("super_worker", {}) or {}
     settings = sw.get("settings", "user")            # full instance: agora + diary + MCP loaded
     tools = DEVELOPER_TOOLS + tuple(sw.get("extra_tools") or ())   # + chrome-devtools (config)
@@ -274,12 +279,14 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
     prompt = (_load_prompt("developer")
               .replace("{TASK}", task)
               .replace("{MEMORY}", memory)
+              .replace("{PROFILE}", profile_overlay or "(generalist — no specialization)")
               .replace("{BRANCH}", branch)
               .replace("{TEST_CMD}", test_cmd)
               .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))
     reply, tokens, cost = claude_super(
         prompt, workdir=clone_dir, allowed_tools=tools, as_user=as_user,
-        claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout)
+        claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout,
+        model=model)
     return {"branch": branch, "reply": reply, "tokens": tokens, "cost": cost}
 
 

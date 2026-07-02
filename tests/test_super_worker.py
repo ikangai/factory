@@ -74,6 +74,39 @@ def test_claude_super_env_is_allowlisted(monkeypatch):
     assert "--add-dir" in captured["argv"]
 
 
+def test_super_argv_includes_model_when_set():
+    """Phase 5: a profile-assigned tier is threaded to the transport as --model; '' adds nothing."""
+    argv = common._super_worker_argv("/tmp/ws", ["Read"], model="claude-sonnet-4-6")
+    assert "--model" in argv and argv[argv.index("--model") + 1] == "claude-sonnet-4-6"
+    assert "--model" not in common._super_worker_argv("/tmp/ws", ["Read"], model="")
+
+
+def test_claude_super_threads_model_to_argv(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+            {"result": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    common.claude_super("do x", workdir="/tmp/ws-1", allowed_tools=["Read"],
+                        model="claude-haiku-4-5")
+    argv = captured["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-haiku-4-5"
+
+
+def test_resolve_model_tier_whitelist_fails_open_downward():
+    """Tier aliases resolve via config; '' / 'frontier' = account default; an UNKNOWN alias fails
+    open to standard (never silently up to frontier — a typo must not upgrade a worker)."""
+    from factory.common import config
+    assert config.resolve_model("") == ""
+    assert config.resolve_model("frontier") == ""
+    assert config.resolve_model("standard") == "claude-sonnet-4-6"
+    assert config.resolve_model("fast") == "claude-haiku-4-5"
+    assert config.resolve_model("turbo-9000") == "claude-sonnet-4-6"     # unknown → standard, not frontier
+
+
 def test_super_argv_can_load_user_settings_for_plugins_skills_mcp():
     """settings='user' lets a worker load the agora plugin, the diary skill, and MCP
     (chrome-devtools) — a full claude instance. Default '' stays isolated."""

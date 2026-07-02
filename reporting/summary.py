@@ -122,9 +122,10 @@ def _load_yaml(path: str) -> dict:
         return {}
 
 
-def _gather_research_briefs() -> list[dict]:
+def gather_research_briefs() -> list[dict]:
     """Staged research briefs = DISCOVERIES from papers/repos. Title + one-line
-    technique + citation, for the human to vet. Read-only from the filesystem."""
+    technique + citation, for the human to vet. Read-only from the filesystem.
+    (Public: the board's Research tab imports this — Task 7.5.)"""
     out = []
     for path in sorted(glob.glob(os.path.join(paths.RESEARCH_STAGING_DIR, "*.yaml"))):
         b = _load_yaml(path)
@@ -140,6 +141,9 @@ def _gather_research_briefs() -> list[dict]:
             "provenance_warning": b.get("provenance_warning", ""),
         })
     return out
+
+
+_gather_research_briefs = gather_research_briefs   # back-compat alias (internal callers)
 
 
 def _gather_mined_scenarios() -> list[dict]:

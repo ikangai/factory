@@ -159,6 +159,131 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     s.close()
 
 
+def test_execute_dispatches_by_profile_and_ledgers_it(tmp_path):
+    """Task 5.4: the rail resolves each task's capability profile ON THE MAIN THREAD and threads
+    the overlay + resolved model into the worker, then ledgers the spend under the profile name.
+    A named specialist → its overlay + standard tier; an unset profile → generalist + account
+    default; an unknown-but-named profile → fails open DOWNWARD to standard, never frontier."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_profile("python-dev", description="d", overlay="PERSONA-MARKER", model="standard")
+    s.add_task("t", "specialist task", source="issue")
+    s.set_task_profile("t", "python-dev")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    s.add_task("g", "generalist task", source="issue")           # no profile → generalist default
+    s.set_task_status("g", "in_progress", shift_id=sh)
+    s.add_task("x", "orphaned task", source="issue")
+    s.set_task_profile("x", "ghost-retired")                     # a name with no row → fail open
+    s.set_task_status("x", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def fake(text, **k):
+        seen[text] = dict(k)
+        return {"action": "merged", "merge_sha": "s", "tokens": 100, "cost": 0.01, "seconds": 2.0}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake)
+
+    spec = seen["specialist task"]
+    assert spec["profile_overlay"] == "PERSONA-MARKER" and spec["model"] == "claude-sonnet-4-6"
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:t'")["profile"] == "python-dev"
+
+    gen = seen["generalist task"]                                # unset → account default, generalist
+    assert gen["profile_overlay"] == "" and gen["model"] == ""
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:g'")["profile"] == "generalist"
+
+    orphan = seen["orphaned task"]                               # unknown name → standard, NOT frontier
+    assert orphan["profile_overlay"] == "" and orphan["model"] == "claude-sonnet-4-6"
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:x'")["profile"] == "generalist"
+    s.close()
+
+
+def test_reviewer_approves_and_merges(monkeypatch, tmp_path):
+    """Phase 8: with the reviewer ON, an approve verdict merges and the review spend rides out."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('```json\n{"approve": true, "reason": "fits"}\n```', 40, 0.01))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="add x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged" and res["review_tokens"] == 40
+
+
+def test_reviewer_rejects_and_discards(monkeypatch, tmp_path):
+    """Phase 8: an explicit reject discards the candidate (stage 'review' → a blocked-task lesson)
+    and NEVER merges; the review spend still rides out for ledgering."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": false, "reason": "off scope"}', 30, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "discarded" and res["stage"] == "review" and "off scope" in res["error"]
+    assert res["review_tokens"] == 30
+    assert "merge" not in [c[0] for c in ad.calls]           # never merged a rejected candidate
+
+
+def test_reviewer_fails_open_on_transport_failure(monkeypatch, tmp_path):
+    """Phase 8: an unparseable/failed review is FAIL-OPEN — a reviewer hiccup never blocks a merge."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p", lambda prompt, **k: ("[claude -p unavailable]", 0, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"                         # fail-open → merged despite no verdict
+
+
+def test_reviewer_missing_approve_key_fails_open(monkeypatch, tmp_path):
+    """Review #2 (Phase 8): a parseable verdict that OMITS/nulls the approve key is a reviewer
+    output hiccup, not a rejection — it must fail open (merge), not discard a good candidate."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"reason": "looks good"}', 20, 0.0))   # no approve key
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"                         # missing key → approve, not reject
+
+
+def test_reviewer_off_by_default_never_runs(monkeypatch, tmp_path):
+    """Phase 8 is config-gated OFF: with reviewer unset, the review transport is never invoked."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+
+    def boom(*a, **k):
+        raise AssertionError("the reviewer must not run when off")
+
+    monkeypatch.setattr(common, "claude_p", boom)
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade)   # reviewer defaults False
+    assert res["action"] == "merged" and "review_tokens" not in res
+
+
+def test_execute_threads_require_test_to_the_gate(tmp_path):
+    """Task 6.1: require_test is threaded from the run entry through execute_claimed_tasks into the
+    developer pipeline (so a store override can retune it) instead of being re-read from config
+    inside develop_and_merge."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "x", source="issue")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    seen = {}
+
+    def fake(text, **k):
+        seen.update(k)
+        return {"action": "merged", "merge_sha": "s"}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake, require_test=True)
+    assert seen["require_test"] is True
+    s.close()
+
+
 def test_execute_claimed_tasks_captures_the_block_reason(tmp_path):
     """A bare 'error' is undiagnosable — when develop_task raises, the exception message
     is threaded into the task result so the operator + the conductor can see WHY."""

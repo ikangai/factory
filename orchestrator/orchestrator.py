@@ -733,6 +733,74 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
               f"${float(a['cost']):>8.2f}  {(a['seconds'] or 0) / 60:>7.1f} min")
 
 
+def cmd_worker(store: Blackboard, action: str, *, rest: Optional[list] = None,
+               description: str = "", overlay: str = "", model: str = "") -> None:
+    """The conductor's on-demand workforce lever (worker capability profiles):
+      worker list                       # profiles + active flag + per-profile spend/outcomes
+      worker add <name> --description D --overlay O [--model frontier|standard|fast]
+      worker retire <name>
+    A profile is DATA (persona overlay + model tier) only — never toolset/sandbox/frozen/gates.
+    Guardrails (slug, tier whitelist, overlay bound, active cap, generalist-unretireable) live in
+    reporting.worker_admin so the board's POST /api/worker enforces the exact same policy."""
+    from ..reporting import worker_admin, timesheets
+    rest = rest or []
+
+    if action == "list":
+        roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+        profs = store.list_profiles(active_only=False)
+        if not profs:
+            print("(no profiles yet — the bench seeds at the next `factory run`, or add one with "
+                  "`factory worker add …`)")
+            return
+        print(f"{'name':<16} {'tier':<9} {'state':<7} {'eng':>4} {'merged':>7} {'tokens':>10}  description")
+        for p in profs:
+            o = roll.get(p["name"], {})
+            tier = p.get("model") or "frontier"
+            print(f"{p['name']:<16} {tier:<9} {'active' if p['active'] else 'retired':<7} "
+                  f"{int(o.get('engagements', 0)):>4} {int(o.get('merged', 0)):>7} "
+                  f"{int(o.get('tokens', 0)):>10,}  {(p.get('description') or '')[:48]}")
+        return
+
+    name = rest[0] if rest else ""
+    if action == "add":
+        err = worker_admin.validate_add(name, model, overlay) or worker_admin.cap_error(store, name)
+        if err:
+            print(f"[worker] {err}")
+            raise SystemExit(2)
+        store.add_profile(name, description=description, overlay=overlay, model=model,
+                          created_by="conductor")
+        print(f"[worker] added profile {name} (tier {model or 'frontier'})")
+    elif action == "retire":
+        err = worker_admin.retire_error(store, name)
+        if err:
+            print(f"[worker] {err}")
+            raise SystemExit(2)
+        store.retire_profile(name)
+        print(f"[worker] retired profile {name}")
+
+
+def cmd_evm(store: Blackboard) -> None:
+    """Agent-adapted EVM: the PV/EV/AC/CPI/%-complete totals, the per-milestone breakdown, and
+    the estimate-vs-actual list (the conductor's plan-revision feedback signal). Overhead
+    (conductor/research spend) is reported separately, never smeared across milestones."""
+    from ..reporting import evm as evmmod
+    e = evmmod.evm(store)
+    cpi = f"{e['cpi']:.2f}" if e["cpi"] is not None else "—"
+    pct = f"{e['percent_complete'] * 100:.0f}%" if e["percent_complete"] is not None else "—"
+    print(f"EVM  PV {e['pv']:,}  EV {e['ev']:,}  AC {e['ac_tokens']:,} tok  CPI {cpi}  "
+          f"complete {pct}  overhead {e['overhead_tokens']:,} tok (${e['overhead_cost']:.2f})")
+    print(f"{'id':>4}  {'status':<10}  {'title':<30}  {'PV':>10}  {'EV':>10}  {'AC':>10}  prog")
+    for m in e["milestones"]:
+        pr = m["progress"]
+        print(f"{m['id']:>4}  {m['status']:<10}  {m['title'][:30]:<30}  {m['pv']:>10,}  "
+              f"{m['ev']:>10,}  {m['ac_tokens']:>10,}  {pr['done']}/{pr['total']}")
+    if e["estimates"]:
+        print("\nestimate vs actual:")
+        for r in e["estimates"]:
+            ratio = (r["actual"] / r["est"]) if r["est"] else 0
+            print(f"  {r['task'][:22]:<22}  est {r['est']:>10,}  actual {r['actual']:>10,}  ({ratio:.1f}x)")
+
+
 _MILESTONE_STATUS = ("planned", "active", "delivered", "dropped")
 
 
@@ -842,6 +910,19 @@ def _read_mission_md() -> Optional[str]:
     return read_mission(paths.factory("MISSION.md"))
 
 
+def _seed_staffing(store: Blackboard) -> list:
+    """Ensure the target-derived worker bench exists (Task 5.2) — additive, idempotent. Best
+    effort: a config/filesystem hiccup must never break a run (the generalist fallback covers
+    dispatch regardless), and it's a tiny helper so the cmd_run tests can stub it like the
+    mission sync. Returns the profile names newly seeded this run."""
+    try:
+        from ..reporting import staffing
+        return staffing.ensure_seeded(store, config.clive_entry()[0], config.target_repo_slug())
+    except Exception as e:  # noqa: BLE001 — staffing is telemetry setup, not a run gate
+        print(f"[run] staffing skipped: {e}")
+        return []
+
+
 def _write_mission_md(statement: str) -> None:
     """Reflect an explicit --mission steer into MISSION.md so it survives the next run-start
     sync (otherwise the unchanged file would overwrite it). A tests-hookable seam."""
@@ -877,6 +958,12 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     else:                                     # an explicit --mission is durable: write it to the file
         _write_mission_md(mission)            # so the next (file-driven) run doesn't overwrite it
 
+    # The bench follows the target (Task 5.2): seed the stack specialists this target needs,
+    # additive + idempotent, before the shift dispatches by profile.
+    seeded = _seed_staffing(store)
+    if seeded:
+        print(f"[run] staffing: seeded {', '.join(seeded)} for this target")
+
     # IDLE short-circuit: if the loop has been steady for K shifts with an empty backlog and
     # the operator isn't re-steering, DON'T spawn a conductor — surface and wait. This is
     # what makes 'recommend_stop' real (otherwise a scheduled loop spawns forever).
@@ -897,24 +984,31 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     if real:
         print("[run] REAL mode: gated merges land on branch factory/auto in the REAL target "
               "(git-reversible; your working branch is untouched).")
+    # Whitelisted runtime knobs resolve store override → config.yaml → default (Task 6.1), so the
+    # board can retune the next shift. _k() reads the store override each run start.
+    _k = lambda key, default: config.resolve_setting(store, f"super_worker.{key}", default)[0]
     if executor is None:                               # the deterministic rail EXECUTES claimed tasks
         from .develop import execute_claimed_tasks
-        max_tasks = int(sw.get("max_tasks_per_shift", 3))   # unattended: cap per-shift fan-out
-        max_parallel = int(sw.get("max_parallel", 3))       # …run that many super-workers at once
+        max_tasks = _k("max_tasks_per_shift", 3)        # unattended: cap per-shift fan-out
+        max_parallel = _k("max_parallel", 3)            # …run that many super-workers at once
+        require_test = _k("require_test", False)         # GSD spec-bound acceptance gate (threaded)
+        reviewer = _k("reviewer", False)                 # Phase 8: config-gated pre-merge review gate
+        scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
-        if sw.get("scope_check") or sw.get("auto_decompose"):
+        if scope_on or decompose_on:
             from ..reporting import scope_check
-            if sw.get("scope_check"):                   # #1: pass/split/reject BEFORE dispatch
+            if scope_on:                                # #1: pass/split/reject BEFORE dispatch
                 sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
-            if sw.get("auto_decompose"):                # #4: split a no_candidate AFTER the worker fails
+            if decompose_on:                            # #4: split a no_candidate AFTER the worker fails
                 dc = lambda task: scope_check.decompose_judge(task, as_user=as_user, claude_bin=claude_bin)
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
-            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc)
+            max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
+            require_test=require_test, reviewer=reviewer)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
-    refill_threshold = int(sw.get("refill_threshold", 2))
+    refill_threshold = _k("refill_threshold", 2)
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
                     refill=refill, refill_threshold=refill_threshold,
@@ -1442,6 +1536,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsh = sub.add_parser("timesheet")       # agent timesheets — engagements + per-role rollup
     tsh.add_argument("--shift", type=int, default=None, help="filter to one shift")
     tsh.add_argument("--limit", type=int, default=200)
+    sub.add_parser("evm")                   # agent-adapted earned value over the plan + ledger
+    wk = sub.add_parser("worker")           # worker capability profiles — the on-demand workforce
+    wk.add_argument("action", choices=["list", "add", "retire"])
+    wk.add_argument("rest", nargs="*", help="<name> for add/retire")
+    wk.add_argument("--description", default="", help="capabilities (for the conductor + board)")
+    wk.add_argument("--overlay", default="", help="persona/emphasis block injected at {PROFILE}")
+    wk.add_argument("--model", default="", help="tier alias: frontier|standard|fast ('' = frontier)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -1562,6 +1663,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                      status=a.status, profile=a.profile)
         elif a.cmd == "timesheet":
             cmd_timesheet(store, shift=a.shift, limit=a.limit)
+        elif a.cmd == "evm":
+            cmd_evm(store)
+        elif a.cmd == "worker":
+            cmd_worker(store, a.action, rest=a.rest, description=a.description,
+                       overlay=a.overlay, model=a.model)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

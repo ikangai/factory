@@ -16,6 +16,9 @@ def _no_real_research(monkeypatch):
     monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
     monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
     monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
+    # Staffing scans the real target root + runs git for the slug — stub it (like the mission
+    # sync) so these cmd_run tests stay hermetic. A dedicated test exercises it un-stubbed.
+    monkeypatch.setattr(orchestrator, "_seed_staffing", lambda store: [])
 
 
 def _store(tmp_path):
@@ -156,6 +159,78 @@ def test_cmd_timesheet_prints_rows_and_rollup(tmp_path, capsys):
         out = capsys.readouterr().out
     assert "developer:task-a" in out and "add retry" in out and "merged" in out
     assert "per-role" in out                          # the rollup section rendered
+
+
+def test_cmd_evm_prints_totals_and_milestones(tmp_path, capsys):
+    """Task 4.2: the evm CLI shows the totals line, the per-milestone table and the
+    estimate-vs-actual list (a task with both an estimate and ledgered actuals)."""
+    with _store(tmp_path) as s:
+        sid = s.start_shift(token_budget=1)
+        mid = s.add_milestone("recovery corpus", budget_tokens=100_000)
+        s.set_milestone_status(mid, "delivered")
+        s.add_task("task-e1", "slice one", source="research")
+        s.set_task_milestone("task-e1", mid)
+        s.set_task_estimate("task-e1", 80_000)
+        s.set_task_status("task-e1", "done", result="x")
+        s.add_budget("developer:task-e1", 40_000, 0.4, shift_id=sid, notes="merged")
+        orchestrator.cmd_evm(s)
+        out = capsys.readouterr().out
+    assert "EVM" in out and "PV" in out and "CPI" in out
+    assert "recovery corpus" in out
+    assert "estimate vs actual" in out and "task-e1" in out
+
+
+def test_cmd_worker_add_list_retire_and_guardrails(tmp_path, capsys):
+    """Task 5.5: worker add/list/retire with the shared guardrails — slug + tier whitelist +
+    overlay bound + active cap, and generalist is unretireable."""
+    with _store(tmp_path) as s:
+        orchestrator.cmd_worker(s, "add", rest=["python-dev"], description="py specialist",
+                                overlay="senior python", model="standard")
+        orchestrator.cmd_worker(s, "list")
+        out = capsys.readouterr().out
+        assert "python-dev" in out and "standard" in out and "py specialist" in out
+
+        # bad tier → exit 2 + the whitelist
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["ml-expert"], model="turbo")
+        assert "unknown model tier" in capsys.readouterr().out
+
+        # bad slug → exit 2
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["Bad_Name"])
+        assert "invalid profile name" in capsys.readouterr().out
+
+        # generalist cannot be retired
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "retire", rest=["generalist"])
+        assert "generalist cannot be retired" in capsys.readouterr().out
+
+        # a bare `worker retire` (no name) errors — it must not 0-row bogus-succeed (review #5)
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "retire", rest=[])
+        assert "usage: worker retire" in capsys.readouterr().out
+
+        # retire the specialist → gone from the active bench
+        orchestrator.cmd_worker(s, "retire", rest=["python-dev"])
+        capsys.readouterr()
+        assert [p["name"] for p in s.list_profiles(active_only=True)] == []
+
+
+def test_cmd_worker_add_respects_the_active_cap(tmp_path, capsys):
+    """Task 5.5: `worker add` beyond the active cap fails with 'retire one first' (generalist
+    doesn't count). The cap honors a store override (review #2 — the board's knob is effective)."""
+    with _store(tmp_path) as s:
+        s.set_setting("super_worker.max_profiles", "2")      # board override → cap = 2
+        orchestrator.cmd_worker(s, "add", rest=["p1"], model="standard")
+        orchestrator.cmd_worker(s, "add", rest=["p2"], model="standard")
+        capsys.readouterr()
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["p3"], model="standard")
+        out = capsys.readouterr().out
+        assert "cap reached" in out and "retire one first" in out
+        # …but re-adding generalist to tune its persona is ALWAYS allowed (never counts) — review #4
+        orchestrator.cmd_worker(s, "add", rest=["generalist"], overlay="tuned default")
+        assert "generalist" in s.get_profile("generalist")["name"]
 
 
 def test_cmd_task_add_list_done(tmp_path, capsys):
