@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -17,11 +18,26 @@ from ..reporting import fleet_viz
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
+MAX_MISSION_CHARS = 2000
+
 
 def fleet_state() -> dict:
     with Blackboard() as store:
         store.init_db()   # idempotent — a pre-init board shows empty, not a 500
         return fleet_viz.fleet_json(store)
+
+
+def _set_mission(statement: str) -> dict:
+    """Apply a mission steer from the board: rewrite MISSION.md's ## Mission (durable, so it
+    survives the next run-start sync) and set the active mission in a FRESH per-request store
+    (ground rule 2 — never share a store across handler threads). Returns the applied state."""
+    from ..common import paths
+    from ..research.focus import write_mission
+    write_mission(paths.factory("MISSION.md"), statement)
+    with Blackboard() as store:
+        store.init_db()
+        store.set_mission(statement)
+    return {"ok": True, "statement": statement}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,10 +79,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/mode", "/api/stop", "/api/resume"):
+        if path not in ("/api/mode", "/api/stop", "/api/resume", "/api/mission"):
             return self._send(404, b'{"error":"unknown write action"}', "application/json")
         if not self._local_origin():
             return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
+        if path == "/api/mission":            # the human's steering wheel, live on the board
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError) as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            statement = (payload.get("statement") or "").strip()
+            if not statement or len(statement) > MAX_MISSION_CHARS:
+                return self._send(400, json.dumps(
+                    {"error": f"statement must be 1..{MAX_MISSION_CHARS} chars"}).encode(),
+                    "application/json")
+            try:
+                info = _set_mission(statement)
+            except sqlite3.OperationalError:  # store busy (WAL cross-process contention)
+                return self._send(503, b'{"error":"store busy, retry"}', "application/json")
+            return self._send(200, json.dumps(info).encode(), "application/json")
         from ..common import killswitch
         if path == "/api/stop":               # HALT the fleet now — the board's emergency brake
             killswitch.engage("dashboard")

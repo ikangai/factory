@@ -15,6 +15,7 @@ def _no_real_research(monkeypatch):
     operator's live MISSION.md). Tests exercising the sync re-monkeypatch _read_mission_md."""
     monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
     monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
+    monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
 
 
 def _store(tmp_path):
@@ -75,10 +76,14 @@ def test_cmd_run_explicit_mission_beats_the_file(tmp_path, monkeypatch):
     is passed."""
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
     monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: "file mission")
+    wrote = {}
+    monkeypatch.setattr(orchestrator, "_write_mission_md",
+                        lambda statement: wrote.update(statement=statement))
     with _store(tmp_path) as s:
         orchestrator.cmd_run(s, mission="cli mission", conductor=_completed,
                              token_budget=1, wall_clock_s=1)
         assert s.active_mission()["statement"] == "cli mission"   # the flag, not the file
+        assert wrote["statement"] == "cli mission"                # …and it's made durable to MISSION.md
 
 
 def test_cmd_task_add_list_done(tmp_path, capsys):

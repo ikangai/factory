@@ -19,6 +19,14 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
   box-shadow:0 0 0 0 #22c55e;animation:pulse 1.8s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 #22c55eaa}70%{box-shadow:0 0 0 9px #22c55e00}100%{box-shadow:0 0 0 0 #22c55e00}}
 #mission{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.medit{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 4px;flex-shrink:0}
+.medit:hover{color:#7dd3fc}
+.meditor{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+#mission-input{flex:1;min-width:0;background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px;resize:vertical}
+.msave,.mcancel{border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.msave{background:#0ea5e9;color:#04121e;border-color:#0ea5e9}
+.mcancel{background:transparent;color:var(--muted)}
+.merr{color:#f43f5e;font-size:12px;white-space:nowrap}
 .verdict{margin-left:auto;padding:5px 14px;border-radius:99px;font-size:12px;font-weight:700;border:1px solid;white-space:nowrap}
 .v-advancing{color:#22c55e;border-color:#22c55e66;background:#22c55e15}
 .v-steady_state{color:#f59e0b;border-color:#f59e0b66;background:#f59e0b15}
@@ -138,6 +146,13 @@ header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#c
   <header>
     <h1>🏭 HARNESS FACTORY</h1>
     <span class="dot-live"></span><span id="mission">connecting…</span>
+    <button id="mission-edit" class="medit" title="Edit the mission — steers the live conductor loop">✏️</button>
+    <span class="meditor" id="mission-editor" style="display:none">
+      <textarea id="mission-input" rows="1" maxlength="2000" placeholder="Mission statement (steers the loop)…"></textarea>
+      <button class="msave" id="mission-save">Save</button>
+      <button class="mcancel" id="mission-cancel">Cancel</button>
+      <span class="merr" id="mission-err"></span>
+    </span>
     <span class="verdict v-none" id="verdict">—</span>
     <div class="modetoggle" id="modetoggle" title="AUTO: self-drives shift after shift · SHIFT: one shift, then waits for you">
       <button class="mbtn" data-mode="shift">⏸&nbsp;Shift</button>
@@ -230,10 +245,12 @@ function buildLoop(){const g=el('nodes');let p='';PHASES.forEach((ph,i)=>{
     `<text class="lbl" x="${x}" y="${y+45}">${ph.lbl}</text>`+(ph.key==='develop'?`<text class="devbadge" x="${x+23}" y="${y-21}" id="devbadge"></text>`:'');
   g.appendChild(n);});document.querySelector('.flow').setAttribute('d',p+' Z');}
 function kpi(lbl,val,sub,cls){return `<div class="kpi ${cls||''}"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="sub">${sub||''}</div></div>`;}
+let editing=false;   // true while the mission editor is open — tick() must not clobber the field
 async function tick(){
   let d;try{d=await(await fetch('/api/fleet',{cache:'no-store'})).json();}catch(e){el('off').style.display='flex';return;}
   el('off').style.display='none';const k=d.kpi||{},mo=d.momentum||{};
-  el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
+  window._mission=d.mission||'';                          // remembered for the editor's prefill
+  if(!editing)el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
   const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
   document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
   const ap=d.autopilot||{},aps=el('apstat'),sb=el('stopbtn');
@@ -305,6 +322,26 @@ el('stopbtn').addEventListener('click',async()=>{
   const halted=el('stopbtn').dataset.halted==='1';
   try{await fetch(halted?'/api/resume':'/api/stop',{method:'POST'});}catch(e){}
   tick();
+});
+// Mission editor — the human's steering wheel, inline (no window.prompt). While open,
+// `editing` pauses the mission-line refresh so tick() can't clobber what's being typed.
+function closeMissionEditor(){editing=false;el('mission-err').textContent='';el('mission-editor').style.display='none';el('mission').style.display='';el('mission-edit').style.display='';}
+el('mission-edit').addEventListener('click',()=>{
+  editing=true;
+  el('mission-input').value=window._mission||'';
+  el('mission-editor').style.display='';el('mission').style.display='none';el('mission-edit').style.display='none';
+  el('mission-input').focus();
+});
+el('mission-cancel').addEventListener('click',closeMissionEditor);
+el('mission-input').addEventListener('keydown',e=>{if(e.key==='Escape')closeMissionEditor();});
+el('mission-save').addEventListener('click',async()=>{
+  const statement=el('mission-input').value.trim(),err=el('mission-err');err.textContent='';
+  if(!statement){err.textContent='enter a mission';return;}
+  try{
+    const r=await fetch('/api/mission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({statement})});
+    if(!r.ok){const j=await r.json().catch(()=>({}));err.textContent=j.error||('error '+r.status);return;}
+  }catch(e){err.textContent='network error';return;}
+  closeMissionEditor();tick();
 });
 tick();setInterval(tick,2000);
 </script>

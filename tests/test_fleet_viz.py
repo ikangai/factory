@@ -191,6 +191,40 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
         httpd.shutdown()
 
 
+def test_fleet_server_mission_editor(monkeypatch, tmp_path):
+    """Task 1.2: POST /api/mission validates (1..2000 chars) and applies via _set_mission
+    (which rewrites MISSION.md + sets the store mission). Empty/oversize → 400."""
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    applied = {}
+    monkeypatch.setattr(fleet_server, "_set_mission",
+                        lambda s: applied.update(statement=s) or {"ok": True, "statement": s})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def post(body):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/mission", data=body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            return urllib.request.urlopen(req)
+
+        out = json.loads(post(b'{"statement":"make clive bulletproof"}').read())
+        assert out["ok"] is True and applied["statement"] == "make clive bulletproof"
+        for bad in (b'{"statement":""}', b'{"statement":"' + b"x" * 2001 + b'"}'):
+            try:
+                post(bad)
+                assert False, "invalid statement should 400"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+    finally:
+        httpd.shutdown()
+
+
 def test_upstream_issues_parses_into_structured_rows(monkeypatch):
     """The dashboard's issue feed: gh issue lines → {number,title,labels}, cached."""
     from factory.common import config

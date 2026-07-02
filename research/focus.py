@@ -62,3 +62,30 @@ def read_mission(mission_path: str) -> str | None:
         return None
     body = _section_body(text, "Mission")
     return " ".join(body.split()) if body else None
+
+
+def write_mission(mission_path: str, statement: str) -> None:
+    """Rewrite MISSION.md's `## Mission` section body to `statement`, leaving the REST of the
+    file byte-identical (other sections, the human's material). Creates the file / appends the
+    section when absent. The board editor + the `--mission` CLI path both call this so a steer
+    reaches the file and survives the next run-start sync (read_mission)."""
+    statement = statement.strip()
+    try:
+        with open(mission_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    # (heading line)(body up to the next heading / EOF) — replace only the body.
+    pat = re.compile(r"(^\#{1,3}\s*Mission\b[^\n]*\n)(.*?)(?=^\#{1,3}\s|\Z)",
+                     re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    m = pat.search(text)
+    if m:
+        tail = text[m.end(2):]
+        sep = "\n\n" if tail.lstrip().startswith("#") else "\n"   # keep a blank line before the next section
+        new = text[:m.start(2)] + statement + sep + tail
+    elif text.strip():                                            # file exists but has no ## Mission
+        new = text.rstrip("\n") + "\n\n## Mission\n" + statement + "\n"
+    else:                                                         # empty / missing file
+        new = "## Mission\n" + statement + "\n"
+    with open(mission_path, "w", encoding="utf-8") as fh:
+        fh.write(new)

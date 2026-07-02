@@ -722,6 +722,13 @@ def _read_mission_md() -> Optional[str]:
     return read_mission(paths.factory("MISSION.md"))
 
 
+def _write_mission_md(statement: str) -> None:
+    """Reflect an explicit --mission steer into MISSION.md so it survives the next run-start
+    sync (otherwise the unchanged file would overwrite it). A tests-hookable seam."""
+    from ..research.focus import write_mission
+    write_mission(paths.factory("MISSION.md"), statement)
+
+
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
             real: bool = False, conductor=None, executor=None, refill=None) -> dict:
@@ -747,6 +754,8 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         if file_mission and file_mission != active_norm:
             store.set_mission(file_mission)
             print(f"[run] mission re-steered from MISSION.md: {file_mission[:80]}…")
+    else:                                     # an explicit --mission is durable: write it to the file
+        _write_mission_md(mission)            # so the next (file-driven) run doesn't overwrite it
 
     # IDLE short-circuit: if the loop has been steady for K shifts with an empty backlog and
     # the operator isn't re-steering, DON'T spawn a conductor — surface and wait. This is
