@@ -159,6 +159,48 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     s.close()
 
 
+def test_execute_dispatches_by_profile_and_ledgers_it(tmp_path):
+    """Task 5.4: the rail resolves each task's capability profile ON THE MAIN THREAD and threads
+    the overlay + resolved model into the worker, then ledgers the spend under the profile name.
+    A named specialist → its overlay + standard tier; an unset profile → generalist + account
+    default; an unknown-but-named profile → fails open DOWNWARD to standard, never frontier."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_profile("python-dev", description="d", overlay="PERSONA-MARKER", model="standard")
+    s.add_task("t", "specialist task", source="issue")
+    s.set_task_profile("t", "python-dev")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    s.add_task("g", "generalist task", source="issue")           # no profile → generalist default
+    s.set_task_status("g", "in_progress", shift_id=sh)
+    s.add_task("x", "orphaned task", source="issue")
+    s.set_task_profile("x", "ghost-retired")                     # a name with no row → fail open
+    s.set_task_status("x", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def fake(text, **k):
+        seen[text] = dict(k)
+        return {"action": "merged", "merge_sha": "s", "tokens": 100, "cost": 0.01, "seconds": 2.0}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake)
+
+    spec = seen["specialist task"]
+    assert spec["profile_overlay"] == "PERSONA-MARKER" and spec["model"] == "claude-sonnet-4-6"
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:t'")["profile"] == "python-dev"
+
+    gen = seen["generalist task"]                                # unset → account default, generalist
+    assert gen["profile_overlay"] == "" and gen["model"] == ""
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:g'")["profile"] == "generalist"
+
+    orphan = seen["orphaned task"]                               # unknown name → standard, NOT frontier
+    assert orphan["profile_overlay"] == "" and orphan["model"] == "claude-sonnet-4-6"
+    assert s._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:x'")["profile"] == "generalist"
+    s.close()
+
+
 def test_execute_claimed_tasks_captures_the_block_reason(tmp_path):
     """A bare 'error' is undiagnosable — when develop_task raises, the exception message
     is threaded into the task result so the operator + the conductor can see WHY."""

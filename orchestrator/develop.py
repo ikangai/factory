@@ -58,7 +58,7 @@ def factory_worktree(adapter, *, branch: str = "factory/auto") -> str:
 def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: str = "claude",
                  real: bool = False, grade_fn: Optional[Callable] = None,
                  champion_scores: Optional[dict] = None, merge_lock=None,
-                 memory: str = "") -> dict:
+                 memory: str = "", profile_overlay: str = "", model: str = "") -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -73,14 +73,16 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
             main = factory_worktree(adapter)             # persistent — do NOT delete
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf, as_user=as_user,
-                                 claude_bin=claude_bin, merge_lock=merge_lock, memory=memory)
+                                 claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
+                                 profile_overlay=profile_overlay, model=model)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
         adapter.clone(main)
         return develop_and_merge(adapter=adapter, main_repo=main, task=task_text,
                                  champion_scores=cs, grade_fn=gf,
-                                 as_user=as_user, claude_bin=claude_bin, memory=memory)
+                                 as_user=as_user, claude_bin=claude_bin, memory=memory,
+                                 profile_overlay=profile_overlay, model=model)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -130,6 +132,23 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     from ..reporting import factory_memory                  # factory memory: lessons → each worker
     dev_card = factory_memory.memory_card(store, "developer")
 
+    # Resolve each task's worker profile (Phase 5) ON THE MAIN THREAD — profiles are store reads,
+    # and the workers run in threads that must never touch the single-writer connection. A profile
+    # supplies only a persona overlay + a rail-resolved model tier; capability stays rail-fixed.
+    profiles = {}
+    for t in claimed:
+        raw = t.get("profile") or ""
+        prof = store.get_profile(raw)                    # '' / 'generalist' → synthetic generalist
+        if prof is None:                                 # a NAMED profile that no longer exists:
+            print(f"[execute] task {t['id']} names unknown profile {raw!r} — failing open to "
+                  f"standard tier (never frontier)", flush=True)
+            profiles[t["id"]] = {"name": "generalist", "overlay": "",
+                                 "model": config.resolve_model("standard")}
+        else:
+            profiles[t["id"]] = {"name": prof.get("name") or "generalist",
+                                 "overlay": prof.get("overlay", ""),
+                                 "model": config.resolve_model(prof.get("model", ""))}
+
     merge_lock = threading.Lock() if real else None  # serialize the shared factory/auto merge
     workers = max(1, min(max_parallel or len(claimed), len(claimed)))
     print(f"[execute] dispatching {len(claimed)} task(s) — up to {workers} super-worker(s) "
@@ -142,10 +161,13 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if task.get("spec") and "SPEC:" not in (task.get("detail") or ""):   # avoid a double-fold:
             from ..reporting import scope_check                              # detail may already
             text += scope_check.spec_brief(task["spec"])                     # carry the spec block
-        print(f"[execute] ▶ {task['id']}: {task['title']}", flush=True)
+        prof = profiles[task["id"]]
+        print(f"[execute] ▶ {task['id']}: {task['title']}"
+              + (f" [{prof['name']}]" if prof["name"] != "generalist" else ""), flush=True)
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
-                             merge_lock=merge_lock, memory=dev_card)
+                             merge_lock=merge_lock, memory=dev_card,
+                             profile_overlay=prof["overlay"], model=prof["model"])
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             return task, {"action": "error", "error": str(e)}
 
@@ -166,8 +188,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if action != "halted" or has_spend:
             store.add_budget(f"developer:{task['id']}", int(res.get("tokens") or 0),
                              float(res.get("cost") or 0.0), notes=action or "",
-                             shift_id=shift_id, seconds=float(res.get("seconds") or 0.0))
-            # (profile left at '' here — Task 5.4 passes the real name)
+                             shift_id=shift_id, seconds=float(res.get("seconds") or 0.0),
+                             profile=profiles[task["id"]]["name"])   # Task 5.4: attribute the profile
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
@@ -216,7 +238,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
 def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: dict,
                       grade_fn: Callable[[str], dict], as_user: Optional[str] = None,
                       claude_bin: str = "claude", label: Optional[str] = None,
-                      merge_lock=None, memory: str = "") -> dict:
+                      merge_lock=None, memory: str = "",
+                      profile_overlay: str = "", model: str = "") -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -244,7 +267,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         dev = develop_candidate(dev_clone, task=task, branch=branch,
                           test_cmd=" ".join(adapter.test_command()),
                           frozen=adapter.frozen_paths(), as_user=as_user,
-                          claude_bin=claude_bin, memory=memory)
+                          claude_bin=claude_bin, memory=memory,
+                          profile_overlay=profile_overlay, model=model)
         # Developer spend rides out on EVERY post-dispatch result path (Task 0.2) — the rail
         # ledgers it (Task 0.3). Previously dropped: nothing reached budget_ledger.
         spend = {"tokens": int(dev.get("tokens") or 0), "cost": float(dev.get("cost") or 0.0),

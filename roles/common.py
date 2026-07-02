@@ -259,13 +259,16 @@ def worker_bus_env(squad: str) -> dict:
 
 def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
                       frozen, as_user: Optional[str] = None, claude_bin: str = "claude",
-                      timeout: int = 1800, memory: str = "") -> dict:
+                      timeout: int = 1800, memory: str = "",
+                      profile_overlay: str = "", model: str = "") -> dict:
     """Run a DEVELOPER super-worker inside `clone_dir` (a clone of the target) toward
     `task`: it makes a bounded code change, gets the target's tests green, and commits to
     `branch`. With `as_user` it runs as the Guest-House user (HARD boundary); without, it
     runs same-user (dev-mode SOFT boundary — supervised, scoped to the disposable clone).
-    Returns {branch, reply, tokens, cost}; the caller (the glue) verifies the branch was
-    actually produced and grades it."""
+    `profile_overlay` is the capability profile's persona block injected at {PROFILE} (Phase 5)
+    and `model` its rail-resolved tier ('' = account default); a profile changes ONLY persona +
+    model — never the toolset/sandbox/frozen surface/gates. Returns {branch, reply, tokens,
+    cost}; the caller (the glue) verifies the branch was actually produced and grades it."""
     sw = config.load_config().get("super_worker", {}) or {}
     settings = sw.get("settings", "user")            # full instance: agora + diary + MCP loaded
     tools = DEVELOPER_TOOLS + tuple(sw.get("extra_tools") or ())   # + chrome-devtools (config)
@@ -276,12 +279,14 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
     prompt = (_load_prompt("developer")
               .replace("{TASK}", task)
               .replace("{MEMORY}", memory)
+              .replace("{PROFILE}", profile_overlay or "(generalist — no specialization)")
               .replace("{BRANCH}", branch)
               .replace("{TEST_CMD}", test_cmd)
               .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))
     reply, tokens, cost = claude_super(
         prompt, workdir=clone_dir, allowed_tools=tools, as_user=as_user,
-        claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout)
+        claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout,
+        model=model)
     return {"branch": branch, "reply": reply, "tokens": tokens, "cost": cost}
 
 
