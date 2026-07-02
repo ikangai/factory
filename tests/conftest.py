@@ -13,6 +13,22 @@ import pytest
 from factory.common.store import Blackboard
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_killswitch(tmp_path_factory, monkeypatch):
+    """Isolate every test from the REAL kill switch.
+
+    `killswitch.is_halted()` reads `FACTORY_ROOT/STOP` (a hardcoded path), so an
+    operator brake engaged for a live shift would leak into the suite — halting the
+    develop/code-round/acceptance tests that don't monkeypatch it and depend on STOP
+    being absent. Point `stop_flag_path` at a fresh per-test tmp file: `is_halted`
+    defaults False, `engage`/`release` still work (test_killswitch routes through the
+    same path), and tests that exercise STOP re-monkeypatch `is_halted` and win. The
+    real STOP file is never touched, so a live brake stays engaged during test runs."""
+    from factory.common import killswitch
+    stop = tmp_path_factory.mktemp("ks") / "STOP"
+    monkeypatch.setattr(killswitch, "stop_flag_path", lambda: str(stop))
+
+
 @pytest.fixture
 def store(tmp_path):
     """A suite-wide isolated, schema-initialized blackboard on a temp-dir DB.
