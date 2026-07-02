@@ -536,10 +536,13 @@ class Blackboard:
         rows): engagements, merged/blocked counts (notes = the verdict), tokens, cost — the
         workforce-evolution signal (Task 5.7). est_accuracy is layered on in reporting.timesheets
         (it needs the per-task est join)."""
+        # 'halted' is a STOP-brake artifact (the task is requeued, not failed), so it counts
+        # toward engagements + spend but NOT as a blocked failure — else a mid-round STOP would
+        # phantom-fail a healthy profile and could drive a wrongful retire.
         return self._all(
             "SELECT profile, COUNT(*) AS engagements, "
             "SUM(CASE WHEN notes='merged' THEN 1 ELSE 0 END) AS merged, "
-            "SUM(CASE WHEN notes NOT IN ('merged','') THEN 1 ELSE 0 END) AS blocked, "
+            "SUM(CASE WHEN notes NOT IN ('merged','','halted') THEN 1 ELSE 0 END) AS blocked, "
             "COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(cost),0) AS cost "
             "FROM budget_ledger WHERE role_or_run LIKE 'developer:%' AND profile <> '' "
             "GROUP BY profile ORDER BY tokens DESC")

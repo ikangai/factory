@@ -66,8 +66,10 @@ def _workers_bullets(store) -> str:
     lines = []
     for p in profs:
         o = roll.get(p["name"], {})
-        eng, merged = int(o.get("engagements", 0)), int(o.get("merged", 0))
-        rate = f"{100 * merged // eng}%" if eng else "—"
+        eng, merged, blocked = (int(o.get("engagements", 0)), int(o.get("merged", 0)),
+                                int(o.get("blocked", 0)))
+        completed = merged + blocked           # rounds that reached a verdict (excludes STOP-halted)
+        rate = f"{100 * merged // completed}%" if completed else "—"
         acc = o.get("est_accuracy")
         acc_s = f"{acc:.1f}x actual/est" if acc is not None else "no est data"
         lines.append(f"- {p['name']} [{p.get('model') or 'frontier'}] — {(p.get('description') or '')[:60]}; "

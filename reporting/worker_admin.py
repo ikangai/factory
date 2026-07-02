@@ -34,7 +34,10 @@ def validate_add(name: str, model: str, overlay: str) -> str | None:
 
 def cap_error(store, name: str, cfg: dict | None = None) -> str | None:
     """Return an error if adding a NEW active profile would exceed the cap, else None. generalist
-    doesn't count (it's the fail-open default). Re-adding an already-active name is not a new slot."""
+    never counts (it's the fail-open default — re-adding it to tune the persona is always allowed).
+    Re-adding an already-active name is not a new slot."""
+    if name == "generalist":
+        return None
     active = {p["name"] for p in store.list_profiles(active_only=True) if p["name"] != "generalist"}
     if name not in active and len(active) >= max_profiles(cfg):
         return f"active profile cap reached ({max_profiles(cfg)}) — retire one first"
@@ -42,8 +45,11 @@ def cap_error(store, name: str, cfg: dict | None = None) -> str | None:
 
 
 def retire_error(store, name: str) -> str | None:
-    """Return an error if `retire` should be refused, else None. generalist is rejected first
-    (checked before the lookup, since get_profile always synthesizes it)."""
+    """Return an error if `retire` should be refused, else None. An empty name is rejected first
+    (get_profile('') synthesizes the generalist and would otherwise pass the None-check, so a bare
+    `worker retire` would 0-row-update and print a bogus success). generalist is unretireable."""
+    if not (name or "").strip():
+        return "usage: worker retire <name>"
     if name == "generalist":
         return "generalist cannot be retired (the fail-open default must exist)"
     if store.get_profile(name) is None:

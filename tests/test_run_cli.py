@@ -205,6 +205,11 @@ def test_cmd_worker_add_list_retire_and_guardrails(tmp_path, capsys):
             orchestrator.cmd_worker(s, "retire", rest=["generalist"])
         assert "generalist cannot be retired" in capsys.readouterr().out
 
+        # a bare `worker retire` (no name) errors — it must not 0-row bogus-succeed (review #5)
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "retire", rest=[])
+        assert "usage: worker retire" in capsys.readouterr().out
+
         # retire the specialist → gone from the active bench
         orchestrator.cmd_worker(s, "retire", rest=["python-dev"])
         capsys.readouterr()
@@ -224,6 +229,9 @@ def test_cmd_worker_add_respects_the_active_cap(tmp_path, capsys, monkeypatch):
             orchestrator.cmd_worker(s, "add", rest=["p3"], model="standard")
         out = capsys.readouterr().out
         assert "cap reached" in out and "retire one first" in out
+        # …but re-adding generalist to tune its persona is ALWAYS allowed (never counts) — review #4
+        orchestrator.cmd_worker(s, "add", rest=["generalist"], overlay="tuned default")
+        assert "generalist" in s.get_profile("generalist")["name"]
 
 
 def test_cmd_task_add_list_done(tmp_path, capsys):

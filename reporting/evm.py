@@ -26,15 +26,17 @@ from __future__ import annotations
 
 
 def _partial_fraction(rows: list[dict]) -> float:
-    """Fraction of an ACTIVE milestone earned: est-weighted when its linked tasks carry
-    estimates (Σest of done ÷ Σest of all), else plain done/total. 0 with no linked tasks."""
+    """Fraction of an ACTIVE milestone earned. Est-weighted (Σest of done ÷ Σest of all) ONLY when
+    EVERY linked task carries an estimate — a partial estimate set would let a single estimated
+    task dominate the fraction (est_all excludes unestimated tasks, so one estimated+done task
+    yields 1.0 regardless of unestimated siblings). Otherwise plain done/total. 0 with no tasks."""
     total = len(rows)
     if not total:
         return 0.0
-    est_all = sum(int(r["est_tokens"] or 0) for r in rows)
-    if est_all > 0:
+    ests = [int(r["est_tokens"] or 0) for r in rows]
+    if all(e > 0 for e in ests):                       # complete estimate coverage → est-weight
         est_done = sum(int(r["est_tokens"] or 0) for r in rows if r["status"] == "done")
-        return est_done / est_all
+        return est_done / sum(ests)
     done = sum(1 for r in rows if r["status"] == "done")
     return done / total
 
@@ -86,10 +88,12 @@ def evm(store) -> dict:
 
     # Cumulative spend-per-shift (oldest → newest). shift_spend sums a shift's WHOLE ledger, so
     # this is the total burn curve, not milestone-attributed AC — labelled as such in the UI.
+    # Iterate the WHOLE history (list_shifts defaults to the last 50) so the cumulative curve
+    # doesn't reset to 0 at the window edge on a run longer than that.
     shift_ids: list[int] = []
     ac_cumulative: list[int] = []
     cum = 0
-    for s in reversed(store.list_shifts()):
+    for s in reversed(store.list_shifts(limit=store.count_shifts() or 1)):
         cum += int(store.shift_spend(s["id"])["tokens"])
         shift_ids.append(s["id"])
         ac_cumulative.append(cum)

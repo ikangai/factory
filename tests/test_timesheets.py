@@ -57,6 +57,38 @@ def test_by_profile_rolls_up_outcomes_and_est_accuracy(store):
     assert p["est_accuracy"] == 2.0                                      # task-a actual 200 / est 100
 
 
+def test_by_profile_does_not_count_halted_as_blocked(store):
+    """Review #2: a STOP-braked ('halted') developer round is a brake artifact (the task is
+    requeued), not a failure — it counts toward engagements + spend but NOT as blocked, so a
+    mid-round STOP can't phantom-fail a healthy profile."""
+    sid = store.start_shift(token_budget=1)
+    store.add_task("task-h", "h", source="research")
+    store.add_budget("developer:task-h", 400, 0.0, shift_id=sid, notes="halted", profile="python-dev")
+    store.add_budget("developer:task-h", 600, 0.0, shift_id=sid, notes="merged", profile="python-dev")
+
+    p = {r["profile"]: r for r in timesheets.by_profile(store)}["python-dev"]
+    assert p["merged"] == 1 and p["blocked"] == 0        # halted excluded from failures
+    assert p["engagements"] == 2 and p["tokens"] == 1000  # …but its spend still counts
+
+
+def test_est_accuracy_skips_tasks_split_across_profiles(store):
+    """Review #6: a task reassigned across profiles has PARTIAL per-profile actuals but the FULL
+    task est on each row — so it's excluded from est_accuracy (ambiguous). A sole-worker task
+    still yields a ratio."""
+    sid = store.start_shift(token_budget=1)
+    store.add_task("split", "s", source="research")
+    store.set_task_estimate("split", 1000)
+    store.add_budget("developer:split", 400, 0.0, shift_id=sid, notes="halted", profile="python-dev")
+    store.add_budget("developer:split", 600, 0.0, shift_id=sid, notes="merged", profile="ts-dev")
+    store.add_task("solo", "x", source="research")
+    store.set_task_estimate("solo", 100)
+    store.add_budget("developer:solo", 200, 0.0, shift_id=sid, notes="merged", profile="ts-dev")
+
+    roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+    assert roll["python-dev"]["est_accuracy"] is None      # split task → ambiguous, skipped
+    assert roll["ts-dev"]["est_accuracy"] == 2.0           # only the sole-worker 'solo' counts (200/100)
+
+
 def test_by_agent_rolls_up_the_whole_ledger_incl_legacy(store):
     a = store.start_shift(token_budget=1)
     store.add_budget("conductor", 100, 0.01, shift_id=a)
