@@ -273,6 +273,27 @@ def test_fleet_server_timesheets_endpoint(monkeypatch):
         httpd.shutdown()
 
 
+def test_fleet_server_evm_endpoint(monkeypatch):
+    """Task 4.2: GET /api/evm serves evm(store) — the totals + per-milestone breakdown."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "evm_state",
+                        lambda: {"pv": 300_000, "ev": 200_000, "ac_tokens": 70_000,
+                                 "cpi": 2.857, "milestones": [{"id": 1, "title": "M1"}]})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/evm").read())
+        assert out["pv"] == 300_000 and out["milestones"][0]["title"] == "M1"
+    finally:
+        httpd.shutdown()
+
+
 def test_fleet_server_mission_editor(monkeypatch, tmp_path):
     """Task 1.2: POST /api/mission validates (1..2000 chars) and applies via _set_mission
     (which rewrites MISSION.md + sets the store mission). Empty/oversize → 400."""

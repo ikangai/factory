@@ -733,6 +733,28 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
               f"${float(a['cost']):>8.2f}  {(a['seconds'] or 0) / 60:>7.1f} min")
 
 
+def cmd_evm(store: Blackboard) -> None:
+    """Agent-adapted EVM: the PV/EV/AC/CPI/%-complete totals, the per-milestone breakdown, and
+    the estimate-vs-actual list (the conductor's plan-revision feedback signal). Overhead
+    (conductor/research spend) is reported separately, never smeared across milestones."""
+    from ..reporting import evm as evmmod
+    e = evmmod.evm(store)
+    cpi = f"{e['cpi']:.2f}" if e["cpi"] is not None else "—"
+    pct = f"{e['percent_complete'] * 100:.0f}%" if e["percent_complete"] is not None else "—"
+    print(f"EVM  PV {e['pv']:,}  EV {e['ev']:,}  AC {e['ac_tokens']:,} tok  CPI {cpi}  "
+          f"complete {pct}  overhead {e['overhead_tokens']:,} tok (${e['overhead_cost']:.2f})")
+    print(f"{'id':>4}  {'status':<10}  {'title':<30}  {'PV':>10}  {'EV':>10}  {'AC':>10}  prog")
+    for m in e["milestones"]:
+        pr = m["progress"]
+        print(f"{m['id']:>4}  {m['status']:<10}  {m['title'][:30]:<30}  {m['pv']:>10,}  "
+              f"{m['ev']:>10,}  {m['ac_tokens']:>10,}  {pr['done']}/{pr['total']}")
+    if e["estimates"]:
+        print("\nestimate vs actual:")
+        for r in e["estimates"]:
+            ratio = (r["actual"] / r["est"]) if r["est"] else 0
+            print(f"  {r['task'][:22]:<22}  est {r['est']:>10,}  actual {r['actual']:>10,}  ({ratio:.1f}x)")
+
+
 _MILESTONE_STATUS = ("planned", "active", "delivered", "dropped")
 
 
@@ -1442,6 +1464,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsh = sub.add_parser("timesheet")       # agent timesheets — engagements + per-role rollup
     tsh.add_argument("--shift", type=int, default=None, help="filter to one shift")
     tsh.add_argument("--limit", type=int, default=200)
+    sub.add_parser("evm")                   # agent-adapted earned value over the plan + ledger
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -1562,6 +1585,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                      status=a.status, profile=a.profile)
         elif a.cmd == "timesheet":
             cmd_timesheet(store, shift=a.shift, limit=a.limit)
+        elif a.cmd == "evm":
+            cmd_evm(store)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

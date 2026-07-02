@@ -43,6 +43,13 @@ def timesheets_state() -> dict:
         return {"rows": timesheets.timesheet(store), "by_agent": timesheets.by_agent(store)}
 
 
+def evm_state() -> dict:
+    from ..reporting import evm
+    with Blackboard() as store:
+        store.init_db()
+        return evm.evm(store)
+
+
 def _set_mission(statement: str) -> dict:
     """Apply a mission steer from the board: set the active mission in a FRESH per-request store
     (ground rule 2 — never share a store across handler threads), THEN rewrite MISSION.md's
@@ -77,7 +84,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(page, "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
         api = {"/api/fleet": fleet_state, "/api/plan": plan_state,
-               "/api/timesheets": timesheets_state}
+               "/api/timesheets": timesheets_state, "/api/evm": evm_state}
         if path in api:
             try:
                 body = json.dumps(api[path](), default=str).encode("utf-8")

@@ -158,6 +158,25 @@ def test_cmd_timesheet_prints_rows_and_rollup(tmp_path, capsys):
     assert "per-role" in out                          # the rollup section rendered
 
 
+def test_cmd_evm_prints_totals_and_milestones(tmp_path, capsys):
+    """Task 4.2: the evm CLI shows the totals line, the per-milestone table and the
+    estimate-vs-actual list (a task with both an estimate and ledgered actuals)."""
+    with _store(tmp_path) as s:
+        sid = s.start_shift(token_budget=1)
+        mid = s.add_milestone("recovery corpus", budget_tokens=100_000)
+        s.set_milestone_status(mid, "delivered")
+        s.add_task("task-e1", "slice one", source="research")
+        s.set_task_milestone("task-e1", mid)
+        s.set_task_estimate("task-e1", 80_000)
+        s.set_task_status("task-e1", "done", result="x")
+        s.add_budget("developer:task-e1", 40_000, 0.4, shift_id=sid, notes="merged")
+        orchestrator.cmd_evm(s)
+        out = capsys.readouterr().out
+    assert "EVM" in out and "PV" in out and "CPI" in out
+    assert "recovery corpus" in out
+    assert "estimate vs actual" in out and "task-e1" in out
+
+
 def test_cmd_task_add_list_done(tmp_path, capsys):
     with _store(tmp_path) as s:
         orchestrator.cmd_task(s, "add", rest="fix the thing", source="worker")
