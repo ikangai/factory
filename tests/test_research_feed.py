@@ -33,6 +33,20 @@ def test_propose_directions_adds_research_tasks_dedupes_and_consumes_digests(tmp
         assert s.unconsumed_digests() == []                           # the loop closed
 
 
+def test_propose_directions_ledgers_researcher_spend(tmp_path, monkeypatch):
+    """Task 0.5: the research refill records its own tokens/cost against the current shift
+    (previously discarded as _tokens/_cost)."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda *a, **k: ('```json\n{"directions":[]}\n```', 900, 0.09))
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        sh = s.start_shift(token_budget=1)
+        research_feed.propose_directions(s)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "researcher"]
+    assert len(rows) == 1 and rows[0]["tokens"] == 900 and rows[0]["cost"] == 0.09
+    assert rows[0]["shift_id"] == sh
+
+
 def test_propose_directions_uses_the_web_researcher_toolset(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(common, "claude_super",
