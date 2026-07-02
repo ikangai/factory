@@ -27,6 +27,12 @@ def fleet_state() -> dict:
         return fleet_viz.fleet_json(store)
 
 
+def plan_state() -> list:
+    with Blackboard() as store:
+        store.init_db()
+        return fleet_viz.plan_list(store)
+
+
 def _set_mission(statement: str) -> dict:
     """Apply a mission steer from the board: rewrite MISSION.md's ## Mission (durable, so it
     survives the next run-start sync) and set the active mission in a FRESH per-request store
@@ -61,6 +67,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fleet":
             try:
                 body = json.dumps(fleet_state(), default=str).encode("utf-8")
+            except Exception as e:  # noqa: BLE001
+                return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            return self._send(200, body, "application/json")
+        if path == "/api/plan":
+            try:
+                body = json.dumps(plan_state(), default=str).encode("utf-8")
             except Exception as e:  # noqa: BLE001
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
             return self._send(200, body, "application/json")

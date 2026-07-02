@@ -191,6 +191,44 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
         httpd.shutdown()
 
 
+def test_fleet_json_includes_the_plan(tmp_path, monkeypatch):
+    """Task 2.5: fleet_json carries the plan (milestones + progress) for the Plan tab."""
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        m = s.set_mission("m", target_repo="r")
+        mid = s.add_milestone("M1: recovery", mission_id=m, deliverable="corpus green",
+                              budget_tokens=800_000, planned_order=1)
+        s.add_task("t1", "slice", source="research")
+        s.set_task_milestone("t1", mid)
+        s.set_task_status("t1", "done", result="abc")
+        j = fleet_viz.fleet_json(s)
+    plan = j["plan"]
+    assert len(plan) == 1
+    assert plan[0]["title"] == "M1: recovery" and plan[0]["status"] == "planned"
+    assert plan[0]["budget_tokens"] == 800_000 and plan[0]["deliverable"] == "corpus green"
+    assert plan[0]["progress"] == {"done": 1, "total": 1}
+
+
+def test_fleet_server_plan_endpoint(monkeypatch):
+    """Task 2.5: GET /api/plan serves the milestone list standalone (lazy-polled by the tab)."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from factory.dashboard import fleet_server
+
+    monkeypatch.setattr(fleet_server, "plan_state",
+                        lambda: [{"id": 1, "title": "M1", "status": "active", "progress": {"done": 0, "total": 2}}])
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), fleet_server.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        out = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/plan").read())
+        assert out[0]["title"] == "M1" and out[0]["progress"]["total"] == 2
+    finally:
+        httpd.shutdown()
+
+
 def test_fleet_server_mission_editor(monkeypatch, tmp_path):
     """Task 1.2: POST /api/mission validates (1..2000 chars) and applies via _set_mission
     (which rewrites MISSION.md + sets the store mission). Empty/oversize → 400."""

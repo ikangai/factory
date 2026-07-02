@@ -129,6 +129,15 @@ def build_fleet_state(store) -> dict:
     }
 
 
+def plan_list(store) -> list[dict]:
+    """The plan (milestones + per-milestone progress) for the board's Plan tab / /api/plan."""
+    return [{"id": m["id"], "title": m["title"], "status": m["status"],
+             "deliverable": m.get("deliverable", ""), "acceptance": m.get("acceptance", ""),
+             "order": m.get("planned_order", 0), "budget_tokens": m.get("budget_tokens", 0),
+             "progress": store.milestone_progress(m["id"])}
+            for m in store.list_milestones()]
+
+
 def fleet_json(store) -> dict:
     """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
     counts, the DERIVED current loop phase, the shifts (compact), live workers, the
@@ -232,6 +241,7 @@ def fleet_json(store) -> dict:
                     "report": (s.get("report") or "")[:240]} for s in shifts],
         "mission_status": [{"status": r["status"], "shift": r.get("shift_id"),
                             "rationale": r.get("rationale", "")} for r in ms],
+        "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
         "digests": [d["summary"][:140] for d in state["digests"]],
     }
 
