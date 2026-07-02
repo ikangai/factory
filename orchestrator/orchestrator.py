@@ -864,6 +864,19 @@ def _read_mission_md() -> Optional[str]:
     return read_mission(paths.factory("MISSION.md"))
 
 
+def _seed_staffing(store: Blackboard) -> list:
+    """Ensure the target-derived worker bench exists (Task 5.2) — additive, idempotent. Best
+    effort: a config/filesystem hiccup must never break a run (the generalist fallback covers
+    dispatch regardless), and it's a tiny helper so the cmd_run tests can stub it like the
+    mission sync. Returns the profile names newly seeded this run."""
+    try:
+        from ..reporting import staffing
+        return staffing.ensure_seeded(store, config.clive_entry()[0], config.target_repo_slug())
+    except Exception as e:  # noqa: BLE001 — staffing is telemetry setup, not a run gate
+        print(f"[run] staffing skipped: {e}")
+        return []
+
+
 def _write_mission_md(statement: str) -> None:
     """Reflect an explicit --mission steer into MISSION.md so it survives the next run-start
     sync (otherwise the unchanged file would overwrite it). A tests-hookable seam."""
@@ -898,6 +911,12 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
             print(f"[run] mission re-steered from MISSION.md: {file_mission[:80]}…")
     else:                                     # an explicit --mission is durable: write it to the file
         _write_mission_md(mission)            # so the next (file-driven) run doesn't overwrite it
+
+    # The bench follows the target (Task 5.2): seed the stack specialists this target needs,
+    # additive + idempotent, before the shift dispatches by profile.
+    seeded = _seed_staffing(store)
+    if seeded:
+        print(f"[run] staffing: seeded {', '.join(seeded)} for this target")
 
     # IDLE short-circuit: if the loop has been steady for K shifts with an empty backlog and
     # the operator isn't re-steering, DON'T spawn a conductor — surface and wait. This is

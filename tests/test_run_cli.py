@@ -16,6 +16,9 @@ def _no_real_research(monkeypatch):
     monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
     monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
     monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
+    # Staffing scans the real target root + runs git for the slug — stub it (like the mission
+    # sync) so these cmd_run tests stay hermetic. A dedicated test exercises it un-stubbed.
+    monkeypatch.setattr(orchestrator, "_seed_staffing", lambda store: [])
 
 
 def _store(tmp_path):
