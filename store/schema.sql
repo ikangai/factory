@@ -146,6 +146,8 @@ CREATE TABLE IF NOT EXISTS tasks (
                  CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
     result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
     spec_json  TEXT NOT NULL DEFAULT '{}',      -- GSD typed spec: target_surface/acceptance/out_of_scope
+    est_tokens INTEGER NOT NULL DEFAULT 0,      -- conductor's effort estimate (EVM task-level PV)
+    profile    TEXT NOT NULL DEFAULT '',        -- worker_profiles.name to dispatch with ('' = generalist)
     milestone_id INTEGER REFERENCES milestones(id),  -- the plan link (EVM derives PV/EV/AC from this)
     -- the shift that last worked it. NULL until a shift picks it up; FK is safe because
     -- shifts are never DELETEd (a killed shift is UPDATEd to 'error', so it still exists).

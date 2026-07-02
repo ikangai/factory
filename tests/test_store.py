@@ -394,6 +394,14 @@ def test_milestones_crud_and_progress(store):
     assert store.list_milestones(status="delivered")[0]["id"] == mid
 
 
+def test_task_estimate_and_profile_columns(store):
+    store.add_task("task-x", "slice 1", source="research")
+    store.set_task_estimate("task-x", 60_000)
+    store.set_task_profile("task-x", "python-dev")
+    t = store.get_task("task-x")
+    assert t["est_tokens"] == 60_000 and t["profile"] == "python-dev"
+
+
 def test_budget_ledger_shift_attribution(store):
     store.add_budget("conductor", 100, 0.01, shift_id=7, seconds=12.5)
     store.add_budget("developer:task-ab", 400, 0.04, shift_id=7, profile="python-dev")

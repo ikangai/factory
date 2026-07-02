@@ -68,6 +68,10 @@ class Blackboard:
         if cols and "milestone_id" not in cols:        # the plan link (Phase 2)
             self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone_id INTEGER")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
+        if cols and "est_tokens" not in cols:          # per-task effort estimate (EVM PV)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN est_tokens INTEGER NOT NULL DEFAULT 0")
+        if cols and "profile" not in cols:             # worker-profile assignment (Phase 5)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
         # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
         bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(budget_ledger)").fetchall()}
         if bcols and "shift_id" not in bcols:
@@ -299,6 +303,16 @@ class Blackboard:
         so the scope check's verdict outlives the shift it ran in."""
         self._exec("UPDATE tasks SET spec_json = ?, updated_at = ? WHERE id = ?",
                    (json.dumps(spec or {}), now_iso(), id))
+
+    def set_task_estimate(self, id: str, est_tokens: int) -> None:
+        """The conductor's per-task effort estimate (EVM task-level PV; Phase 2/4)."""
+        self._exec("UPDATE tasks SET est_tokens = ?, updated_at = ? WHERE id = ?",
+                   (int(est_tokens), now_iso(), id))
+
+    def set_task_profile(self, id: str, profile: str) -> None:
+        """Assign the worker profile a task should dispatch with ('' = generalist; Phase 5)."""
+        self._exec("UPDATE tasks SET profile = ?, updated_at = ? WHERE id = ?",
+                   (profile, now_iso(), id))
 
     @staticmethod
     def _with_spec(row: Optional[dict]) -> Optional[dict]:
