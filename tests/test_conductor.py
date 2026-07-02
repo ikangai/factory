@@ -33,6 +33,34 @@ def test_build_conductor_prompt_carries_the_live_context(tmp_path, monkeypatch):
         assert "500,000" in p                                         # the shift budget
 
 
+def test_build_conductor_prompt_includes_the_plan(tmp_path, monkeypatch):
+    """Task 2.4: the conductor's contract renders the current plan ({PLAN}) and points at the
+    plan CLI so it maintains/estimates/revises milestones each shift."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("make clive reliable", target_repo="ikangai/clive")
+        mid = s.add_milestone("M1: recovery", mission_id=m, deliverable="corpus green",
+                              acceptance="pass 3x", budget_tokens=800_000, planned_order=1)
+        s.add_task("t1", "slice", source="research")
+        s.set_task_milestone("t1", mid)
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "M1: recovery" in p                                   # the plan is rendered
+    assert "0/1 tasks" in p or "0/1" in p                        # per-milestone progress
+    assert "plan estimate" in p and "plan link" in p             # the plan CLI is in the contract
+
+
+def test_build_conductor_prompt_empty_plan_prompts_to_draft(tmp_path, monkeypatch):
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "no plan yet" in p                                    # nudge to draft milestones
+
+
 def test_run_conductor_spawns_a_full_lead_and_parses_its_result(tmp_path, monkeypatch):
     captured = {}
 

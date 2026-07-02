@@ -31,6 +31,24 @@ def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
+def _plan_bullets(store) -> str:
+    """Render the plan (milestones + per-milestone progress + budget) for the {PLAN} seam."""
+    ms = store.list_milestones()
+    if not ms:
+        return "(no plan yet — draft 2-4 milestones with `./bin/factory plan add …`)"
+    lines = []
+    for m in ms:
+        p = store.milestone_progress(m["id"])
+        line = (f"- M{m['id']} [{m['status']}] {m['title']} — {p['done']}/{p['total']} tasks, "
+                f"budget {m['budget_tokens']:,} tok")
+        if m.get("deliverable"):
+            line += f"; deliverable: {m['deliverable']}"
+        if m.get("acceptance"):
+            line += f"; acceptance: {m['acceptance']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget: int) -> str:
     """Fill the conductor contract with this shift's live context from the store + the
     target's open GitHub issues (so planning is issue-aware, not just backlog-aware)."""
@@ -54,6 +72,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{MEMORY}", factory_memory.memory_card(store, "conductor"))
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
+            .replace("{PLAN}", _plan_bullets(store))
             .replace("{DIGESTS}", digests))
 
 
