@@ -99,7 +99,10 @@ CREATE TABLE IF NOT EXISTS budget_ledger (
     role_or_run TEXT NOT NULL,               -- 'proposer' | 'run:<run_id>' | 'judge' | ...
     tokens      INTEGER NOT NULL DEFAULT 0,
     cost        REAL NOT NULL DEFAULT 0,
-    notes       TEXT NOT NULL DEFAULT ''
+    notes       TEXT NOT NULL DEFAULT '',
+    shift_id    INTEGER,                      -- conductor-loop attribution (NULL for the old loop)
+    seconds     REAL NOT NULL DEFAULT 0,      -- wall-clock the spend took (timesheets)
+    profile     TEXT NOT NULL DEFAULT ''      -- worker profile that earned the spend (Phase 5)
 );
 
 -- Negative-safety check trips. Any high/critical severity blocks promotion.

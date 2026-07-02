@@ -378,6 +378,17 @@ def test_budget_entries_ordered_by_at(bb):
     assert [e["tokens"] for e in entries] == [10, 20]
 
 
+def test_budget_ledger_shift_attribution(store):
+    store.add_budget("conductor", 100, 0.01, shift_id=7, seconds=12.5)
+    store.add_budget("developer:task-ab", 400, 0.04, shift_id=7, profile="python-dev")
+    store.add_budget("researcher", 50, 0.005)              # no shift — old-loop style still works
+    spend = store.shift_spend(7)
+    assert spend == {"tokens": 500, "cost": 0.05, "seconds": 12.5}
+    assert store.shift_spend(99) == {"tokens": 0, "cost": 0.0, "seconds": 0.0}
+    row = store._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:task-ab'")
+    assert row["profile"] == "python-dev"
+
+
 # -- safety flags -----------------------------------------------------------
 
 def test_add_safety_flag_and_query_for_candidate(bb):

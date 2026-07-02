@@ -65,6 +65,14 @@ class Blackboard:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if cols and "spec_json" not in cols:           # tasks exists but predates the typed spec
             self.conn.execute("ALTER TABLE tasks ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}'")
+        # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
+        bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(budget_ledger)").fetchall()}
+        if bcols and "shift_id" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN shift_id INTEGER")
+        if bcols and "seconds" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN seconds REAL NOT NULL DEFAULT 0")
+        if bcols and "profile" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -214,15 +222,25 @@ class Blackboard:
 
     # -- budget -------------------------------------------------------------
     def add_budget(self, role_or_run: str, tokens: int, cost: float = 0.0,
-                   notes: str = "") -> None:
+                   notes: str = "", shift_id: Optional[int] = None,
+                   seconds: float = 0.0, profile: str = "") -> None:
         self._exec(
-            "INSERT INTO budget_ledger(at, role_or_run, tokens, cost, notes) "
-            "VALUES (?,?,?,?,?)", (now_iso(), role_or_run, tokens, cost, notes))
+            "INSERT INTO budget_ledger(at, role_or_run, tokens, cost, notes, shift_id, seconds, profile) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (now_iso(), role_or_run, tokens, cost, notes, shift_id, seconds, profile))
 
     def budget_totals(self) -> dict:
         r = self._one("SELECT COALESCE(SUM(tokens),0) AS tokens, "
                       "COALESCE(SUM(cost),0) AS cost FROM budget_ledger")
         return r or {"tokens": 0, "cost": 0}
+
+    def shift_spend(self, shift_id: int) -> dict:
+        """Total tokens/cost/seconds attributed to one shift via the ledger."""
+        r = self._one(
+            "SELECT COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(cost),0) AS cost, "
+            "COALESCE(SUM(seconds),0) AS seconds FROM budget_ledger WHERE shift_id = ?",
+            (shift_id,))
+        return r or {"tokens": 0, "cost": 0.0, "seconds": 0.0}
 
     def budget_entries(self) -> list[dict]:
         return self._all("SELECT * FROM budget_ledger ORDER BY at")
