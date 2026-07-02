@@ -338,3 +338,30 @@ def test_halted_kill_switch(monkeypatch, tmp_path):
     res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
                                     task="t", champion_scores=CHAMP, grade_fn=_good_grade)
     assert res["action"] == "halted" and ad.calls == []
+
+
+def test_no_candidate_carries_developer_spend(monkeypatch, tmp_path):
+    """Task 0.2: the developer's tokens/cost/seconds ride out on the no_candidate path
+    (previously dropped — nothing reached the ledger)."""
+    ad = FakeAdapter(changed=["x"])
+    ad._has_branch = False                     # worker produced no branch → no_candidate
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "",
+                                                "tokens": 1234, "cost": 0.05})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                    task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "no_candidate"
+    assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0
+
+
+def test_merged_result_carries_developer_spend(monkeypatch, tmp_path):
+    """Task 0.2: the merged result carries the same developer spend keys."""
+    ad = FakeAdapter(changed=["src/clive/feature.py", "tests/test_feature.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it",
+                                                "tokens": 1234, "cost": 0.05})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "main"),
+                                    task="add a thing", champion_scores=CHAMP,
+                                    grade_fn=_good_grade, label="factory/cand-x")
+    assert res["action"] == "merged"
+    assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0

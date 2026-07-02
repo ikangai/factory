@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Callable, Optional
 
@@ -229,23 +230,28 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             except Exception as e:  # noqa: BLE001
                 return {"action": "discarded", "stage": "chown", "error": str(e)}
 
+        t0 = time.monotonic()
         dev = develop_candidate(dev_clone, task=task, branch=branch,
                           test_cmd=" ".join(adapter.test_command()),
                           frozen=adapter.frozen_paths(), as_user=as_user,
                           claude_bin=claude_bin, memory=memory)
+        # Developer spend rides out on EVERY post-dispatch result path (Task 0.2) — the rail
+        # ledgers it (Task 0.3). Previously dropped: nothing reached budget_ledger.
+        spend = {"tokens": int(dev.get("tokens") or 0), "cost": float(dev.get("cost") or 0.0),
+                 "seconds": round(time.monotonic() - t0, 1)}
         # The developer can't write the factory DB from its clone (Guest-House user in prod),
         # so it emits learnings in its reply; carry them out for the MAIN thread to record.
         from ..reporting import factory_memory
         learnings = factory_memory.parse_learnings(dev.get("reply", ""))
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # NO branch
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # NO branch
         try:
             changed = adapter.changed_paths(dev_clone, base, branch)
         except subprocess.CalledProcessError:          # 2nd exit-128 site: branch exists but the diff
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # unresolvable
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # unresolvable
         if not changed:                                # the worker made no committed change
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}
 
         # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
         # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
@@ -263,6 +269,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     changed_paths=changed, label=branch, require_test=require_test)
                 res["learnings"] = learnings
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
+                res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
                 return res
             finally:
                 try:
