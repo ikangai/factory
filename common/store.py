@@ -65,6 +65,9 @@ class Blackboard:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if cols and "spec_json" not in cols:           # tasks exists but predates the typed spec
             self.conn.execute("ALTER TABLE tasks ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}'")
+        if cols and "milestone_id" not in cols:        # the plan link (Phase 2)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone_id INTEGER")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
         # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
         bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(budget_ledger)").fetchall()}
         if bcols and "shift_id" not in bcols:
@@ -366,6 +369,52 @@ class Blackboard:
         """Shifts still marked 'running'. At startup (shifts run one-at-a-time) any such
         row is a CRASHED shift — the harness kills from outside, so end_shift never ran."""
         return self._all("SELECT * FROM shifts WHERE status = 'running' ORDER BY id")
+
+    # -- milestones: the plan (conductor-maintained, revised each shift) -----
+    def add_milestone(self, title: str, *, mission_id: Optional[int] = None,
+                      deliverable: str = "", acceptance: str = "", budget_tokens: int = 0,
+                      planned_order: int = 0, created_by: str = "conductor") -> int:
+        cur = self._exec(
+            "INSERT INTO milestones(mission_id, title, deliverable, acceptance, "
+            "planned_order, budget_tokens, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (mission_id, title, deliverable, acceptance, planned_order, budget_tokens,
+             created_by, now_iso()))
+        return cur.lastrowid
+
+    def list_milestones(self, status: Optional[str] = None,
+                        mission_id: Optional[int] = None) -> list[dict]:
+        sql = "SELECT * FROM milestones"
+        conds, params = [], []
+        if status is not None:
+            conds.append("status = ?"); params.append(status)
+        if mission_id is not None:
+            conds.append("mission_id = ?"); params.append(mission_id)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY planned_order, id"
+        return self._all(sql, tuple(params))
+
+    def get_milestone(self, milestone_id: int) -> Optional[dict]:
+        return self._one("SELECT * FROM milestones WHERE id = ?", (milestone_id,))
+
+    def set_milestone_status(self, milestone_id: int, status: str) -> None:
+        """Set a milestone's status; stamp delivered_at when it is delivered."""
+        if status == "delivered":
+            self._exec("UPDATE milestones SET status = ?, delivered_at = ? WHERE id = ?",
+                       (status, now_iso(), milestone_id))
+        else:
+            self._exec("UPDATE milestones SET status = ? WHERE id = ?", (status, milestone_id))
+
+    def set_task_milestone(self, task_id: str, milestone_id: Optional[int]) -> None:
+        self._exec("UPDATE tasks SET milestone_id = ?, updated_at = ? WHERE id = ?",
+                   (milestone_id, now_iso(), task_id))
+
+    def milestone_progress(self, milestone_id: int) -> dict:
+        r = self._one(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
+            "FROM tasks WHERE milestone_id = ?", (milestone_id,))
+        return {"done": int(r["done"] or 0), "total": int(r["total"] or 0)}
 
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""

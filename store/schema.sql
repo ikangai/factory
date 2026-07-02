@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                  CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
     result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
     spec_json  TEXT NOT NULL DEFAULT '{}',      -- GSD typed spec: target_surface/acceptance/out_of_scope
+    milestone_id INTEGER REFERENCES milestones(id),  -- the plan link (EVM derives PV/EV/AC from this)
     -- the shift that last worked it. NULL until a shift picks it up; FK is safe because
     -- shifts are never DELETEd (a killed shift is UPDATEd to 'error', so it still exists).
     shift_id   INTEGER REFERENCES shifts(id),
@@ -201,6 +202,25 @@ CREATE TABLE IF NOT EXISTS learnings (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);
+
+-- The plan: conductor-maintained milestones with deliverables. Tasks link via
+-- tasks.milestone_id; EVM (reporting/evm.py) derives PV/EV/AC from these rows.
+CREATE TABLE IF NOT EXISTS milestones (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id    INTEGER REFERENCES mission(id),
+    title         TEXT NOT NULL,
+    deliverable   TEXT NOT NULL DEFAULT '',   -- the artifact/state that proves it
+    acceptance    TEXT NOT NULL DEFAULT '',   -- how the human/conductor verifies delivery
+    status        TEXT NOT NULL DEFAULT 'planned'
+                    CHECK (status IN ('planned','active','delivered','dropped')),
+    planned_order INTEGER NOT NULL DEFAULT 0, -- sequence within the mission
+    budget_tokens INTEGER NOT NULL DEFAULT 0, -- planned effort (the EVM value unit)
+    created_by    TEXT NOT NULL DEFAULT 'conductor',
+    created_at    TEXT NOT NULL,
+    delivered_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
 
 -- Auto issue-sync ledger: which (target-repo issue, graduated commit) pairs the
 -- factory has already commented/closed on, so a resume/re-run never double-posts.

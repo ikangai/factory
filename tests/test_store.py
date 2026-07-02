@@ -378,6 +378,22 @@ def test_budget_entries_ordered_by_at(bb):
     assert [e["tokens"] for e in entries] == [10, 20]
 
 
+def test_milestones_crud_and_progress(store):
+    m = store.set_mission("reliable recovery")           # milestones.mission_id is FK-checked
+    mid = store.add_milestone("M1: reliable recovery", mission_id=m,
+                              deliverable="recovery corpus green under eval",
+                              acceptance="all recovery scenarios pass 3x",
+                              budget_tokens=800_000, planned_order=1)
+    store.add_task("task-x", "slice 1", source="research")
+    store.set_task_milestone("task-x", mid)
+    store.set_task_status("task-x", "done", result="abc123")
+    ms = store.list_milestones()
+    assert ms[0]["status"] == "planned" and ms[0]["budget_tokens"] == 800_000
+    assert store.milestone_progress(mid) == {"done": 1, "total": 1}
+    store.set_milestone_status(mid, "delivered")
+    assert store.list_milestones(status="delivered")[0]["id"] == mid
+
+
 def test_budget_ledger_shift_attribution(store):
     store.add_budget("conductor", 100, 0.01, shift_id=7, seconds=12.5)
     store.add_budget("developer:task-ab", 400, 0.04, shift_id=7, profile="python-dev")
