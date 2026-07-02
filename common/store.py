@@ -477,6 +477,19 @@ class Blackboard:
             (milestone_id,))["n"]
         return {"est_tokens": int(est or 0), "actual_tokens": int(actual or 0)}
 
+    def milestone_task_rows(self, milestone_id: int) -> list[dict]:
+        """Per linked task: id, title, est_tokens, status, and the ledgered ACTUAL developer
+        tokens/cost (the developer:<task_id> rows). One query so EVM (reporting/evm.py) can do
+        est-weighted partial credit AND the est-vs-actual table without duplicating SQL — the
+        SQL stays here in the CRUD layer (the Phase 3 convention)."""
+        return self._all(
+            "SELECT t.id, t.title, t.est_tokens, t.status, "
+            "COALESCE((SELECT SUM(b.tokens) FROM budget_ledger b "
+            "          WHERE b.role_or_run = 'developer:' || t.id),0) AS actual_tokens, "
+            "COALESCE((SELECT SUM(b.cost) FROM budget_ledger b "
+            "          WHERE b.role_or_run = 'developer:' || t.id),0) AS actual_cost "
+            "FROM tasks t WHERE t.milestone_id = ? ORDER BY t.created_at", (milestone_id,))
+
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""
         if shift_id is not None:
