@@ -201,6 +201,55 @@ def test_execute_dispatches_by_profile_and_ledgers_it(tmp_path):
     s.close()
 
 
+def test_reviewer_approves_and_merges(monkeypatch, tmp_path):
+    """Phase 8: with the reviewer ON, an approve verdict merges and the review spend rides out."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('```json\n{"approve": true, "reason": "fits"}\n```', 40, 0.01))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="add x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged" and res["review_tokens"] == 40
+
+
+def test_reviewer_rejects_and_discards(monkeypatch, tmp_path):
+    """Phase 8: an explicit reject discards the candidate (stage 'review' → a blocked-task lesson)
+    and NEVER merges; the review spend still rides out for ledgering."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": false, "reason": "off scope"}', 30, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "discarded" and res["stage"] == "review" and "off scope" in res["error"]
+    assert res["review_tokens"] == 30
+    assert "merge" not in [c[0] for c in ad.calls]           # never merged a rejected candidate
+
+
+def test_reviewer_fails_open_on_transport_failure(monkeypatch, tmp_path):
+    """Phase 8: an unparseable/failed review is FAIL-OPEN — a reviewer hiccup never blocks a merge."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p", lambda prompt, **k: ("[claude -p unavailable]", 0, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"                         # fail-open → merged despite no verdict
+
+
+def test_reviewer_off_by_default_never_runs(monkeypatch, tmp_path):
+    """Phase 8 is config-gated OFF: with reviewer unset, the review transport is never invoked."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+
+    def boom(*a, **k):
+        raise AssertionError("the reviewer must not run when off")
+
+    monkeypatch.setattr(common, "claude_p", boom)
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade)   # reviewer defaults False
+    assert res["action"] == "merged" and "review_tokens" not in res
+
+
 def test_execute_threads_require_test_to_the_gate(tmp_path):
     """Task 6.1: require_test is threaded from the run entry through execute_claimed_tasks into the
     developer pipeline (so a store override can retune it) instead of being re-read from config

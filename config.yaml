@@ -144,6 +144,12 @@ super_worker:
   # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
   # it (it's the fail-open default and can't be retired).
   max_profiles: 12
+  # Phase 8 (config-gated OFF): a cheap pre-merge REVIEW gate. When true, an isolated blind
+  # claude_p (frontier tier — review is judgment) reads git diff base..branch + the task and
+  # returns {approve, reason}; a reject discards the candidate (blocked-task lesson). Fail-open
+  # on a transport/parse failure (never blocks a merge on a reviewer hiccup). Default OFF — the
+  # developer's own TDD is the primary gate; this adds an independent eye when the operator opts in.
+  reviewer: false
 
 # --- model tiers (worker routing, Phase 5) ----------------------------------
 # Worker profiles name a TIER, never a raw model id. '' = the account's default model

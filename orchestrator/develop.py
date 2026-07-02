@@ -13,6 +13,7 @@ omitted = same-user dev mode (SOFT boundary, supervised, scoped to the disposabl
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -59,7 +60,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                  real: bool = False, grade_fn: Optional[Callable] = None,
                  champion_scores: Optional[dict] = None, merge_lock=None,
                  memory: str = "", profile_overlay: str = "", model: str = "",
-                 require_test: Optional[bool] = None) -> dict:
+                 require_test: Optional[bool] = None, reviewer: bool = False) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -76,7 +77,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  champion_scores=cs, grade_fn=gf, as_user=as_user,
                                  claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
-                                 require_test=require_test)
+                                 require_test=require_test, reviewer=reviewer)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
@@ -85,7 +86,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  champion_scores=cs, grade_fn=gf,
                                  as_user=as_user, claude_bin=claude_bin, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
-                                 require_test=require_test)
+                                 require_test=require_test, reviewer=reviewer)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -97,7 +98,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           max_parallel: Optional[int] = None,
                           scope_judge: Optional[Callable] = None,
                           decomposer: Optional[Callable] = None,
-                          require_test: Optional[bool] = None) -> int:
+                          require_test: Optional[bool] = None,
+                          reviewer: bool = False) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -172,7 +174,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
                              merge_lock=merge_lock, memory=dev_card,
                              profile_overlay=prof["overlay"], model=prof["model"],
-                             require_test=require_test)
+                             require_test=require_test, reviewer=reviewer)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             return task, {"action": "error", "error": str(e)}
 
@@ -195,6 +197,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                              float(res.get("cost") or 0.0), notes=action or "",
                              shift_id=shift_id, seconds=float(res.get("seconds") or 0.0),
                              profile=profiles[task["id"]]["name"])   # Task 5.4: attribute the profile
+        if res.get("review_tokens"):                    # Phase 8: the pre-merge reviewer's own spend
+            store.add_budget("reviewer", int(res.get("review_tokens") or 0),
+                             float(res.get("review_cost") or 0.0), notes="review", shift_id=shift_id)
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
@@ -240,12 +245,37 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     return shipped
 
 
+def _review_candidate(dev_clone: str, base: str, branch: str, task: str) -> tuple:
+    """Phase 8 pre-merge review (config-gated): an ISOLATED, blind claude_p (frontier tier — review
+    is judgment; same transport as the scope/decompose judges) reads `git diff base..branch` + the
+    task and returns {approve, reason}. FAIL-OPEN — a transport OR parse failure returns
+    (None, spend) so a reviewer hiccup never blocks a merge. Returns (verdict|None, review_spend)."""
+    from ..roles.common import claude_p, _first_json_object, _load_prompt
+    try:
+        diff = subprocess.run(["git", "-C", dev_clone, "diff", f"{base}..{branch}"],
+                              capture_output=True, text=True, timeout=30).stdout[:20000]
+    except Exception:  # noqa: BLE001 — no diff (e.g. not a git clone in a test) → review empty
+        diff = ""
+    prompt = (_load_prompt("reviewer").replace("{TASK}", task)
+              .replace("{SPEC}", "(in the task above)").replace("{DIFF}", diff))
+    text, tok, cost = claude_p(prompt, timeout=180)
+    spend = {"review_tokens": int(tok or 0), "review_cost": float(cost or 0.0)}
+    raw = _first_json_object(text or "")
+    if not raw:
+        return None, spend                              # unparseable → fail-open (approve-by-default)
+    try:
+        obj = json.loads(raw)
+        return {"approve": bool(obj.get("approve")), "reason": str(obj.get("reason", ""))}, spend
+    except Exception:  # noqa: BLE001
+        return None, spend
+
+
 def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: dict,
                       grade_fn: Callable[[str], dict], as_user: Optional[str] = None,
                       claude_bin: str = "claude", label: Optional[str] = None,
                       merge_lock=None, memory: str = "",
                       profile_overlay: str = "", model: str = "",
-                      require_test: Optional[bool] = None) -> dict:
+                      require_test: Optional[bool] = None, reviewer: bool = False) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -293,6 +323,15 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         if not changed:                                # the worker made no committed change
             return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}
 
+        review_spend = {}
+        if reviewer:                                   # Phase 8: config-gated pre-merge review gate
+            verdict, review_spend = _review_candidate(dev_clone, base, branch, task)
+            if verdict is not None and not verdict["approve"]:      # an EXPLICIT reject discards it
+                return {"action": "discarded", "stage": "review",
+                        "error": ("review: " + (verdict["reason"] or "rejected"))[:180],
+                        "learnings": learnings, **spend, **review_spend}
+            # approve, OR fail-open (verdict is None on a transport/parse failure) → proceed to merge
+
         # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
         # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
         # The slow part (clone + the developer worker) already ran in parallel above.
@@ -312,11 +351,12 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 res["learnings"] = learnings
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
+                res.update(review_spend)              # the pre-merge reviewer's own spend (Phase 8)
                 return res
             except Exception as e:  # noqa: BLE001 — a fetch/worktree/grade blow-up AFTER the
                 # worker ran still spent it; carry the spend out so the rail ledgers it (Task 0.2)
                 return {"action": "error", "stage": "merge", "error": str(e)[:180],
-                        "learnings": learnings, **spend}
+                        "learnings": learnings, **spend, **review_spend}
             finally:
                 try:
                     adapter.remove_worktree(main_repo, cand_wt)
