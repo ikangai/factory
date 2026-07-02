@@ -1,14 +1,59 @@
 """The research feed (design step 4): a web researcher proposes bounded directions toward
 the mission, de-duped against the backlog, landing as source='research' tasks; consuming
 the shipped digests closes the research<->dev loop. Hermetic — claude_super injected."""
+import pytest
+
 from factory.common.store import Blackboard
+from factory.research import focus
 from factory.roles import common, research_feed
+
+
+@pytest.fixture(autouse=True)
+def _no_real_material(monkeypatch):
+    """Keep these tests hermetic: the researcher now reads MISSION.md's ## Material section
+    (FACTORY_ROOT is a real path). Default it to empty; the material tests override it."""
+    monkeypatch.setattr(focus, "read_material", lambda p: None)
 
 
 def _store(tmp_path):
     s = Blackboard(str(tmp_path / "f.db"))
     s.init_db()
     return s
+
+
+def test_propose_directions_appends_human_material(tmp_path, monkeypatch):
+    """Task 1.3: the ## Material from the human bullets reach the researcher's prompt."""
+    monkeypatch.setattr(focus, "read_material",
+                        lambda p: "- arxiv:2401.00001 tmux agents\n- github.com/acme/tool")
+    captured = {}
+
+    def fake_super(prompt, **k):
+        captured["prompt"] = prompt
+        return ('```json\n{"directions":[]}\n```', 1, 0.0)
+
+    monkeypatch.setattr(common, "claude_super", fake_super)
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.start_shift(token_budget=1)
+        research_feed.propose_directions(s)
+    assert "Material from the human" in captured["prompt"]
+    assert "arxiv:2401.00001 tmux agents" in captured["prompt"]
+    assert "github.com/acme/tool" in captured["prompt"]
+
+
+def test_propose_directions_no_material_appends_no_block(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_super(prompt, **k):
+        captured["prompt"] = prompt
+        return ('```json\n{"directions":[]}\n```', 1, 0.0)
+
+    monkeypatch.setattr(common, "claude_super", fake_super)   # read_material → None via autouse
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.start_shift(token_budget=1)
+        research_feed.propose_directions(s)
+    assert "Material from the human" not in captured["prompt"]
 
 
 def test_propose_directions_adds_research_tasks_dedupes_and_consumes_digests(tmp_path, monkeypatch):
@@ -31,6 +76,20 @@ def test_propose_directions_adds_research_tasks_dedupes_and_consumes_digests(tmp
         research = [t for t in s.list_tasks(status="open") if t["source"] == "research"]
         assert [t["title"] for t in research] == ["add bounded retry to pane reconnect"]
         assert s.unconsumed_digests() == []                           # the loop closed
+
+
+def test_propose_directions_ledgers_researcher_spend(tmp_path, monkeypatch):
+    """Task 0.5: the research refill records its own tokens/cost against the current shift
+    (previously discarded as _tokens/_cost)."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda *a, **k: ('```json\n{"directions":[]}\n```', 900, 0.09))
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        sh = s.start_shift(token_budget=1)
+        research_feed.propose_directions(s)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "researcher"]
+    assert len(rows) == 1 and rows[0]["tokens"] == 900 and rows[0]["cost"] == 0.09
+    assert rows[0]["shift_id"] == sh
 
 
 def test_propose_directions_uses_the_web_researcher_toolset(tmp_path, monkeypatch):

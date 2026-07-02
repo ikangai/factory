@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Callable, Optional
 
@@ -154,9 +155,19 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     shipped = 0                                       # close out on the MAIN thread (single-writer)
     for task, res in results:
         action = res.get("action")
+        has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
         if action != "halted":                        # a STOP-braked run is incomplete — don't
             for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable
                 factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
+        # Ledger real developer spend on EVERY path that ran the worker — including a mid-round
+        # STOP (run_code_round returns 'halted' AFTER the worker + tests ran, carrying spend)
+        # and a post-dispatch error. A bare PRE-dispatch halt carries no spend keys, so this
+        # stays a no-op there — undercounting exactly when the operator brakes is the bug.
+        if action != "halted" or has_spend:
+            store.add_budget(f"developer:{task['id']}", int(res.get("tokens") or 0),
+                             float(res.get("cost") or 0.0), notes=action or "",
+                             shift_id=shift_id, seconds=float(res.get("seconds") or 0.0))
+            # (profile left at '' here — Task 5.4 passes the real name)
         if action == "merged":
             store.set_task_status(task["id"], "done", result=res.get("merge_sha", ""),
                                   shift_id=shift_id)
@@ -229,32 +240,37 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             except Exception as e:  # noqa: BLE001
                 return {"action": "discarded", "stage": "chown", "error": str(e)}
 
+        t0 = time.monotonic()
         dev = develop_candidate(dev_clone, task=task, branch=branch,
                           test_cmd=" ".join(adapter.test_command()),
                           frozen=adapter.frozen_paths(), as_user=as_user,
                           claude_bin=claude_bin, memory=memory)
+        # Developer spend rides out on EVERY post-dispatch result path (Task 0.2) — the rail
+        # ledgers it (Task 0.3). Previously dropped: nothing reached budget_ledger.
+        spend = {"tokens": int(dev.get("tokens") or 0), "cost": float(dev.get("cost") or 0.0),
+                 "seconds": round(time.monotonic() - t0, 1)}
         # The developer can't write the factory DB from its clone (Guest-House user in prod),
         # so it emits learnings in its reply; carry them out for the MAIN thread to record.
         from ..reporting import factory_memory
         learnings = factory_memory.parse_learnings(dev.get("reply", ""))
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # NO branch
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # NO branch
         try:
             changed = adapter.changed_paths(dev_clone, base, branch)
         except subprocess.CalledProcessError:          # 2nd exit-128 site: branch exists but the diff
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}  # unresolvable
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # unresolvable
         if not changed:                                # the worker made no committed change
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings}
+            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}
 
         # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
         # factory/auto worktree shared by parallel workers, so serialize it under merge_lock.
         # The slow part (clone + the developer worker) already ran in parallel above.
         with (merge_lock or contextlib.nullcontext()):
-            adapter.fetch_candidate(main_repo, dev_clone, branch)
             cand_wt = os.path.join(work, "wt")
-            adapter.add_worktree(main_repo, cand_wt, branch)
             try:
+                adapter.fetch_candidate(main_repo, dev_clone, branch)
+                adapter.add_worktree(main_repo, cand_wt, branch)
                 require_test = bool((config.load_config().get("super_worker", {}) or {})
                                     .get("require_test", False))   # GSD spec-bound acceptance gate
                 res = code_round.run_code_round(
@@ -263,7 +279,12 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     changed_paths=changed, label=branch, require_test=require_test)
                 res["learnings"] = learnings
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
+                res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
                 return res
+            except Exception as e:  # noqa: BLE001 — a fetch/worktree/grade blow-up AFTER the
+                # worker ran still spent it; carry the spend out so the rail ledgers it (Task 0.2)
+                return {"action": "error", "stage": "merge", "error": str(e)[:180],
+                        "learnings": learnings, **spend}
             finally:
                 try:
                     adapter.remove_worktree(main_repo, cand_wt)

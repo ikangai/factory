@@ -129,6 +129,15 @@ def build_fleet_state(store) -> dict:
     }
 
 
+def plan_list(store) -> list[dict]:
+    """The plan (milestones + per-milestone progress) for the board's Plan tab / /api/plan."""
+    return [{"id": m["id"], "title": m["title"], "status": m["status"],
+             "deliverable": m.get("deliverable", ""), "acceptance": m.get("acceptance", ""),
+             "order": m.get("planned_order", 0), "budget_tokens": m.get("budget_tokens", 0),
+             "progress": store.milestone_progress(m["id"])}
+            for m in store.list_milestones()]
+
+
 def fleet_json(store) -> dict:
     """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
     counts, the DERIVED current loop phase, the shifts (compact), live workers, the
@@ -156,8 +165,14 @@ def fleet_json(store) -> dict:
     research_shipped = sum(1 for t in research if t["status"] == "done")
 
     durations = [d for d in (_shift_seconds(s) for s in shifts) if d is not None]
-    total_tokens = sum(int(s.get("tokens_used") or 0) for s in shifts)
     shipped = len(done)
+    # Ledger-wide totals + per-shift spend (Task 0.7). `shifts` is the last-N window, so the
+    # ledger is the truthful source for cumulative cost; per-shift cost comes from it too.
+    totals = store.budget_totals()
+    spend_by_shift = {s["id"]: store.shift_spend(s["id"]) for s in shifts}
+    # Cumulative tokens = ALL shifts' tokens_used (not just the window, which undercounts once
+    # history > N), reconciled with the ledger (in-flight spend not yet folded into a shift row).
+    cumulative_tokens = max(int(store.shifts_token_total()), int(totals["tokens"]))
 
     # CEO KPIs — the numbers worth watching.
     kpi = {
@@ -165,8 +180,8 @@ def fleet_json(store) -> dict:
         "shifts": len(shifts),
         "exec_seconds": int(sum(durations)),                  # total execution time
         "avg_shift_seconds": int(sum(durations) / len(durations)) if durations else 0,
-        "total_tokens": total_tokens,
-        "tokens_per_merge": int(total_tokens / shipped) if shipped else 0,   # efficiency
+        "total_tokens": cumulative_tokens,
+        "tokens_per_merge": int(cumulative_tokens / shipped) if shipped else 0,   # efficiency
         "workers_live": len(live),
         "workers_total": shipped + len(blocked),              # developer dispatches that ran to a verdict
         "research_proposed": len(research),                   # is research producing work?
@@ -174,6 +189,8 @@ def fleet_json(store) -> dict:
         "backlog_open": len(by["open"]), "in_progress": len(by["in_progress"]),
         "blocked": len(blocked),
     }
+    kpi["shifts"] = store.count_shifts()                       # true count (list is capped at N)
+    kpi["total_cost_usd"] = round(float(totals["cost"]), 2)   # the USD burn meter (Task 0.7)
     # Mission momentum — the honest "how far": are we still advancing, or converged?
     latest = ms[0]["status"] if ms else None
     verdict = {
@@ -219,11 +236,13 @@ def fleet_json(store) -> dict:
                      "working": len(research) > 0},
         "live": live,
         "shifts": [{"id": s["id"], "status": s["status"], "tokens": int(s.get("tokens_used") or 0),
+                    "cost": round(spend_by_shift[s["id"]]["cost"], 2),   # per-shift USD (Task 0.7)
                     "shipped": sum(1 for t in s["tasks"] if t["status"] == "done"),
                     "seconds": int(_shift_seconds(s) or 0),
                     "report": (s.get("report") or "")[:240]} for s in shifts],
         "mission_status": [{"status": r["status"], "shift": r.get("shift_id"),
                             "rationale": r.get("rationale", "")} for r in ms],
+        "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
         "digests": [d["summary"][:140] for d in state["digests"]],
     }
 

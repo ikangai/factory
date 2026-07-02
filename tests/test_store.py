@@ -378,6 +378,75 @@ def test_budget_entries_ordered_by_at(bb):
     assert [e["tokens"] for e in entries] == [10, 20]
 
 
+def test_milestones_crud_and_progress(store):
+    m = store.set_mission("reliable recovery")           # milestones.mission_id is FK-checked
+    mid = store.add_milestone("M1: reliable recovery", mission_id=m,
+                              deliverable="recovery corpus green under eval",
+                              acceptance="all recovery scenarios pass 3x",
+                              budget_tokens=800_000, planned_order=1)
+    store.add_task("task-x", "slice 1", source="research")
+    store.set_task_milestone("task-x", mid)
+    store.set_task_status("task-x", "done", result="abc123")
+    ms = store.list_milestones()
+    assert ms[0]["status"] == "planned" and ms[0]["budget_tokens"] == 800_000
+    assert store.milestone_progress(mid) == {"done": 1, "total": 1}
+    store.set_milestone_status(mid, "delivered")
+    assert store.list_milestones(status="delivered")[0]["id"] == mid
+
+
+def test_task_estimate_and_profile_columns(store):
+    store.add_task("task-x", "slice 1", source="research")
+    store.set_task_estimate("task-x", 60_000)
+    store.set_task_profile("task-x", "python-dev")
+    t = store.get_task("task-x")
+    assert t["est_tokens"] == 60_000 and t["profile"] == "python-dev"
+
+
+def test_milestone_effort_estimated_vs_actual(store):
+    m = store.set_mission("reliable recovery")
+    mid = store.add_milestone("M1", mission_id=m, budget_tokens=100_000)
+    store.add_task("task-a", "slice a", source="research"); store.set_task_milestone("task-a", mid)
+    store.add_task("task-b", "slice b", source="research"); store.set_task_milestone("task-b", mid)
+    store.set_task_estimate("task-a", 40_000)
+    store.set_task_estimate("task-b", 25_000)
+    sh = store.start_shift(token_budget=1)
+    store.add_budget("developer:task-a", 52_000, 0.5, shift_id=sh, notes="merged")   # actual > est
+    store.add_budget("conductor", 9_000, 0.1, shift_id=sh)                            # NOT a task row
+    eff = store.milestone_effort(mid)
+    assert eff == {"est_tokens": 65_000, "actual_tokens": 52_000}   # est = 40k+25k; actual = the dev row
+
+
+def test_shifts_token_total_sums_all_shifts(store):
+    for _ in range(3):
+        sh = store.start_shift(token_budget=1)
+        store.end_shift(sh, status="completed", tokens_used=1000)
+    assert store.shifts_token_total() == 3000
+    assert store.count_shifts() == 3
+
+
+def test_reap_orphaned_shift_folds_ledgered_spend(store):
+    """#16: a crashed shift's real ledgered spend must survive the reap — the stale in-row
+    tokens_used is usually 0, but the ledger holds the researcher/conductor rows written before
+    the kill."""
+    sh = store.start_shift(token_budget=1)                       # left 'running' (never end_shift'd)
+    store.add_budget("researcher", 300, 0.0, shift_id=sh, seconds=5)
+    store.add_budget("conductor", 200, 0.0, shift_id=sh, seconds=3)
+    reaped = store.reap_orphaned_shifts()
+    assert [r["id"] for r in reaped] == [sh]
+    assert store.last_shift()["tokens_used"] == 500              # 300 + 200, not the stale 0
+
+
+def test_budget_ledger_shift_attribution(store):
+    store.add_budget("conductor", 100, 0.01, shift_id=7, seconds=12.5)
+    store.add_budget("developer:task-ab", 400, 0.04, shift_id=7, profile="python-dev")
+    store.add_budget("researcher", 50, 0.005)              # no shift — old-loop style still works
+    spend = store.shift_spend(7)
+    assert spend == {"tokens": 500, "cost": 0.05, "seconds": 12.5}
+    assert store.shift_spend(99) == {"tokens": 0, "cost": 0.0, "seconds": 0.0}
+    row = store._one("SELECT profile FROM budget_ledger WHERE role_or_run='developer:task-ab'")
+    assert row["profile"] == "python-dev"
+
+
 # -- safety flags -----------------------------------------------------------
 
 def test_add_safety_flag_and_query_for_candidate(bb):

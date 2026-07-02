@@ -9,6 +9,7 @@ Hermetic in tests (claude_super injected); the live researcher runs only when th
 runs (no Bash/edits — it investigates and proposes, the developer fleet builds)."""
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Optional
 
@@ -74,8 +75,13 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
 
     issues = fetch_issues(mission.get("target_repo") or config.target_repo_slug())  # real filed problems
     prompt = build_research_prompt(store, mission, limit=limit, issues=issues)
+    from ..research.focus import read_material                      # human-dropped pointers (Task 1.3)
+    material = read_material(paths.factory("MISSION.md"))
+    if material:                                                    # weigh what the human handed us
+        prompt += ("\n\n## Material from the human (they dropped these — weigh them):\n" + material)
     target_root = config.get_adapter().entry()[0]         # the REAL target repo (not the parent dir)
-    reply, _tokens, _cost = common.claude_super(
+    t0 = time.monotonic()
+    reply, tokens, cost = common.claude_super(
         prompt, workdir=target_root,                      # reads the target to find real gaps
         allowed_tools=common.RESEARCHER_TOOLS,            # read + web + fan-out; NO Bash/edits
         as_user=as_user, claude_bin=claude_bin,
@@ -83,6 +89,10 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
         extra_env=common.worker_bus_env(sw.get("research_squad", "factory-research")),
         max_turns=int(sw.get("research_max_turns", 40)),
         timeout=int(sw.get("research_timeout_s", 900)))
+    # Ledger the researcher's spend (Task 0.5) before the sentinel — a failed/junk refill
+    # still consumed tokens. seconds is real wall-clock (a 15-min refill mustn't show as 0 min).
+    store.add_budget("researcher", tokens, cost, notes="research refill",
+                     shift_id=store.current_shift_id(), seconds=round(time.monotonic() - t0, 1))
 
     if reply.startswith("[claude -p"):    # transport failed/timed out — DON'T consume the
         return []                          # digests (they'd be lost); leave them for a retry

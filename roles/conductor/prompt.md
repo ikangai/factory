@@ -21,6 +21,15 @@ Resume note from the prior shift:
 Open backlog:
 {BACKLOG}
 
+## The plan — milestones toward the mission (you OWN this; revise it EVERY shift)
+Keep a short ladder of 2–5 milestones, each with a **deliverable**, an **acceptance** test,
+and a **token budget**. Revise it every shift: correct estimates the timesheet proved wrong,
+re-order or drop milestones that research or blocked work invalidated — and say WHY in your
+report. Mark a milestone `delivered` only when its acceptance is verifiably met (cite the
+evidence). Draft/repair with `./bin/factory plan add|list|status|link|estimate`.
+Current plan:
+{PLAN}
+
 Unconsumed research digests (what shipped recently — fuel for the researchers + you):
 {DIGESTS}
 
@@ -42,6 +51,10 @@ in your planning where they fit the mission):
    <the ONE file/area>. Acceptance: <observable proof, ideally a named test>>"`. A bounded
    task naming a single surface + acceptance sails through the scope check; a vague or
    multi-surface one gets split or rejected before a worker is spent on it.
+   **Estimate + assign every task you claim**: `./bin/factory plan estimate <task-id> <tokens>
+   --profile <name>` then `./bin/factory plan link <task-id> <milestone-id>`. The estimate is
+   the EVM planned value; the timesheet later shows the actual, so next shift you can correct
+   a bad estimate — that feedback loop is how the plan gets sharper.
 3. **Claim the tasks to work** — `./bin/factory task claim <id>` for each. **That is all you
    do to dispatch.** ‼️ **You do NOT run `develop-once` yourself — do not call it, do not
    background anything, do not wait.** After you finish this shift, the factory

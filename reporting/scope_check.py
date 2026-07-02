@@ -21,6 +21,17 @@ import uuid
 DECISIONS = ("pass", "split", "reject")
 
 
+def _ledger_judge_spend(store, raw, role: str, notes: str, shift_id) -> None:
+    """Ledger the spend an injected judge/decomposer reported under a reserved `_spend`
+    key (Task 0.5). No-op when the store is absent or the judge reported no spend — the
+    two judges lack a store handle, so they hand it up here where one is in scope."""
+    if store is None or not (isinstance(raw, dict) and raw.get("_spend")):
+        return
+    sp = raw["_spend"]
+    store.add_budget(role, int(sp.get("tokens") or 0), float(sp.get("cost") or 0.0),
+                     notes=notes, shift_id=shift_id, seconds=float(sp.get("seconds") or 0.0))
+
+
 def normalize_verdict(raw) -> dict:
     """Coerce a judge's raw output into {decision, reason, spec, subtasks}. Anything invalid
     → `pass` (fail-open): an unknown decision, a non-dict, or a `split` with no usable
@@ -47,9 +58,11 @@ def prefilter(store, tasks: list[dict], *, shift_id, judge) -> list[dict]:
     keep: list[dict] = []
     for t in tasks:
         try:
-            v = normalize_verdict(judge(t))
+            raw = judge(t)
         except Exception:                          # noqa: BLE001 — a judge error must not block work
-            v = {"decision": "pass", "reason": "", "spec": {}, "subtasks": []}
+            raw = {}
+        _ledger_judge_spend(store, raw, "scope_check", "scope judge", shift_id)
+        v = normalize_verdict(raw)                  # {} → pass (fail-open)
 
         if v["decision"] == "reject":
             reason = v["reason"] or "not a single bounded, landable change"
@@ -176,6 +189,7 @@ def decompose_no_candidate(store, task: dict, *, shift_id, decomposer) -> int:
         raw = decomposer(task)
     except Exception:                                  # noqa: BLE001 — never block the close-out
         return 0
+    _ledger_judge_spend(store, raw, "decompose", "decompose judge", shift_id)
     n = add_subtasks(store, raw.get("subtasks") if isinstance(raw, dict) else None)
     if n:
         from . import factory_memory
@@ -195,16 +209,21 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("decompose").replace("{TASK}", text)
+    import time
+    t0 = time.monotonic()
     try:
-        reply, _t, _c = common.claude_super(
+        reply, t, c = common.claude_super(
             prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("decompose_max_turns", 8)),
             timeout=int(sw.get("decompose_timeout_s", 240)))
         obj = common._parse_obj(reply)
-        return obj if isinstance(obj, dict) else {}
+        obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fall back
         return {}
+    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0),   # ledgered by the call site
+                     "seconds": round(time.monotonic() - t0, 1)}       # real duration (not 0 min)
+    return obj
 
 
 def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
@@ -215,13 +234,18 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("scope_check").replace("{TASK}", text)
+    import time
+    t0 = time.monotonic()
     try:
-        reply, _t, _c = common.claude_super(
+        reply, t, c = common.claude_super(
             prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("scope_check_max_turns", 6)),
             timeout=int(sw.get("scope_check_timeout_s", 180)))
         obj = common._parse_obj(reply)
-        return obj if isinstance(obj, dict) else {}
+        obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fail open
         return {}
+    obj["_spend"] = {"tokens": int(t or 0), "cost": float(c or 0.0),   # ledgered by the call site
+                     "seconds": round(time.monotonic() - t0, 1)}       # real duration (not 0 min)
+    return obj

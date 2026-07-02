@@ -99,7 +99,10 @@ CREATE TABLE IF NOT EXISTS budget_ledger (
     role_or_run TEXT NOT NULL,               -- 'proposer' | 'run:<run_id>' | 'judge' | ...
     tokens      INTEGER NOT NULL DEFAULT 0,
     cost        REAL NOT NULL DEFAULT 0,
-    notes       TEXT NOT NULL DEFAULT ''
+    notes       TEXT NOT NULL DEFAULT '',
+    shift_id    INTEGER,                      -- conductor-loop attribution (NULL for the old loop)
+    seconds     REAL NOT NULL DEFAULT 0,      -- wall-clock the spend took (timesheets)
+    profile     TEXT NOT NULL DEFAULT ''      -- worker profile that earned the spend (Phase 5)
 );
 
 -- Negative-safety check trips. Any high/critical severity blocks promotion.
@@ -143,6 +146,9 @@ CREATE TABLE IF NOT EXISTS tasks (
                  CHECK (status IN ('open','claimed','in_progress','done','dropped','blocked')),
     result     TEXT NOT NULL DEFAULT '',       -- merge sha / outcome / why-dropped
     spec_json  TEXT NOT NULL DEFAULT '{}',      -- GSD typed spec: target_surface/acceptance/out_of_scope
+    est_tokens INTEGER NOT NULL DEFAULT 0,      -- conductor's effort estimate (EVM task-level PV)
+    profile    TEXT NOT NULL DEFAULT '',        -- worker_profiles.name to dispatch with ('' = generalist)
+    milestone_id INTEGER REFERENCES milestones(id),  -- the plan link (EVM derives PV/EV/AC from this)
     -- the shift that last worked it. NULL until a shift picks it up; FK is safe because
     -- shifts are never DELETEd (a killed shift is UPDATEd to 'error', so it still exists).
     shift_id   INTEGER REFERENCES shifts(id),
@@ -198,6 +204,27 @@ CREATE TABLE IF NOT EXISTS learnings (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);
+
+-- The plan: conductor-maintained milestones with deliverables. Tasks link via
+-- tasks.milestone_id; EVM (reporting/evm.py) derives PV/EV/AC from these rows.
+CREATE TABLE IF NOT EXISTS milestones (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id    INTEGER REFERENCES mission(id),
+    title         TEXT NOT NULL,
+    deliverable   TEXT NOT NULL DEFAULT '',   -- the artifact/state that proves it
+    acceptance    TEXT NOT NULL DEFAULT '',   -- how the human/conductor verifies delivery
+    status        TEXT NOT NULL DEFAULT 'planned'
+                    CHECK (status IN ('planned','active','delivered','dropped')),
+    planned_order INTEGER NOT NULL DEFAULT 0, -- sequence within the mission
+    budget_tokens INTEGER NOT NULL DEFAULT 0, -- planned effort (the EVM value unit)
+    created_by    TEXT NOT NULL DEFAULT 'conductor',
+    created_at    TEXT NOT NULL,
+    delivered_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
+-- NOTE: idx_tasks_milestone is created in Blackboard._migrate, NOT here — on an existing DB
+-- tasks.milestone_id is added by a migration ALTER that runs AFTER this script, so indexing it
+-- here would fail with "no such column". _migrate creates it once the column is guaranteed.
 
 -- Auto issue-sync ledger: which (target-repo issue, graduated commit) pairs the
 -- factory has already commented/closed on, so a resume/re-run never double-posts.

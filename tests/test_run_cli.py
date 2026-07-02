@@ -10,9 +10,12 @@ from factory.roles import research_feed
 
 @pytest.fixture(autouse=True)
 def _no_real_research(monkeypatch):
-    """The rail now auto-refills the backlog from research; keep these cmd_run tests
-    hermetic by stubbing the researcher (no live claude -p spawn)."""
+    """Keep these cmd_run tests hermetic: stub the researcher (no live claude -p spawn) and
+    the MISSION.md sync (FACTORY_ROOT is a real path, so cmd_run would otherwise read the
+    operator's live MISSION.md). Tests exercising the sync re-monkeypatch _read_mission_md."""
     monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
+    monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
 
 
 def _store(tmp_path):
@@ -51,6 +54,108 @@ def test_cmd_run_surfaces_steady_state_after_k_quiet_shifts(tmp_path, monkeypatc
             orchestrator.cmd_run(s, conductor=quiet, token_budget=1, wall_clock_s=1, plateau_k=3)
         out = capsys.readouterr().out
         assert "steady" in out.lower() and "mission" in out.lower()         # surfaced, not silent
+
+
+def test_cmd_run_syncs_mission_from_mission_md(tmp_path, monkeypatch):
+    """Task 1.1: MISSION.md's ## Mission wins at run start (the file is the steering wheel);
+    an unchanged file never re-steers (no new mission row)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: "make clive bulletproof")
+    with _store(tmp_path) as s:
+        s.set_mission("stale store mission")                 # store says B; the file says A
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=1, wall_clock_s=1)
+        m1 = s.active_mission()
+        assert m1["statement"] == "make clive bulletproof"   # the file A steered the live loop
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=1, wall_clock_s=1)
+        m2 = s.active_mission()
+        assert m2["id"] == m1["id"]                           # unchanged file → no new steer
+
+
+def test_cmd_run_explicit_mission_beats_the_file(tmp_path, monkeypatch):
+    """Task 1.1: an explicit --mission always wins — the file sync is skipped when mission
+    is passed."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: "file mission")
+    wrote = {}
+    monkeypatch.setattr(orchestrator, "_write_mission_md",
+                        lambda statement: wrote.update(statement=statement))
+    with _store(tmp_path) as s:
+        orchestrator.cmd_run(s, mission="cli mission", conductor=_completed,
+                             token_budget=1, wall_clock_s=1)
+        assert s.active_mission()["statement"] == "cli mission"   # the flag, not the file
+        assert wrote["statement"] == "cli mission"                # …and it's made durable to MISSION.md
+
+
+def test_cmd_plan_add_list_status_and_full_id_discipline(tmp_path, capsys):
+    """Task 2.3: factory plan add/list/status/link/estimate. link/estimate enforce full-id
+    discipline — a partial task id prints '0 rows' and changes nothing (the task-claim bug class)."""
+    with _store(tmp_path) as s:
+        s.set_mission("reliable recovery")
+        orchestrator.cmd_plan(s, "add", rest=["M1: recovery"], deliverable="corpus green",
+                              acceptance="pass 3x", budget_tokens=800_000, order=1)
+        ms = s.list_milestones()
+        assert len(ms) == 1 and ms[0]["budget_tokens"] == 800_000
+        mid = ms[0]["id"]
+        capsys.readouterr()
+
+        orchestrator.cmd_plan(s, "list")
+        out = capsys.readouterr().out
+        assert "M1: recovery" in out and "0/0 tasks" in out            # progress rendered
+
+        s.add_task("task-abc12345", "slice", source="research")
+        orchestrator.cmd_plan(s, "link", rest=["task-abc", str(mid)])   # PARTIAL id → no-op
+        assert "0 rows" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] is None      # unchanged
+
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", str(mid)])  # FULL id → 1 row
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid
+
+        orchestrator.cmd_plan(s, "estimate", rest=["task-abc12345", "60000"], profile="python-dev")
+        t = s.get_task("task-abc12345")
+        assert t["est_tokens"] == 60_000 and t["profile"] == "python-dev"
+
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        assert s.list_milestones(status="delivered")[0]["id"] == mid
+
+
+def test_cmd_plan_accepts_m_id_form_and_rejects_missing_milestones(tmp_path, capsys):
+    """The write commands must take back the 'M<id>' form the tools DISPLAY (plan list / {PLAN}),
+    must NOT print a false success for a nonexistent milestone (silent-no-op bug class), and
+    estimate accepts the '60k' shorthand a conductor/human will type."""
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        mid = s.add_milestone("M1", mission_id=s.active_mission()["id"])
+        s.add_task("task-abc12345", "slice", source="research")
+        capsys.readouterr()
+
+        orchestrator.cmd_plan(s, "status", rest=[f"M{mid}", "active"])       # 'M<id>' accepted
+        assert "1 row" in capsys.readouterr().out and s.get_milestone(mid)["status"] == "active"
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", f"M{mid}"])  # 'M<id>' accepted
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid
+
+        orchestrator.cmd_plan(s, "status", rest=["999", "delivered"])        # missing → 0 rows
+        assert "0 rows" in capsys.readouterr().out and s.list_milestones(status="delivered") == []
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", "999"])      # missing → 0 rows
+        assert "0 rows" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid           # still the real link
+
+        orchestrator.cmd_plan(s, "estimate", rest=["task-abc12345", "60k"])  # '60k' shorthand
+        assert s.get_task("task-abc12345")["est_tokens"] == 60_000
+
+
+def test_cmd_timesheet_prints_rows_and_rollup(tmp_path, capsys):
+    """Task 3.2: the timesheet CLI shows the engagement + the per-role rollup."""
+    with _store(tmp_path) as s:
+        a = s.start_shift(token_budget=1)
+        s.add_task("task-a", "add retry", source="research")
+        s.add_budget("developer:task-a", 400, 0.04, shift_id=a, seconds=30,
+                     notes="merged", profile="python-dev")
+        orchestrator.cmd_timesheet(s)
+        out = capsys.readouterr().out
+    assert "developer:task-a" in out and "add retry" in out and "merged" in out
+    assert "per-role" in out                          # the rollup section rendered
 
 
 def test_cmd_task_add_list_done(tmp_path, capsys):

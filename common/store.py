@@ -65,6 +65,22 @@ class Blackboard:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if cols and "spec_json" not in cols:           # tasks exists but predates the typed spec
             self.conn.execute("ALTER TABLE tasks ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}'")
+        if cols and "milestone_id" not in cols:        # the plan link (Phase 2)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone_id INTEGER")
+        if cols and "est_tokens" not in cols:          # per-task effort estimate (EVM PV)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN est_tokens INTEGER NOT NULL DEFAULT 0")
+        if cols and "profile" not in cols:             # worker-profile assignment (Phase 5)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
+        if cols:                                        # index milestone_id AFTER it's guaranteed to exist
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
+        # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
+        bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(budget_ledger)").fetchall()}
+        if bcols and "shift_id" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN shift_id INTEGER")
+        if bcols and "seconds" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN seconds REAL NOT NULL DEFAULT 0")
+        if bcols and "profile" not in bcols:
+            self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -214,15 +230,52 @@ class Blackboard:
 
     # -- budget -------------------------------------------------------------
     def add_budget(self, role_or_run: str, tokens: int, cost: float = 0.0,
-                   notes: str = "") -> None:
+                   notes: str = "", shift_id: Optional[int] = None,
+                   seconds: float = 0.0, profile: str = "") -> None:
         self._exec(
-            "INSERT INTO budget_ledger(at, role_or_run, tokens, cost, notes) "
-            "VALUES (?,?,?,?,?)", (now_iso(), role_or_run, tokens, cost, notes))
+            "INSERT INTO budget_ledger(at, role_or_run, tokens, cost, notes, shift_id, seconds, profile) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (now_iso(), role_or_run, tokens, cost, notes, shift_id, seconds, profile))
 
     def budget_totals(self) -> dict:
         r = self._one("SELECT COALESCE(SUM(tokens),0) AS tokens, "
                       "COALESCE(SUM(cost),0) AS cost FROM budget_ledger")
         return r or {"tokens": 0, "cost": 0}
+
+    def shift_spend(self, shift_id: int) -> dict:
+        """Total tokens/cost/seconds attributed to one shift via the ledger."""
+        r = self._one(
+            "SELECT COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(cost),0) AS cost, "
+            "COALESCE(SUM(seconds),0) AS seconds FROM budget_ledger WHERE shift_id = ?",
+            (shift_id,))
+        return r or {"tokens": 0, "cost": 0.0, "seconds": 0.0}
+
+    def ledger_rows(self, limit: int = 200, shift_id: Optional[int] = None) -> list[dict]:
+        """Shift-attributed ledger engagements (conductor-loop only), newest first — the
+        timesheet source (reporting/timesheets.py shapes them; SQL stays in this CRUD layer).
+        `shift_id` filters to one shift IN THE QUERY, so `timesheet --shift N` never loses an
+        older shift's rows to the LIMIT truncation. `id DESC` breaks same-timestamp ties so
+        newest-first is deterministic even within one microsecond."""
+        if shift_id is not None:
+            return self._all(
+                "SELECT at, role_or_run, tokens, cost, seconds, notes, shift_id, profile "
+                "FROM budget_ledger WHERE shift_id = ? ORDER BY at DESC, id DESC LIMIT ?",
+                (shift_id, limit))
+        return self._all(
+            "SELECT at, role_or_run, tokens, cost, seconds, notes, shift_id, profile "
+            "FROM budget_ledger WHERE shift_id IS NOT NULL ORDER BY at DESC, id DESC LIMIT ?",
+            (limit,))
+
+    def ledger_by_role(self) -> list[dict]:
+        """All-time per-role rollup over the WHOLE ledger (incl. legacy old-loop rows),
+        highest-spend first. role = the part before ':' in role_or_run (developer:<task> → developer)."""
+        return self._all(
+            "SELECT CASE WHEN instr(role_or_run,':')>0 "
+            "         THEN substr(role_or_run,1,instr(role_or_run,':')-1) "
+            "         ELSE role_or_run END AS role, "
+            "COUNT(*) AS engagements, COALESCE(SUM(tokens),0) AS tokens, "
+            "COALESCE(SUM(cost),0) AS cost, COALESCE(SUM(seconds),0) AS seconds "
+            "FROM budget_ledger GROUP BY role ORDER BY tokens DESC")
 
     def budget_entries(self) -> list[dict]:
         return self._all("SELECT * FROM budget_ledger ORDER BY at")
@@ -278,6 +331,16 @@ class Blackboard:
         so the scope check's verdict outlives the shift it ran in."""
         self._exec("UPDATE tasks SET spec_json = ?, updated_at = ? WHERE id = ?",
                    (json.dumps(spec or {}), now_iso(), id))
+
+    def set_task_estimate(self, id: str, est_tokens: int) -> None:
+        """The conductor's per-task effort estimate (EVM task-level PV; Phase 2/4)."""
+        self._exec("UPDATE tasks SET est_tokens = ?, updated_at = ? WHERE id = ?",
+                   (int(est_tokens), now_iso(), id))
+
+    def set_task_profile(self, id: str, profile: str) -> None:
+        """Assign the worker profile a task should dispatch with ('' = generalist; Phase 5)."""
+        self._exec("UPDATE tasks SET profile = ?, updated_at = ? WHERE id = ?",
+                   (profile, now_iso(), id))
 
     @staticmethod
     def _with_spec(row: Optional[dict]) -> Optional[dict]:
@@ -335,6 +398,16 @@ class Blackboard:
         """All shifts, newest first — for the fleet view / a run history."""
         return self._all("SELECT * FROM shifts ORDER BY id DESC LIMIT ?", (limit,))
 
+    def count_shifts(self) -> int:
+        """The TRUE total shift count (the fleet view lists only the last N)."""
+        return self._one("SELECT COUNT(*) AS n FROM shifts")["n"]
+
+    def shifts_token_total(self) -> int:
+        """Cumulative tokens_used across ALL shifts — the truthful lifetime token total for
+        the board KPI (the fleet view sums only its last-N window, which undercounts once the
+        history grows beyond it)."""
+        return int(self._one("SELECT COALESCE(SUM(tokens_used),0) AS n FROM shifts")["n"])
+
     def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
         """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
         skips end_shift) still leaves a usable figure for the next shift's resume math."""
@@ -344,6 +417,65 @@ class Blackboard:
         """Shifts still marked 'running'. At startup (shifts run one-at-a-time) any such
         row is a CRASHED shift — the harness kills from outside, so end_shift never ran."""
         return self._all("SELECT * FROM shifts WHERE status = 'running' ORDER BY id")
+
+    # -- milestones: the plan (conductor-maintained, revised each shift) -----
+    def add_milestone(self, title: str, *, mission_id: Optional[int] = None,
+                      deliverable: str = "", acceptance: str = "", budget_tokens: int = 0,
+                      planned_order: int = 0, created_by: str = "conductor") -> int:
+        cur = self._exec(
+            "INSERT INTO milestones(mission_id, title, deliverable, acceptance, "
+            "planned_order, budget_tokens, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (mission_id, title, deliverable, acceptance, planned_order, budget_tokens,
+             created_by, now_iso()))
+        return cur.lastrowid
+
+    def list_milestones(self, status: Optional[str] = None,
+                        mission_id: Optional[int] = None) -> list[dict]:
+        sql = "SELECT * FROM milestones"
+        conds, params = [], []
+        if status is not None:
+            conds.append("status = ?"); params.append(status)
+        if mission_id is not None:
+            conds.append("mission_id = ?"); params.append(mission_id)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY planned_order, id"
+        return self._all(sql, tuple(params))
+
+    def get_milestone(self, milestone_id: int) -> Optional[dict]:
+        return self._one("SELECT * FROM milestones WHERE id = ?", (milestone_id,))
+
+    def set_milestone_status(self, milestone_id: int, status: str) -> None:
+        """Set a milestone's status; stamp delivered_at when it is delivered."""
+        if status == "delivered":
+            self._exec("UPDATE milestones SET status = ?, delivered_at = ? WHERE id = ?",
+                       (status, now_iso(), milestone_id))
+        else:
+            self._exec("UPDATE milestones SET status = ? WHERE id = ?", (status, milestone_id))
+
+    def set_task_milestone(self, task_id: str, milestone_id: Optional[int]) -> None:
+        self._exec("UPDATE tasks SET milestone_id = ?, updated_at = ? WHERE id = ?",
+                   (milestone_id, now_iso(), task_id))
+
+    def milestone_progress(self, milestone_id: int) -> dict:
+        r = self._one(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
+            "FROM tasks WHERE milestone_id = ?", (milestone_id,))
+        return {"done": int(r["done"] or 0), "total": int(r["total"] or 0)}
+
+    def milestone_effort(self, milestone_id: int) -> dict:
+        """Estimated vs actual tokens for a milestone's linked tasks: est = SUM(tasks.est_tokens);
+        actual = SUM(ledger tokens for those tasks' developer engagements). The estimate-vs-reality
+        signal the conductor revises the plan against (Task 2.4)."""
+        est = self._one(
+            "SELECT COALESCE(SUM(est_tokens),0) AS n FROM tasks WHERE milestone_id = ?",
+            (milestone_id,))["n"]
+        actual = self._one(
+            "SELECT COALESCE(SUM(bl.tokens),0) AS n FROM budget_ledger bl "
+            "JOIN tasks t ON bl.role_or_run = 'developer:' || t.id WHERE t.milestone_id = ?",
+            (milestone_id,))["n"]
+        return {"est_tokens": int(est or 0), "actual_tokens": int(actual or 0)}
 
     def tasks_in_flight(self, shift_id: Optional[int] = None) -> list[dict]:
         """Tasks a shift had claimed/started (and would orphan if it died)."""
@@ -381,8 +513,11 @@ class Blackboard:
         for sh in orphans:
             self.requeue_shift_tasks(sh["id"])
             note = sh["resume_note"] or f"shift {sh['id']} {reason}; reconciled on resume"
+            # The ledger holds the crashed shift's real spend (researcher/conductor rows land
+            # before the kill), so fold it in — the stale in-row figure is usually 0.
+            ledgered = int(self.shift_spend(sh["id"])["tokens"])
             self.end_shift(sh["id"], status="error", resume_note=note,
-                           tokens_used=sh["tokens_used"])
+                           tokens_used=max(int(sh["tokens_used"] or 0), ledgered))
         return orphans
 
     # -- digests: the research<->dev feedback loop --------------------------

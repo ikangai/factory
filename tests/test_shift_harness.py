@@ -29,6 +29,26 @@ def test_run_shift_happy_path(tmp_path, monkeypatch):
         assert sh["mission_id"] == s.active_mission()["id"]   # the shift served the active mission
 
 
+def test_run_shift_tokens_used_is_full_ledgered_spend(tmp_path, monkeypatch):
+    """Task 0.6: shifts.tokens_used = conductor + workers via the ledger, not the conductor's
+    self-report alone. Mirrors the real flow (both ledger themselves as of Tasks 0.3/0.4)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+
+    def cond(store, *, shift_id, mission, token_budget, wall_clock_s):
+        store.add_budget("conductor", 100, shift_id=shift_id)      # as of Task 0.4
+        return {"status": "completed", "tokens_used": 100}
+
+    def execu(store, *, shift_id):
+        store.add_budget("developer:t1", 400, shift_id=shift_id)   # as of Task 0.3
+        return 1
+
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        out = shiftmod.run_shift(s, token_budget=10_000, conductor=cond, executor=execu)
+        sh = s.last_shift()
+    assert sh["tokens_used"] == 500 and out["tokens_used"] == 500   # 100 conductor + 400 worker
+
+
 def test_run_shift_reaps_crashed_shift_before_starting(tmp_path, monkeypatch):
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
     with _store(tmp_path) as s:
@@ -104,6 +124,32 @@ def test_run_shift_timeout_is_recorded(tmp_path, monkeypatch):
 
         res = shiftmod.run_shift(s, token_budget=10, conductor=slow)
         assert res["action"] == "timed_out" and s.last_shift()["status"] == "timed_out"
+
+
+def test_run_shift_abnormal_end_reports_ledgered_spend_to_the_brake(tmp_path, monkeypatch):
+    """A conductor that spends (its own row + the refill) then dies must not close the shift with
+    tokens_used=0 — the loop's cumulative token brake would under-count on every crash/timeout."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+
+    def refill(store):
+        store.add_budget("researcher", 300, 0.0, shift_id=store.current_shift_id(), seconds=5)
+
+    for conductor_end in ("timeout", "error"):
+        s = Blackboard(str(tmp_path / f"{conductor_end}.db")); s.init_db()
+        try:
+            s.set_mission("x")
+
+            def dies(store, *, shift_id, mission, token_budget, wall_clock_s):
+                store.add_budget("conductor", 200, 0.0, shift_id=shift_id, seconds=3)
+                raise (TimeoutError() if conductor_end == "timeout" else RuntimeError("boom"))
+
+            res = shiftmod.run_shift(s, token_budget=10_000, conductor=dies,
+                                     refill=refill, refill_threshold=1)
+            sh = s.last_shift()
+        finally:
+            s.close()
+        assert res["tokens_used"] == 500 and sh["tokens_used"] == 500   # 300 refill + 200 conductor
+        assert res["action"] == ("timed_out" if conductor_end == "timeout" else "error")
 
 
 def test_run_shift_requeues_claimed_work_when_the_conductor_errors(tmp_path, monkeypatch):

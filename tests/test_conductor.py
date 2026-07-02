@@ -33,6 +33,37 @@ def test_build_conductor_prompt_carries_the_live_context(tmp_path, monkeypatch):
         assert "500,000" in p                                         # the shift budget
 
 
+def test_build_conductor_prompt_includes_the_plan(tmp_path, monkeypatch):
+    """Task 2.4: the conductor's contract renders the current plan ({PLAN}) and points at the
+    plan CLI so it maintains/estimates/revises milestones each shift."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("make clive reliable", target_repo="ikangai/clive")
+        mid = s.add_milestone("M1: recovery", mission_id=m, deliverable="corpus green",
+                              acceptance="pass 3x", budget_tokens=800_000, planned_order=1)
+        s.add_task("t1", "slice", source="research")
+        s.set_task_milestone("t1", mid)
+        s.set_task_estimate("t1", 50_000)                        # the conductor's estimate
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        s.add_budget("developer:t1", 32_000, 0.3, shift_id=cur, notes="merged")   # the ACTUAL spend
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "M1: recovery" in p                                   # the plan is rendered
+    assert "0/1 tasks" in p or "0/1" in p                        # per-milestone progress
+    assert "est 50,000 vs actual 32,000" in p                    # Task 2.4: estimates vs actuals
+    assert "plan estimate" in p and "plan link" in p             # the plan CLI is in the contract
+
+
+def test_build_conductor_prompt_empty_plan_prompts_to_draft(tmp_path, monkeypatch):
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "no plan yet" in p                                    # nudge to draft milestones
+
+
 def test_run_conductor_spawns_a_full_lead_and_parses_its_result(tmp_path, monkeypatch):
     captured = {}
 
@@ -95,6 +126,36 @@ def test_run_conductor_surfaces_a_failed_spawn_as_error_not_completed(tmp_path, 
         out = conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
                                       token_budget=1, wall_clock_s=1)
     assert out["status"] == "error" and "wall-clock" in out["resume_note"]   # honest, not a fake success
+
+
+def test_run_conductor_ledgers_its_own_spend(tmp_path, monkeypatch):
+    """Task 0.4: the conductor records its own tokens/cost/seconds against the shift
+    (the cost was previously discarded and nothing reached budget_ledger)."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: ('{"status":"completed"}', 777, 0.03))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=10)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "conductor"]
+    assert len(rows) == 1
+    assert rows[0]["tokens"] == 777 and rows[0]["cost"] == 0.03
+    assert rows[0]["shift_id"] == cur and rows[0]["seconds"] >= 0
+
+
+def test_run_conductor_ledgers_even_a_failed_spawn(tmp_path, monkeypatch):
+    """Task 0.4: a timed-out/crashed spawn still spent tokens — the single ledger call
+    sits before the sentinel branch so both return paths are covered."""
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: ("[claude -p unavailable: timeout]", 42, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=1)
+        rows = [e for e in s.budget_entries() if e["role_or_run"] == "conductor"]
+    assert len(rows) == 1 and rows[0]["tokens"] == 42 and rows[0]["shift_id"] == cur
 
 
 def test_run_conductor_is_dev_mode_same_user_by_default(tmp_path, monkeypatch):

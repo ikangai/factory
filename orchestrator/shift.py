@@ -51,12 +51,20 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
                             token_budget=token_budget, wall_clock_s=wall_clock_s) or {}
     except TimeoutError:                            # ceiling: wall-clock — killed from outside
         store.requeue_shift_tasks(sh)               # return claimed work to the backlog
-        store.end_shift(sh, status="timed_out", resume_note="conductor exceeded wall-clock")
-        return {"action": "timed_out", "shift_id": sh, "reaped": len(reaped), "shipped": 0}
+        # Spend already ledgered this shift (the refill/conductor rows) must reach the loop
+        # brake even on an abnormal end — else the token ceiling under-counts on crash/timeout.
+        spent = int(store.shift_spend(sh)["tokens"])
+        store.end_shift(sh, status="timed_out", resume_note="conductor exceeded wall-clock",
+                        tokens_used=spent)
+        return {"action": "timed_out", "shift_id": sh, "reaped": len(reaped), "shipped": 0,
+                "tokens_used": spent}
     except Exception as e:                           # noqa: BLE001 — contain a conductor blow-up
         store.requeue_shift_tasks(sh)
-        store.end_shift(sh, status="error", resume_note=f"conductor error: {e}")
-        return {"action": "error", "shift_id": sh, "reaped": len(reaped), "shipped": 0}
+        spent = int(store.shift_spend(sh)["tokens"])
+        store.end_shift(sh, status="error", resume_note=f"conductor error: {e}",
+                        tokens_used=spent)
+        return {"action": "error", "shift_id": sh, "reaped": len(reaped), "shipped": 0,
+                "tokens_used": spent}
 
     # EXECUTE the tasks the conductor claimed — deterministically, here, not via the
     # conductor's Bash (which would background + orphan the long dispatch in a headless -p).
@@ -72,8 +80,14 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     # Requeue anything STILL in-flight (the executor closes what it ran; this rescues a task
     # the conductor claimed but the executor didn't reach / a crash left dangling).
     store.requeue_shift_tasks(sh)
+    # tokens_used = the honest full shift spend (conductor + workers + aux roles) from the
+    # ledger, not the conductor's self-report alone (Task 0.6). max() keeps the old behavior
+    # when nothing is ledgered (hermetic tests). NOTE: the loop's cumulative token_budget
+    # ceiling now counts worker spend too, so cmd_run_loop's brake trips sooner — by design.
+    ledgered = store.shift_spend(sh)["tokens"]
+    tokens_total = max(int(outcome.get("tokens_used", 0)), int(ledgered))
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
-                    tokens_used=outcome.get("tokens_used", 0))
+                    tokens_used=tokens_total)
     return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped,
-            "tokens_used": outcome.get("tokens_used", 0)}   # for the loop's cumulative ceiling
+            "tokens_used": tokens_total}   # for the loop's cumulative ceiling

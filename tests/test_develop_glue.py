@@ -338,3 +338,100 @@ def test_halted_kill_switch(monkeypatch, tmp_path):
     res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
                                     task="t", champion_scores=CHAMP, grade_fn=_good_grade)
     assert res["action"] == "halted" and ad.calls == []
+
+
+def test_rail_ledgers_every_developer_dispatch(tmp_path):
+    """Task 0.3: the rail records tokens/cost/seconds per task, per shift, for every
+    non-halted verdict — merged and no_candidate ledgered, halted NOT (nothing ran)."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db")); s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for tid, title in [("m", "merge me"), ("n", "no cand"), ("h", "halt me")]:
+        s.add_task(tid, title, source="issue")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+    def fake(text, **k):
+        if "merge me" in text:
+            return {"action": "merged", "merge_sha": "abc", "tokens": 500, "cost": 0.02, "seconds": 3.0}
+        if "no cand" in text:
+            return {"action": "no_candidate", "tokens": 120, "cost": 0.006, "seconds": 1.5}
+        return {"action": "halted"}                    # a mid-flight STOP for this one worker
+
+    execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    led = {e["role_or_run"]: e for e in s.budget_entries()}
+    assert led["developer:m"]["tokens"] == 500 and led["developer:m"]["shift_id"] == sh
+    assert led["developer:m"]["cost"] == 0.02 and led["developer:m"]["seconds"] == 3.0
+    assert led["developer:n"]["tokens"] == 120 and led["developer:n"]["shift_id"] == sh
+    assert "developer:h" not in led                    # halted never ran → not ledgered
+    s.close()
+
+
+def test_rail_ledgers_a_mid_round_halt_that_spent(tmp_path):
+    """A STOP tripped DURING the round returns 'halted' AFTER the worker + tests ran, carrying
+    real spend (develop_and_merge stamps it). The rail MUST ledger it — dropping it under-counts
+    exactly when the operator brakes. A bare pre-dispatch halt (no spend) stays un-ledgered."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db")); s.init_db()
+    sh = s.start_shift(token_budget=1)
+    for tid, title in [("mid", "spent then halted"), ("pre", "halted before dispatch")]:
+        s.add_task(tid, title, source="issue")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+    def fake(text, **k):
+        if "spent then halted" in text:                # run_code_round re-checked STOP post-work
+            return {"action": "halted", "tokens": 700, "cost": 0.03, "seconds": 4.0}
+        return {"action": "halted"}                     # STOP already engaged → nothing ran
+
+    execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    led = {e["role_or_run"]: e for e in s.budget_entries()}
+    assert led["developer:mid"]["tokens"] == 700 and led["developer:mid"]["seconds"] == 4.0
+    assert led["developer:mid"]["notes"] == "halted" and led["developer:mid"]["shift_id"] == sh
+    assert "developer:pre" not in led                   # pre-dispatch halt carried no spend
+    s.close()
+
+
+def test_post_dispatch_error_carries_developer_spend(monkeypatch, tmp_path):
+    """Task 0.2: a fetch/worktree/grade blow-up AFTER the worker ran still spent it — the error
+    result must carry the spend keys so the rail ledgers real tokens, not a 0-token row."""
+    ad = FakeAdapter(changed=["src/clive/feature.py"])
+
+    def fetch_boom(*a, **k):
+        raise RuntimeError("fatal: could not fetch candidate")
+
+    ad.fetch_candidate = fetch_boom
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "",
+                                                "tokens": 900, "cost": 0.04})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                    task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "error" and res["stage"] == "merge"
+    assert res["tokens"] == 900 and res["cost"] == 0.04 and res["seconds"] >= 0
+
+
+def test_no_candidate_carries_developer_spend(monkeypatch, tmp_path):
+    """Task 0.2: the developer's tokens/cost/seconds ride out on the no_candidate path
+    (previously dropped — nothing reached the ledger)."""
+    ad = FakeAdapter(changed=["x"])
+    ad._has_branch = False                     # worker produced no branch → no_candidate
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "",
+                                                "tokens": 1234, "cost": 0.05})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                    task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "no_candidate"
+    assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0
+
+
+def test_merged_result_carries_developer_spend(monkeypatch, tmp_path):
+    """Task 0.2: the merged result carries the same developer spend keys."""
+    ad = FakeAdapter(changed=["src/clive/feature.py", "tests/test_feature.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it",
+                                                "tokens": 1234, "cost": 0.05})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "main"),
+                                    task="add a thing", champion_scores=CHAMP,
+                                    grade_fn=_good_grade, label="factory/cand-x")
+    assert res["action"] == "merged"
+    assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0

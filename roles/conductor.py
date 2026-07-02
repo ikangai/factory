@@ -11,6 +11,7 @@ Hermetic in tests: claude_super is monkeypatched, so no live agent is spawned. T
 conductor runs only when the operator runs the factory (like develop-once)."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from ..common import config, paths
@@ -28,6 +29,28 @@ _VALID_SHIFT_STATUS = {"completed", "halted", "timed_out", "budget_exhausted", "
 
 def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
+
+
+def _plan_bullets(store) -> str:
+    """Render the plan for the {PLAN} seam: per-milestone progress, budget, and — the signal
+    the conductor revises the plan against (Task 2.4) — the linked tasks' estimated vs ACTUAL
+    tokens (`./bin/factory timesheet` has the per-engagement breakdown)."""
+    ms = store.list_milestones()
+    if not ms:
+        return "(no plan yet — draft 2-4 milestones with `./bin/factory plan add …`)"
+    lines = []
+    for m in ms:
+        p = store.milestone_progress(m["id"])
+        e = store.milestone_effort(m["id"])
+        line = (f"- M{m['id']} [{m['status']}] {m['title']} — {p['done']}/{p['total']} tasks, "
+                f"budget {m['budget_tokens']:,} tok, "
+                f"est {e['est_tokens']:,} vs actual {e['actual_tokens']:,} tok")
+        if m.get("deliverable"):
+            line += f"; deliverable: {m['deliverable']}"
+        if m.get("acceptance"):
+            line += f"; acceptance: {m['acceptance']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget: int) -> str:
@@ -53,6 +76,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{MEMORY}", factory_memory.memory_card(store, "conductor"))
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
+            .replace("{PLAN}", _plan_bullets(store))
             .replace("{DIGESTS}", digests))
 
 
@@ -64,7 +88,8 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
     Guest-House user for prod). Returns {status, report, resume_note, tokens_used}."""
     sw = config.load_config().get("super_worker", {}) or {}
     prompt = build_conductor_prompt(store, mission, shift_id=shift_id, token_budget=token_budget)
-    reply, tokens, _cost = common.claude_super(
+    t0 = time.monotonic()
+    reply, tokens, cost = common.claude_super(
         prompt, workdir=paths.FACTORY_ROOT,                # drives ./bin/factory from the repo root
         allowed_tools=CONDUCTOR_TOOLS,
         as_user=as_user, claude_bin=claude_bin,
@@ -72,6 +97,10 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor")},
         max_turns=int(sw.get("conductor_max_turns", 60)),  # it loops internally across the shift
         timeout=wall_clock_s)
+    # Ledger the shift lead's own spend (Task 0.4). Placed BEFORE the sentinel branch so both
+    # the failed-spawn and the normal return paths are covered by one call.
+    store.add_budget("conductor", tokens, cost, notes="shift lead",
+                     shift_id=shift_id, seconds=round(time.monotonic() - t0, 1))
     if reply.startswith("[claude -p"):    # transport sentinel: the spawn failed / timed out /
         # crashed — claude_super never raises, so WITHOUT this the shift would be mislabeled a
         # clean 'completed' with a blank resume note (the wall-clock ceiling would be dead).
