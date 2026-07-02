@@ -715,6 +715,24 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         print(f"[task] blocked {rest}")
 
 
+def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int = 200) -> None:
+    """Agent timesheet: who worked when, how long, at what spend, to what verdict — an aligned
+    table of shift-attributed engagements + the all-time per-role rollup (incl. legacy)."""
+    from ..reporting import timesheets
+    rows = timesheets.timesheet(store, limit=limit)
+    if shift is not None:
+        rows = [r for r in rows if r["shift"] == shift]
+    print(f"{'shift':>5}  {'agent':<22}  {'task':<26}  {'min':>5}  {'tokens':>8}  {'$':>7}  verdict")
+    for r in rows:
+        print(f"{r['shift'] or '':>5}  {r['agent'][:22]:<22}  {(r['task_title'] or '')[:26]:<26}  "
+              f"{(r['seconds'] or 0) / 60:>5.1f}  {int(r['tokens'] or 0):>8,}  "
+              f"{float(r['cost'] or 0):>7.3f}  {r['verdict'] or ''}")
+    print("\nall-time per-role (incl. legacy):")
+    for a in timesheets.by_agent(store):
+        print(f"  {a['role']:<16} {a['engagements']:>4} eng  {int(a['tokens']):>10,} tok  "
+              f"${float(a['cost']):>8.2f}  {(a['seconds'] or 0) / 60:>7.1f} min")
+
+
 _MILESTONE_STATUS = ("planned", "active", "delivered", "dropped")
 
 
@@ -1381,6 +1399,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     pl.add_argument("--order", type=int, default=0, help="planned_order within the mission")
     pl.add_argument("--status", default=None, help="filter for `plan list`")
     pl.add_argument("--profile", default="", help="worker profile for `plan estimate`")
+    tsh = sub.add_parser("timesheet")       # agent timesheets — engagements + per-role rollup
+    tsh.add_argument("--shift", type=int, default=None, help="filter to one shift")
+    tsh.add_argument("--limit", type=int, default=200)
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -1499,6 +1520,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_plan(store, a.action, rest=a.rest, deliverable=a.deliverable,
                      acceptance=a.acceptance, budget_tokens=a.budget_tokens, order=a.order,
                      status=a.status, profile=a.profile)
+        elif a.cmd == "timesheet":
+            cmd_timesheet(store, shift=a.shift, limit=a.limit)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

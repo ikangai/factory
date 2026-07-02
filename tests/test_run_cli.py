@@ -119,6 +119,19 @@ def test_cmd_plan_add_list_status_and_full_id_discipline(tmp_path, capsys):
         assert s.list_milestones(status="delivered")[0]["id"] == mid
 
 
+def test_cmd_timesheet_prints_rows_and_rollup(tmp_path, capsys):
+    """Task 3.2: the timesheet CLI shows the engagement + the per-role rollup."""
+    with _store(tmp_path) as s:
+        a = s.start_shift(token_budget=1)
+        s.add_task("task-a", "add retry", source="research")
+        s.add_budget("developer:task-a", 400, 0.04, shift_id=a, seconds=30,
+                     notes="merged", profile="python-dev")
+        orchestrator.cmd_timesheet(s)
+        out = capsys.readouterr().out
+    assert "developer:task-a" in out and "add retry" in out and "merged" in out
+    assert "per-role" in out                          # the rollup section rendered
+
+
 def test_cmd_task_add_list_done(tmp_path, capsys):
     with _store(tmp_path) as s:
         orchestrator.cmd_task(s, "add", rest="fix the thing", source="worker")

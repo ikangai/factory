@@ -33,6 +33,13 @@ def plan_state() -> list:
         return fleet_viz.plan_list(store)
 
 
+def timesheets_state() -> dict:
+    from ..reporting import timesheets
+    with Blackboard() as store:
+        store.init_db()
+        return {"rows": timesheets.timesheet(store), "by_agent": timesheets.by_agent(store)}
+
+
 def _set_mission(statement: str) -> dict:
     """Apply a mission steer from the board: rewrite MISSION.md's ## Mission (durable, so it
     survives the next run-start sync) and set the active mission in a FRESH per-request store
@@ -64,15 +71,11 @@ class Handler(BaseHTTPRequestHandler):
             page = os.path.join(STATIC, "fleet.html")
             with open(page, "rb") as fh:
                 return self._send(200, fh.read(), "text/html; charset=utf-8")
-        if path == "/api/fleet":
+        api = {"/api/fleet": fleet_state, "/api/plan": plan_state,
+               "/api/timesheets": timesheets_state}
+        if path in api:
             try:
-                body = json.dumps(fleet_state(), default=str).encode("utf-8")
-            except Exception as e:  # noqa: BLE001
-                return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
-            return self._send(200, body, "application/json")
-        if path == "/api/plan":
-            try:
-                body = json.dumps(plan_state(), default=str).encode("utf-8")
+                body = json.dumps(api[path](), default=str).encode("utf-8")
             except Exception as e:  # noqa: BLE001
                 return self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
             return self._send(200, body, "application/json")
