@@ -158,6 +158,10 @@ def fleet_json(store) -> dict:
     durations = [d for d in (_shift_seconds(s) for s in shifts) if d is not None]
     total_tokens = sum(int(s.get("tokens_used") or 0) for s in shifts)
     shipped = len(done)
+    # Ledger-wide totals + per-shift spend (Task 0.7). `shifts` is the last-N window, so the
+    # ledger is the truthful source for cumulative tokens/cost; per-shift cost comes from it too.
+    totals = store.budget_totals()
+    spend_by_shift = {s["id"]: store.shift_spend(s["id"]) for s in shifts}
 
     # CEO KPIs — the numbers worth watching.
     kpi = {
@@ -174,6 +178,9 @@ def fleet_json(store) -> dict:
         "backlog_open": len(by["open"]), "in_progress": len(by["in_progress"]),
         "blocked": len(blocked),
     }
+    kpi["shifts"] = store.count_shifts()                       # true count (list is capped at N)
+    kpi["total_tokens"] = max(total_tokens, int(totals["tokens"]))   # ledger is more complete
+    kpi["total_cost_usd"] = round(float(totals["cost"]), 2)   # the USD burn meter (Task 0.7)
     # Mission momentum — the honest "how far": are we still advancing, or converged?
     latest = ms[0]["status"] if ms else None
     verdict = {
@@ -219,6 +226,7 @@ def fleet_json(store) -> dict:
                      "working": len(research) > 0},
         "live": live,
         "shifts": [{"id": s["id"], "status": s["status"], "tokens": int(s.get("tokens_used") or 0),
+                    "cost": round(spend_by_shift[s["id"]]["cost"], 2),   # per-shift USD (Task 0.7)
                     "shipped": sum(1 for t in s["tasks"] if t["status"] == "done"),
                     "seconds": int(_shift_seconds(s) or 0),
                     "report": (s.get("report") or "")[:240]} for s in shifts],

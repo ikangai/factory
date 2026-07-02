@@ -105,6 +105,29 @@ def test_fleet_json_derives_phase_and_summary(tmp_path, monkeypatch):
         assert fleet_viz.fleet_json(s)["phase"] == "idle"                  # nothing running → idle
 
 
+def test_fleet_json_cost_kpi_and_per_shift_cost(tmp_path, monkeypatch):
+    """Task 0.7: USD cost KPI, TRUE shift/token totals (beyond the last-30 window), and a
+    per-shift cost — all from the shift-attributed ledger."""
+    import pytest
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        s.set_mission("m", target_repo="r")
+        a = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.add_budget("conductor", 100, 0.01, shift_id=a)
+        s.add_budget("developer:t1", 400, 0.04, shift_id=a)
+        s.end_shift(a, status="completed", tokens_used=500)
+        b = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.add_budget("conductor", 200, 0.02, shift_id=b)
+        s.end_shift(b, status="completed", tokens_used=200)
+
+        j = fleet_viz.fleet_json(s)
+    assert j["kpi"]["shifts"] == 2                                # true count
+    assert j["kpi"]["total_cost_usd"] == pytest.approx(0.07)      # ledger-wide USD
+    assert j["kpi"]["total_tokens"] >= 700
+    costs = {sh["id"]: sh["cost"] for sh in j["shifts"]}
+    assert costs[a] == pytest.approx(0.05) and costs[b] == pytest.approx(0.02)
+
+
 def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch):
     """The CEO view: KPIs (shipped/shifts/tokens/exec/workers/research), the built ledger
     (what was shipped, with shas), and a mission-momentum verdict."""

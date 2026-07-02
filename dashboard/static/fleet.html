@@ -250,6 +250,7 @@ async function tick(){
     kpi('🔄 Shifts',k.shifts||0,(d.running_shift?'shift '+d.running_shift+' running':'idle'))+
     kpi('⏱ Exec time',fmtT(k.exec_seconds||0),'avg '+fmtT(k.avg_shift_seconds||0)+'/shift')+
     kpi('🪙 Tokens',fmtN(k.total_tokens||0),(k.tokens_per_merge?fmtN(k.tokens_per_merge)+'/merge':'—'))+
+    kpi('💵 Cost','$'+(k.total_cost_usd||0).toFixed(2),'all-time burn')+
     kpi('👷 Workers',(k.workers_live||0),(k.workers_total||0)+' dispatched total')+
     kpi('🔬 Research',(k.research_proposed||0)+'→'+(k.research_shipped||0),
         (k.research_proposed>0?'<span class="good">finding work</span>':'<span class="bad">dry</span>'));
@@ -285,7 +286,7 @@ async function tick(){
   el('issues-h').textContent=iss.count?(`· ${iss.count} open · ${esc(iss.repo)} · every shift's research + planning sees these`):(iss.repo?'· none open':'· (gh/network needed)');
   el('issues').innerHTML=(iss.issues||[]).length?iss.issues.map(it=>`<div class="irow"><a class="inum" href="https://github.com/${esc(iss.repo)}/issues/${esc(it.number)}" target="_blank" rel="noopener">#${esc(it.number)}</a><span class="ititle">${esc(it.title)}</span>${it.labels?`<span class="ilbl">${esc(it.labels)}</span>`:''}</div>`).join(''):'<div class="muted">no open issues fetched (needs gh + network)</div>';
   // shifts
-  el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
+  el('shifts').innerHTML=(d.shifts||[]).length?d.shifts.map(s=>`<div class="shift-row"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep">${esc(s.report||'')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
   // research
   el('research-h').textContent=`· ${k.research_proposed||0} proposed, ${k.research_shipped||0} shipped`;
   el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';

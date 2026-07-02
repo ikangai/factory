@@ -353,6 +353,10 @@ class Blackboard:
         """All shifts, newest first — for the fleet view / a run history."""
         return self._all("SELECT * FROM shifts ORDER BY id DESC LIMIT ?", (limit,))
 
+    def count_shifts(self) -> int:
+        """The TRUE total shift count (the fleet view lists only the last N)."""
+        return self._one("SELECT COUNT(*) AS n FROM shifts")["n"]
+
     def set_shift_tokens(self, shift_id: int, tokens_used: int) -> None:
         """Keep a shift's spend current DURING the shift — so a hard ceiling-kill (which
         skips end_shift) still leaves a usable figure for the next shift's resume math."""
