@@ -67,11 +67,12 @@ class Blackboard:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN spec_json TEXT NOT NULL DEFAULT '{}'")
         if cols and "milestone_id" not in cols:        # the plan link (Phase 2)
             self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone_id INTEGER")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
         if cols and "est_tokens" not in cols:          # per-task effort estimate (EVM PV)
             self.conn.execute("ALTER TABLE tasks ADD COLUMN est_tokens INTEGER NOT NULL DEFAULT 0")
         if cols and "profile" not in cols:             # worker-profile assignment (Phase 5)
             self.conn.execute("ALTER TABLE tasks ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
+        if cols:                                        # index milestone_id AFTER it's guaranteed to exist
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
         # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
         bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(budget_ledger)").fetchall()}
         if bcols and "shift_id" not in bcols:

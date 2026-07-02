@@ -715,6 +715,68 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         print(f"[task] blocked {rest}")
 
 
+_MILESTONE_STATUS = ("planned", "active", "delivered", "dropped")
+
+
+def cmd_plan(store: Blackboard, action: str, *, rest: Optional[list] = None,
+             deliverable: str = "", acceptance: str = "", budget_tokens: int = 0,
+             order: int = 0, status: Optional[str] = None, profile: str = "") -> None:
+    """The conductor's plan lever (the persisted milestone plan):
+      plan add "<title>" [--deliverable D] [--acceptance A] [--budget-tokens N] [--order N]
+      plan list [--status planned|active|delivered|dropped]
+      plan status <milestone-id> <planned|active|delivered|dropped>
+      plan link <task-id> <milestone-id>
+      plan estimate <task-id> <est-tokens> [--profile NAME]
+    link/estimate match the task id EXACTLY and print how many rows changed — the silent-no-op
+    bug class known from `task claim` (a partial id must not print a false success)."""
+    rest = rest or []
+
+    def _need_task(task_id: str) -> bool:                      # FULL-ID discipline for link/estimate
+        if store.get_task(task_id) is None:
+            print(f"[plan] no task matches id '{task_id}' exactly — pass the full task-<hash> (0 rows)")
+            return False
+        return True
+
+    if action == "add":
+        title = rest[0] if rest else "(untitled milestone)"
+        m = store.active_mission()
+        mid = store.add_milestone(title, mission_id=(m["id"] if m else None),
+                                  deliverable=deliverable, acceptance=acceptance,
+                                  budget_tokens=budget_tokens, planned_order=order)
+        print(f"[plan] added milestone {mid}: {title}")
+    elif action == "list":
+        ms = store.list_milestones(status=status)
+        if not ms:
+            print("[plan] no plan yet — draft 2-4 milestones with `factory plan add …`")
+        for m in ms:
+            p = store.milestone_progress(m["id"])
+            print(f"M{m['id']}\t{m['status']}\t{p['done']}/{p['total']} tasks\t"
+                  f"{m['budget_tokens']:,} tok\t{m['title']}")
+    elif action == "status":
+        if len(rest) < 2 or rest[1] not in _MILESTONE_STATUS:
+            print("[plan] usage: plan status <milestone-id> <" + "|".join(_MILESTONE_STATUS) + ">")
+            return
+        store.set_milestone_status(int(rest[0]), rest[1])
+        print(f"[plan] milestone {rest[0]} → {rest[1]}")
+    elif action == "link":
+        if len(rest) < 2:
+            print("[plan] usage: plan link <task-id> <milestone-id>"); return
+        if not _need_task(rest[0]):
+            return
+        store.set_task_milestone(rest[0], int(rest[1]))
+        print(f"[plan] linked {rest[0]} → milestone {rest[1]} (1 row)")
+    elif action == "estimate":
+        if len(rest) < 2:
+            print("[plan] usage: plan estimate <task-id> <est-tokens> [--profile NAME]"); return
+        if not _need_task(rest[0]):
+            return
+        store.set_task_estimate(rest[0], int(rest[1]))
+        if profile:
+            store.set_task_profile(rest[0], profile)
+        print(f"[plan] estimated {rest[0]} at {int(rest[1]):,} tokens"
+              + (f", profile={profile}" if profile else "") + " (1 row)")
+
+
 def _read_mission_md() -> Optional[str]:
     """The `## Mission` statement from MISSION.md, normalized to one line (or None). A seam
     the run-start mission sync + its tests hook (FACTORY_ROOT is a hardcoded path)."""
@@ -1310,6 +1372,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")
+    pl = sub.add_parser("plan")             # the plan: conductor-maintained milestones
+    pl.add_argument("action", choices=["add", "list", "status", "link", "estimate"])
+    pl.add_argument("rest", nargs="*", help="title (add) / <id> [value] (status/link/estimate)")
+    pl.add_argument("--deliverable", default="", help="the artifact/state that proves a milestone")
+    pl.add_argument("--acceptance", default="", help="how delivery is verified")
+    pl.add_argument("--budget-tokens", type=int, default=0, dest="budget_tokens", help="planned effort (EVM value)")
+    pl.add_argument("--order", type=int, default=0, help="planned_order within the mission")
+    pl.add_argument("--status", default=None, help="filter for `plan list`")
+    pl.add_argument("--profile", default="", help="worker profile for `plan estimate`")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -1424,6 +1495,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
                      result=a.result, status=a.status, detail=a.detail)
+        elif a.cmd == "plan":
+            cmd_plan(store, a.action, rest=a.rest, deliverable=a.deliverable,
+                     acceptance=a.acceptance, budget_tokens=a.budget_tokens, order=a.order,
+                     status=a.status, profile=a.profile)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

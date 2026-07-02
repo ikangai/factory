@@ -222,7 +222,9 @@ CREATE TABLE IF NOT EXISTS milestones (
     delivered_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_milestones_status ON milestones(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
+-- NOTE: idx_tasks_milestone is created in Blackboard._migrate, NOT here — on an existing DB
+-- tasks.milestone_id is added by a migration ALTER that runs AFTER this script, so indexing it
+-- here would fail with "no such column". _migrate creates it once the column is guaranteed.
 
 -- Auto issue-sync ledger: which (target-repo issue, graduated commit) pairs the
 -- factory has already commented/closed on, so a resume/re-run never double-posts.

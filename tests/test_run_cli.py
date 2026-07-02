@@ -86,6 +86,39 @@ def test_cmd_run_explicit_mission_beats_the_file(tmp_path, monkeypatch):
         assert wrote["statement"] == "cli mission"                # …and it's made durable to MISSION.md
 
 
+def test_cmd_plan_add_list_status_and_full_id_discipline(tmp_path, capsys):
+    """Task 2.3: factory plan add/list/status/link/estimate. link/estimate enforce full-id
+    discipline — a partial task id prints '0 rows' and changes nothing (the task-claim bug class)."""
+    with _store(tmp_path) as s:
+        s.set_mission("reliable recovery")
+        orchestrator.cmd_plan(s, "add", rest=["M1: recovery"], deliverable="corpus green",
+                              acceptance="pass 3x", budget_tokens=800_000, order=1)
+        ms = s.list_milestones()
+        assert len(ms) == 1 and ms[0]["budget_tokens"] == 800_000
+        mid = ms[0]["id"]
+        capsys.readouterr()
+
+        orchestrator.cmd_plan(s, "list")
+        out = capsys.readouterr().out
+        assert "M1: recovery" in out and "0/0 tasks" in out            # progress rendered
+
+        s.add_task("task-abc12345", "slice", source="research")
+        orchestrator.cmd_plan(s, "link", rest=["task-abc", str(mid)])   # PARTIAL id → no-op
+        assert "0 rows" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] is None      # unchanged
+
+        orchestrator.cmd_plan(s, "link", rest=["task-abc12345", str(mid)])  # FULL id → 1 row
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_task("task-abc12345")["milestone_id"] == mid
+
+        orchestrator.cmd_plan(s, "estimate", rest=["task-abc12345", "60000"], profile="python-dev")
+        t = s.get_task("task-abc12345")
+        assert t["est_tokens"] == 60_000 and t["profile"] == "python-dev"
+
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        assert s.list_milestones(status="delivered")[0]["id"] == mid
+
+
 def test_cmd_task_add_list_done(tmp_path, capsys):
     with _store(tmp_path) as s:
         orchestrator.cmd_task(s, "add", rest="fix the thing", source="worker")
