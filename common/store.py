@@ -8,11 +8,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from . import paths
+
+# A profile slug: lowercase, starts alnum, 2–32 chars. Kept tight so a conductor-generated
+# name is always a safe table key / CLI token / filename fragment.
+_PROFILE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+
+# The generalist is the fail-open default: no persona overlay, the account's default (frontier)
+# model — i.e. today's exact dispatch behavior. get_profile('') / get_profile('generalist')
+# always resolve to this even before Task 5.2 seeds a real row, so a dispatch never crashes.
+_GENERALIST_PROFILE = {
+    "name": "generalist",
+    "description": "General-purpose developer — the default dispatch: no persona overlay, "
+                   "the account's default model.",
+    "model": "", "overlay": "", "active": 1, "created_by": "system", "created_at": "",
+}
 
 
 def now_iso() -> str:
@@ -476,6 +491,57 @@ class Blackboard:
             "JOIN tasks t ON bl.role_or_run = 'developer:' || t.id WHERE t.milestone_id = ?",
             (milestone_id,))["n"]
         return {"est_tokens": int(est or 0), "actual_tokens": int(actual or 0)}
+
+    # -- worker capability profiles: the conductor's on-demand workforce -----
+    def add_profile(self, name: str, *, description: str, model: str = "", overlay: str = "",
+                    created_by: str = "operator", replace: bool = True) -> None:
+        """Create/replace a worker capability profile (DATA only: persona overlay + model tier —
+        it can never change the toolset, sandbox, frozen surface or gates). `replace=True`
+        (the CLI/board path) reactivates+overwrites via INSERT OR REPLACE; `replace=False` (the
+        seeder) uses INSERT OR IGNORE so a re-seed can't clobber a conductor-tuned overlay or
+        resurrect a retired profile. Rejects a bad slug so a generated name is always safe."""
+        if not _PROFILE_SLUG_RE.match(name or ""):
+            raise ValueError(f"invalid profile slug {name!r} — need ^[a-z0-9][a-z0-9-]{{1,31}}$")
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        self._exec(
+            f"{verb} INTO worker_profiles(name, description, model, overlay, active, "
+            "created_by, created_at) VALUES (?,?,?,?,1,?,?)",
+            (name, description, model, overlay, created_by, now_iso()))
+
+    def get_profile(self, name: str) -> Optional[dict]:
+        """Resolve a profile by name. '' and 'generalist' ALWAYS resolve — to a synthetic
+        generalist when no row exists yet — so a dispatch with an empty/absent profile never
+        crashes pre-seed. Any other missing name returns None (the caller fails open to
+        generalist). Retired profiles still resolve (history references their names)."""
+        key = name or "generalist"
+        row = self._one("SELECT * FROM worker_profiles WHERE name = ?", (key,))
+        if row is None and key == "generalist":
+            return dict(_GENERALIST_PROFILE)
+        return row
+
+    def list_profiles(self, active_only: bool = False) -> list[dict]:
+        """Profiles, name-ordered. active_only hides retired ones (the board's live bench);
+        the full list is the timesheet/audit view. The synthetic generalist is NOT listed until
+        a real row is seeded (Task 5.2) — it exists as a fallback, not a managed profile."""
+        if active_only:
+            return self._all("SELECT * FROM worker_profiles WHERE active = 1 ORDER BY name")
+        return self._all("SELECT * FROM worker_profiles ORDER BY name")
+
+    def retire_profile(self, name: str) -> None:
+        """Deactivate a profile (never DELETE — the ledger/timesheet reference its name)."""
+        self._exec("UPDATE worker_profiles SET active = 0 WHERE name = ?", (name,))
+
+    # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
+    def get_setting(self, key: str) -> Optional[str]:
+        r = self._one("SELECT value FROM settings WHERE key = ?", (key,))
+        return r["value"] if r else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._exec("INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?,?,?)",
+                   (key, str(value), now_iso()))
+
+    def all_settings(self) -> dict:
+        return {r["key"]: r["value"] for r in self._all("SELECT key, value FROM settings")}
 
     def milestone_task_rows(self, milestone_id: int) -> list[dict]:
         """Per linked task: id, title, est_tokens, status, and the ledgered ACTUAL developer

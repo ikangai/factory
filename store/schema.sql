@@ -238,6 +238,29 @@ CREATE TABLE IF NOT EXISTS issue_sync (
     PRIMARY KEY (issue_number, commit_sha)
 );
 
+-- Worker capability profiles: the conductor's on-demand workforce. A profile is DATA
+-- (persona overlay + model tier) the rail instantiates per task — it can NEVER change the
+-- toolset, sandbox boundary, frozen surface or gates (those stay rail-fixed), so generating
+-- one at runtime is safe. Retire-not-delete: the timesheet/ledger reference profile names.
+CREATE TABLE IF NOT EXISTS worker_profiles (
+    name        TEXT PRIMARY KEY,          -- slug: 'python-dev', 'ml-expert', 'prompt-pro'
+    description TEXT NOT NULL,             -- capabilities, for the conductor + the board
+    model       TEXT NOT NULL DEFAULT '',  -- tier alias: ''|'frontier'|'standard'|'fast'
+    overlay     TEXT NOT NULL DEFAULT '',  -- persona/emphasis block injected at {PROFILE}
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT NOT NULL DEFAULT 'operator',
+    created_at  TEXT NOT NULL
+);
+
+-- Whitelisted runtime overrides (Phase 6.1, pulled forward — Task 5.2's staffing guard lives
+-- here). config.yaml stays the git-tracked defaults file; the board/CLI write bounded overrides
+-- consumed where cmd_run resolves knobs (store override → config.yaml → hardcoded default).
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,   -- e.g. 'super_worker.max_parallel' | 'staffing.seeded_for'
+    value      TEXT NOT NULL,      -- stringly; the consumer casts
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume
