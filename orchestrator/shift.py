@@ -72,8 +72,14 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     # Requeue anything STILL in-flight (the executor closes what it ran; this rescues a task
     # the conductor claimed but the executor didn't reach / a crash left dangling).
     store.requeue_shift_tasks(sh)
+    # tokens_used = the honest full shift spend (conductor + workers + aux roles) from the
+    # ledger, not the conductor's self-report alone (Task 0.6). max() keeps the old behavior
+    # when nothing is ledgered (hermetic tests). NOTE: the loop's cumulative token_budget
+    # ceiling now counts worker spend too, so cmd_run_loop's brake trips sooner — by design.
+    ledgered = store.shift_spend(sh)["tokens"]
+    tokens_total = max(int(outcome.get("tokens_used", 0)), int(ledgered))
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
                     resume_note=outcome.get("resume_note", ""),
-                    tokens_used=outcome.get("tokens_used", 0))
+                    tokens_used=tokens_total)
     return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped,
-            "tokens_used": outcome.get("tokens_used", 0)}   # for the loop's cumulative ceiling
+            "tokens_used": tokens_total}   # for the loop's cumulative ceiling

@@ -29,6 +29,26 @@ def test_run_shift_happy_path(tmp_path, monkeypatch):
         assert sh["mission_id"] == s.active_mission()["id"]   # the shift served the active mission
 
 
+def test_run_shift_tokens_used_is_full_ledgered_spend(tmp_path, monkeypatch):
+    """Task 0.6: shifts.tokens_used = conductor + workers via the ledger, not the conductor's
+    self-report alone. Mirrors the real flow (both ledger themselves as of Tasks 0.3/0.4)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+
+    def cond(store, *, shift_id, mission, token_budget, wall_clock_s):
+        store.add_budget("conductor", 100, shift_id=shift_id)      # as of Task 0.4
+        return {"status": "completed", "tokens_used": 100}
+
+    def execu(store, *, shift_id):
+        store.add_budget("developer:t1", 400, shift_id=shift_id)   # as of Task 0.3
+        return 1
+
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        out = shiftmod.run_shift(s, token_budget=10_000, conductor=cond, executor=execu)
+        sh = s.last_shift()
+    assert sh["tokens_used"] == 500 and out["tokens_used"] == 500   # 100 conductor + 400 worker
+
+
 def test_run_shift_reaps_crashed_shift_before_starting(tmp_path, monkeypatch):
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
     with _store(tmp_path) as s:
