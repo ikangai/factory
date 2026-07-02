@@ -28,3 +28,31 @@ def timesheet(store, limit: int = 200, shift_id: int | None = None) -> list[dict
 def by_agent(store) -> list[dict]:
     """All-time per-role rollup (incl. legacy old-loop rows), highest-spend first."""
     return store.ledger_by_role()
+
+
+def _median(xs: list[float]):
+    xs = sorted(xs)
+    n = len(xs)
+    if not n:
+        return None
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def by_profile(store) -> list[dict]:
+    """Per-worker-profile outcome rollup — the workforce-evolution signal (Task 5.7). For each
+    profile that has earned developer spend: {profile, engagements, merged, blocked, tokens, cost,
+    est_accuracy}. est_accuracy = median(actual/est) over the profile's tasks carrying both an
+    estimate and ledgered actuals (None when there's no est-vs-actual data point yet). This is
+    what the conductor's {WORKERS} block and the Resources tab render, making profile
+    generation/retirement INFORMED rather than decorative."""
+    ratios: dict[str, list[float]] = {}
+    for r in store.profile_task_actuals():
+        est, actual = int(r["est"] or 0), int(r["actual"] or 0)
+        if est > 0 and actual > 0:
+            ratios.setdefault(r["profile"], []).append(actual / est)
+    out = []
+    for s in store.profile_stats():
+        row = dict(s)
+        row["est_accuracy"] = _median(ratios.get(row["profile"], []))
+        out.append(row)
+    return out

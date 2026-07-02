@@ -733,6 +733,52 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
               f"${float(a['cost']):>8.2f}  {(a['seconds'] or 0) / 60:>7.1f} min")
 
 
+def cmd_worker(store: Blackboard, action: str, *, rest: Optional[list] = None,
+               description: str = "", overlay: str = "", model: str = "") -> None:
+    """The conductor's on-demand workforce lever (worker capability profiles):
+      worker list                       # profiles + active flag + per-profile spend/outcomes
+      worker add <name> --description D --overlay O [--model frontier|standard|fast]
+      worker retire <name>
+    A profile is DATA (persona overlay + model tier) only — never toolset/sandbox/frozen/gates.
+    Guardrails (slug, tier whitelist, overlay bound, active cap, generalist-unretireable) live in
+    reporting.worker_admin so the board's POST /api/worker enforces the exact same policy."""
+    from ..reporting import worker_admin, timesheets
+    rest = rest or []
+
+    if action == "list":
+        roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+        profs = store.list_profiles(active_only=False)
+        if not profs:
+            print("(no profiles yet — the bench seeds at the next `factory run`, or add one with "
+                  "`factory worker add …`)")
+            return
+        print(f"{'name':<16} {'tier':<9} {'state':<7} {'eng':>4} {'merged':>7} {'tokens':>10}  description")
+        for p in profs:
+            o = roll.get(p["name"], {})
+            tier = p.get("model") or "frontier"
+            print(f"{p['name']:<16} {tier:<9} {'active' if p['active'] else 'retired':<7} "
+                  f"{int(o.get('engagements', 0)):>4} {int(o.get('merged', 0)):>7} "
+                  f"{int(o.get('tokens', 0)):>10,}  {(p.get('description') or '')[:48]}")
+        return
+
+    name = rest[0] if rest else ""
+    if action == "add":
+        err = worker_admin.validate_add(name, model, overlay) or worker_admin.cap_error(store, name)
+        if err:
+            print(f"[worker] {err}")
+            raise SystemExit(2)
+        store.add_profile(name, description=description, overlay=overlay, model=model,
+                          created_by="conductor")
+        print(f"[worker] added profile {name} (tier {model or 'frontier'})")
+    elif action == "retire":
+        err = worker_admin.retire_error(store, name)
+        if err:
+            print(f"[worker] {err}")
+            raise SystemExit(2)
+        store.retire_profile(name)
+        print(f"[worker] retired profile {name}")
+
+
 def cmd_evm(store: Blackboard) -> None:
     """Agent-adapted EVM: the PV/EV/AC/CPI/%-complete totals, the per-milestone breakdown, and
     the estimate-vs-actual list (the conductor's plan-revision feedback signal). Overhead
@@ -1484,6 +1530,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsh.add_argument("--shift", type=int, default=None, help="filter to one shift")
     tsh.add_argument("--limit", type=int, default=200)
     sub.add_parser("evm")                   # agent-adapted earned value over the plan + ledger
+    wk = sub.add_parser("worker")           # worker capability profiles — the on-demand workforce
+    wk.add_argument("action", choices=["list", "add", "retire"])
+    wk.add_argument("rest", nargs="*", help="<name> for add/retire")
+    wk.add_argument("--description", default="", help="capabilities (for the conductor + board)")
+    wk.add_argument("--overlay", default="", help="persona/emphasis block injected at {PROFILE}")
+    wk.add_argument("--model", default="", help="tier alias: frontier|standard|fast ('' = frontier)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -1606,6 +1658,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_timesheet(store, shift=a.shift, limit=a.limit)
         elif a.cmd == "evm":
             cmd_evm(store)
+        elif a.cmd == "worker":
+            cmd_worker(store, a.action, rest=a.rest, description=a.description,
+                       overlay=a.overlay, model=a.model)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

@@ -180,6 +180,52 @@ def test_cmd_evm_prints_totals_and_milestones(tmp_path, capsys):
     assert "estimate vs actual" in out and "task-e1" in out
 
 
+def test_cmd_worker_add_list_retire_and_guardrails(tmp_path, capsys):
+    """Task 5.5: worker add/list/retire with the shared guardrails — slug + tier whitelist +
+    overlay bound + active cap, and generalist is unretireable."""
+    with _store(tmp_path) as s:
+        orchestrator.cmd_worker(s, "add", rest=["python-dev"], description="py specialist",
+                                overlay="senior python", model="standard")
+        orchestrator.cmd_worker(s, "list")
+        out = capsys.readouterr().out
+        assert "python-dev" in out and "standard" in out and "py specialist" in out
+
+        # bad tier → exit 2 + the whitelist
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["ml-expert"], model="turbo")
+        assert "unknown model tier" in capsys.readouterr().out
+
+        # bad slug → exit 2
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["Bad_Name"])
+        assert "invalid profile name" in capsys.readouterr().out
+
+        # generalist cannot be retired
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "retire", rest=["generalist"])
+        assert "generalist cannot be retired" in capsys.readouterr().out
+
+        # retire the specialist → gone from the active bench
+        orchestrator.cmd_worker(s, "retire", rest=["python-dev"])
+        capsys.readouterr()
+        assert [p["name"] for p in s.list_profiles(active_only=True)] == []
+
+
+def test_cmd_worker_add_respects_the_active_cap(tmp_path, capsys, monkeypatch):
+    """Task 5.5: `worker add` beyond super_worker.max_profiles fails with 'retire one first'
+    (generalist doesn't count against the cap)."""
+    from factory.reporting import worker_admin
+    monkeypatch.setattr(worker_admin, "max_profiles", lambda cfg=None: 2)
+    with _store(tmp_path) as s:
+        orchestrator.cmd_worker(s, "add", rest=["p1"], model="standard")
+        orchestrator.cmd_worker(s, "add", rest=["p2"], model="standard")
+        capsys.readouterr()
+        with pytest.raises(SystemExit):
+            orchestrator.cmd_worker(s, "add", rest=["p3"], model="standard")
+        out = capsys.readouterr().out
+        assert "cap reached" in out and "retire one first" in out
+
+
 def test_cmd_task_add_list_done(tmp_path, capsys):
     with _store(tmp_path) as s:
         orchestrator.cmd_task(s, "add", rest="fix the thing", source="worker")

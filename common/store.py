@@ -531,6 +531,30 @@ class Blackboard:
         """Deactivate a profile (never DELETE — the ledger/timesheet reference its name)."""
         self._exec("UPDATE worker_profiles SET active = 0 WHERE name = ?", (name,))
 
+    def profile_stats(self) -> list[dict]:
+        """Per-profile developer-outcome rollup (grouped by budget_ledger.profile over developer
+        rows): engagements, merged/blocked counts (notes = the verdict), tokens, cost — the
+        workforce-evolution signal (Task 5.7). est_accuracy is layered on in reporting.timesheets
+        (it needs the per-task est join)."""
+        return self._all(
+            "SELECT profile, COUNT(*) AS engagements, "
+            "SUM(CASE WHEN notes='merged' THEN 1 ELSE 0 END) AS merged, "
+            "SUM(CASE WHEN notes NOT IN ('merged','') THEN 1 ELSE 0 END) AS blocked, "
+            "COALESCE(SUM(tokens),0) AS tokens, COALESCE(SUM(cost),0) AS cost "
+            "FROM budget_ledger WHERE role_or_run LIKE 'developer:%' AND profile <> '' "
+            "GROUP BY profile ORDER BY tokens DESC")
+
+    def profile_task_actuals(self) -> list[dict]:
+        """Per (profile, task) actual developer tokens joined to tasks.est_tokens — reporting
+        derives each profile's estimate accuracy (median actual/est) from this. 'developer:' is
+        10 chars, so substr(...,11) is the task id."""
+        return self._all(
+            "SELECT b.profile, substr(b.role_or_run,11) AS task_id, "
+            "COALESCE(SUM(b.tokens),0) AS actual, COALESCE(MAX(t.est_tokens),0) AS est "
+            "FROM budget_ledger b LEFT JOIN tasks t ON t.id = substr(b.role_or_run,11) "
+            "WHERE b.role_or_run LIKE 'developer:%' AND b.profile <> '' "
+            "GROUP BY b.profile, task_id")
+
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:
         r = self._one("SELECT value FROM settings WHERE key = ?", (key,))

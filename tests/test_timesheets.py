@@ -38,6 +38,25 @@ def test_timesheet_shift_filter_is_applied_in_query_not_after_limit(store):
     assert [r["shift"] for r in rows] == [old] and rows[0]["tokens"] == 10
 
 
+def test_by_profile_rolls_up_outcomes_and_est_accuracy(store):
+    """Task 5.7: per-profile outcome rollup — engagements, merged/blocked, tokens, and est_accuracy
+    (median actual/est). Only developer rows with a profile count; conductor/legacy are excluded."""
+    sid = store.start_shift(token_budget=1)
+    store.add_task("task-a", "a", source="research")
+    store.set_task_estimate("task-a", 100)
+    store.add_budget("developer:task-a", 200, 0.02, shift_id=sid, notes="merged", profile="python-dev")
+    store.add_task("task-b", "b", source="research")
+    store.add_budget("developer:task-b", 50, 0.0, shift_id=sid, notes="no_candidate", profile="python-dev")
+    store.add_budget("conductor", 10, 0.0, shift_id=sid, profile="")     # not developer → excluded
+
+    roll = {r["profile"]: r for r in timesheets.by_profile(store)}
+    assert set(roll) == {"python-dev"}
+    p = roll["python-dev"]
+    assert p["engagements"] == 2 and p["merged"] == 1 and p["blocked"] == 1
+    assert p["tokens"] == 250
+    assert p["est_accuracy"] == 2.0                                      # task-a actual 200 / est 100
+
+
 def test_by_agent_rolls_up_the_whole_ledger_incl_legacy(store):
     a = store.start_shift(token_budget=1)
     store.add_budget("conductor", 100, 0.01, shift_id=a)
