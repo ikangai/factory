@@ -715,6 +715,13 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         print(f"[task] blocked {rest}")
 
 
+def _read_mission_md() -> Optional[str]:
+    """The `## Mission` statement from MISSION.md, normalized to one line (or None). A seam
+    the run-start mission sync + its tests hook (FACTORY_ROOT is a hardcoded path)."""
+    from ..research.focus import read_mission
+    return read_mission(paths.factory("MISSION.md"))
+
+
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
             real: bool = False, conductor=None, executor=None, refill=None) -> dict:
@@ -729,6 +736,17 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     token_budget = token_budget or int(auton.get("daily_token_budget", 500000))
     wall_clock_s = wall_clock_s or int(auton.get("shift_wall_clock_s", 1800))
     sw = cfg.get("super_worker", {}) or {}
+
+    # MISSION.md steers the live loop (Task 1.1): the human's file wins at every run start.
+    # An explicit --mission always beats the file; an unchanged file never re-steers (compare
+    # normalized whitespace on both sides, so a whitespace edit alone can't spawn a mission row).
+    if mission is None:
+        file_mission = _read_mission_md()
+        active = store.active_mission()
+        active_norm = " ".join(active["statement"].split()) if active else ""
+        if file_mission and file_mission != active_norm:
+            store.set_mission(file_mission)
+            print(f"[run] mission re-steered from MISSION.md: {file_mission[:80]}…")
 
     # IDLE short-circuit: if the loop has been steady for K shifts with an empty backlog and
     # the operator isn't re-steering, DON'T spawn a conductor — surface and wait. This is

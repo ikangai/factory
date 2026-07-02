@@ -10,9 +10,11 @@ from factory.roles import research_feed
 
 @pytest.fixture(autouse=True)
 def _no_real_research(monkeypatch):
-    """The rail now auto-refills the backlog from research; keep these cmd_run tests
-    hermetic by stubbing the researcher (no live claude -p spawn)."""
+    """Keep these cmd_run tests hermetic: stub the researcher (no live claude -p spawn) and
+    the MISSION.md sync (FACTORY_ROOT is a real path, so cmd_run would otherwise read the
+    operator's live MISSION.md). Tests exercising the sync re-monkeypatch _read_mission_md."""
     monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
 
 
 def _store(tmp_path):
@@ -51,6 +53,32 @@ def test_cmd_run_surfaces_steady_state_after_k_quiet_shifts(tmp_path, monkeypatc
             orchestrator.cmd_run(s, conductor=quiet, token_budget=1, wall_clock_s=1, plateau_k=3)
         out = capsys.readouterr().out
         assert "steady" in out.lower() and "mission" in out.lower()         # surfaced, not silent
+
+
+def test_cmd_run_syncs_mission_from_mission_md(tmp_path, monkeypatch):
+    """Task 1.1: MISSION.md's ## Mission wins at run start (the file is the steering wheel);
+    an unchanged file never re-steers (no new mission row)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: "make clive bulletproof")
+    with _store(tmp_path) as s:
+        s.set_mission("stale store mission")                 # store says B; the file says A
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=1, wall_clock_s=1)
+        m1 = s.active_mission()
+        assert m1["statement"] == "make clive bulletproof"   # the file A steered the live loop
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=1, wall_clock_s=1)
+        m2 = s.active_mission()
+        assert m2["id"] == m1["id"]                           # unchanged file → no new steer
+
+
+def test_cmd_run_explicit_mission_beats_the_file(tmp_path, monkeypatch):
+    """Task 1.1: an explicit --mission always wins — the file sync is skipped when mission
+    is passed."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: "file mission")
+    with _store(tmp_path) as s:
+        orchestrator.cmd_run(s, mission="cli mission", conductor=_completed,
+                             token_budget=1, wall_clock_s=1)
+        assert s.active_mission()["statement"] == "cli mission"   # the flag, not the file
 
 
 def test_cmd_task_add_list_done(tmp_path, capsys):
