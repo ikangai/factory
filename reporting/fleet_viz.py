@@ -155,6 +155,68 @@ def profiles_compact(store) -> list[dict]:
     return out
 
 
+def _briefs_staged() -> int:
+    """How many staged research briefs await conversion (crash-proof filesystem count)."""
+    try:
+        from .summary import gather_research_briefs
+        return len(gather_research_briefs())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def derive_queue(payload: dict) -> list[dict]:
+    """The Work Queue — the operator's required actions, derived from the live payload
+    (CompassAI PM grammar: start from actions, not from scattered tables). Pure and
+    hermetic: reads only the payload dict. Each action names its OWNING tab so the
+    board can open the surface where the object is acted on. Severity-ordered
+    red → amber → blue; never empty (an all-clear floor keeps the queue honest)."""
+    q: list[dict] = []
+
+    def add(id_, title, sub, severity, tab):
+        q.append({"id": id_, "title": title, "sub": sub, "severity": severity, "tab": tab})
+
+    if payload.get("halted"):
+        add("halted", "Fleet is halted (STOP engaged)",
+            "Nothing runs until you resume — the brake is yours to release.", "red", "queue")
+    if not payload.get("mission"):
+        add("mission", "Set the mission",
+            "The conductor has no direction — edit the mission in the header.", "red", "queue")
+    if payload.get("status") == "blocked":
+        add("mission_blocked", "Mission is blocked — review the backlog",
+            "The last shift verdict was 'blocked'; the fleet is stuck without you.", "red", "plan")
+    if payload.get("mode") == "auto" and not (payload.get("autopilot") or {}).get("running"):
+        add("autopilot", "Autopilot is idle in AUTO mode",
+            "The runner isn't alive — toggle the mode or check the logs.", "amber", "queue")
+    blocked = [t for t in (payload.get("backlog") or []) if t.get("status") == "blocked"]
+    for t in blocked[:5]:
+        why = (t.get("result") or "").strip()
+        add("blocked:" + str(t.get("id")), "Narrow the brief: " + str(t.get("title", "")),
+            ("Blocked — " + why) if why else "Blocked — reframe to the smallest landable slice.",
+            "amber", "plan")
+    if len(blocked) > 5:
+        add("blocked_more", f"…and {len(blocked) - 5} more blocked tasks",
+            "The rest of the blocked backlog is on the Plan tab.", "amber", "plan")
+    pings = [m for m in ((payload.get("collab") or {}).get("messages") or [])
+             if "human" in (m.get("to") or [])]
+    if pings:
+        last = pings[0]
+        add("escalation", f"@human ping from {last.get('sender', '?')} on the bus",
+            str(last.get("body", ""))[:140], "amber", "execution")
+    if payload.get("briefs_staged"):
+        add("briefs", f"{payload['briefs_staged']} staged research brief(s) await dispatch",
+            "Research proposed work the conductor hasn't converted yet.", "blue", "research")
+    if (payload.get("phase") == "idle" and not payload.get("running_shift")
+            and not payload.get("halted")):
+        add("parked", "Fleet is parked — no shift running",
+            "Run a shift (factory run) or switch the mode to AUTO.", "blue", "queue")
+    if not q:
+        add("all_clear", "All clear — the fleet needs nothing from you",
+            "No blocked work, no escalations, nothing halted.", "green", "queue")
+    rank = {"red": 0, "amber": 1, "blue": 2, "green": 3}
+    q.sort(key=lambda a: rank.get(a["severity"], 4))
+    return q
+
+
 def fleet_json(store) -> dict:
     """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
     counts, the DERIVED current loop phase, the shifts (compact), live workers, the
@@ -217,7 +279,7 @@ def fleet_json(store) -> dict:
         "reached": "Mission reached",
     }.get(latest, "Idle — no shifts run yet")
 
-    return {
+    payload = {
         "mission": m["statement"] if m else None,
         "target": (m.get("target_repo") if m else None) or None,
         "mode": _mode.read_mode(),          # AUTO (self-driving) | SHIFT (one-and-wait)
@@ -262,7 +324,12 @@ def fleet_json(store) -> dict:
         "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
         "profiles": profiles_compact(store),  # worker bench + outcomes (Resources tab; Task 5.7)
         "digests": [d["summary"][:140] for d in state["digests"]],
+        # PMO redesign: the latest shift's resume note = the Report tab's "next steps".
+        "resume_note": (shifts[0].get("resume_note") or "") if shifts else "",
+        "briefs_staged": _briefs_staged(),
     }
+    payload["queue"] = derive_queue(payload)   # the Work Queue home tab (derived actions)
+    return payload
 
 
 def live_workers() -> list[dict]:
