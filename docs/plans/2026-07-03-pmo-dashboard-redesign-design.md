@@ -56,9 +56,9 @@ RAG mapping: `advancing → On Track (green)`, `steady_state → Steady (amber)`
   - red: no mission set → set the mission (header editor)
   - amber: mode=auto but autopilot not running
   - amber: each blocked task (cap 5) → "Narrow/reframe: <title>" → Plan
-  - amber: milestone burn > budget (from /api/evm milestones on the client is NOT
-    used — the rule uses plan+spend already in the fleet payload) → Finance
   - amber: recent @human mention on the bus (best-effort, from collab messages) → Execution
+  - (milestone burn > budget is flagged on the Finance tab's milestone table
+    client-side, where /api/evm data lives — not a queue rule in v1)
   - blue: staged research briefs waiting → Research
   - blue: shift mode + idle → "Fleet is parked — run a shift or switch to Auto"
   - green: nothing needs you → "All clear"
