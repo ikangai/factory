@@ -188,10 +188,16 @@ autonomy:
   # still stops early on no-improvement / research-exhausted. Promotion is NEVER
   # automatic — candidates only ever reach 'awaiting_gate' for the human.
   daily_max_rounds: 8
-  daily_token_budget: 500000        # PER-SHIFT token guideline
+  daily_token_budget: 500000        # PER-SHIFT token budget (enforced — see enforce_shift_budget)
   # the continuous `run --loop` / autopilot ceilings (HARD brakes for unattended AUTO):
   loop_token_budget: 5000000        # stop after ~5M cumulative output tokens across shifts (0 = unlimited)
   loop_deadline_s: 14400            # …or after 4h wall-clock, whichever first (+ max_shifts=50)
+  # HARD per-shift brake (Task 0.2): once a shift's LEDGERED spend reaches its token_budget,
+  # the rail skips the executor, requeues the claimed work and ends the shift
+  # 'budget_exhausted' (a shift token_budget of 0 = unlimited, matching loop_token_budget).
+  # A BRAKE, not autonomy: defaults true and is deliberately config.yaml-only — never in
+  # SETTINGS_SPEC, so it cannot be flipped off from the board.
+  enforce_shift_budget: true
 
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:

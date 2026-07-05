@@ -316,5 +316,6 @@ def test_cmd_run_live_conductor_closure_runs_and_parses(tmp_path, monkeypatch):
                                              '"resume_note":"n"}\n```', 7, 0.0))
     with _store(tmp_path) as s:
         s.set_mission("x")
-        res = orchestrator.cmd_run(s, token_budget=1, wall_clock_s=1)   # conductor=None → live path
+        # budget must exceed the stub's ledgered 7 tokens — the per-shift brake is real now
+        res = orchestrator.cmd_run(s, token_budget=100, wall_clock_s=1)   # conductor=None → live path
         assert res["action"] == "completed" and s.last_shift()["report"] == "r"
