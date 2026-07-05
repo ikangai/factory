@@ -35,7 +35,7 @@ from ..common.store import Blackboard
 _EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
 
 
-def _isolated_claude_argv(json_output: bool = True) -> list[str]:
+def _isolated_claude_argv(json_output: bool = True, model: str = "") -> list[str]:
     """Argv for an ISOLATED `claude -p` role call. Mirrors
     llm._build_claude_cli_argv (keep the two in sync). A role is bounded reasoning
     over a context slice — never a Claude Code agent — so it must load no plugins
@@ -47,24 +47,32 @@ def _isolated_claude_argv(json_output: bool = True) -> list[str]:
       --tools ""             zero tools (text/JSON only)
       --strict-mcp-config    ignore all ambient MCP config...
       --mcp-config {…}       ...and load an empty server set
+      --model <id>           optional tier routing (Task 2.2 shared plumbing; mirrors
+                             _super_worker_argv). '' = the account's default model —
+                             then the flag is OMITTED, so the argv is byte-for-byte today's.
     """
     argv = ["claude", "-p"]
     if json_output:
         argv += ["--output-format", "json"]
+    if model:                                       # down-tier a judgment call (reviewer/investigator)
+        argv += ["--model", model]
     argv += ["--setting-sources", "", "--tools", "",
              "--strict-mcp-config", "--mcp-config", _EMPTY_MCP_CONFIG]
     return argv
 
 
-def claude_p(prompt: str, *, timeout: int = 180) -> tuple[str, int, float]:
+def claude_p(prompt: str, *, timeout: int = 180, model: str = "") -> tuple[str, int, float]:
     """Call `claude -p` (print mode, ISOLATED), prompt on stdin. Returns
     (text, tokens, cost). Tries JSON output for usage; falls back to plain text.
-    Auth is the operator's subscription keychain (roles run under the real HOME)."""
+    Auth is the operator's subscription keychain (roles run under the real HOME).
+    `model` (optional) routes to a specific tier via `--model` — SHARED plumbing for
+    down-tiering a judgment call (the pre-merge reviewer, Phase 4's investigator). '' =
+    the account's default (frontier), byte-for-byte today's behavior."""
     # Run from a neutral cwd so no project .claude/CLAUDE.md is discovered
     # (defense in depth alongside --setting-sources "").
     neutral_cwd = tempfile.gettempdir()
     try:
-        p = subprocess.run(_isolated_claude_argv(json_output=True),
+        p = subprocess.run(_isolated_claude_argv(json_output=True, model=model),
                            input=prompt, capture_output=True, text=True,
                            timeout=timeout, cwd=neutral_cwd)
         if p.returncode == 0 and p.stdout.strip():
@@ -82,7 +90,7 @@ def claude_p(prompt: str, *, timeout: int = 180) -> tuple[str, int, float]:
         return f"[claude -p unavailable: {e}]", 0, 0.0
     # fallback: plain text (still isolated)
     try:
-        p = subprocess.run(_isolated_claude_argv(json_output=False), input=prompt,
+        p = subprocess.run(_isolated_claude_argv(json_output=False, model=model), input=prompt,
                            capture_output=True, text=True, timeout=timeout, cwd=neutral_cwd)
         return p.stdout, 0, 0.0
     except Exception as e:

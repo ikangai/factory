@@ -325,20 +325,32 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     return shipped
 
 
+_REVIEW_DIFF_LIMIT = 20000   # the reviewer sees at most this many diff chars (a blind read, bounded)
+
+
 def _review_candidate(dev_clone: str, base: str, branch: str, task: str) -> tuple:
-    """Phase 8 pre-merge review (config-gated): an ISOLATED, blind claude_p (frontier tier — review
-    is judgment; same transport as the scope/decompose judges) reads `git diff base..branch` + the
-    task and returns {approve, reason}. FAIL-OPEN — a transport OR parse failure returns
-    (None, spend) so a reviewer hiccup never blocks a merge. Returns (verdict|None, review_spend)."""
+    """Phase 8 pre-merge review (config-gated): an ISOLATED, blind claude_p reads
+    `git diff base..branch` + the task and returns {approve, reason}. Runs at super_worker
+    .reviewer_tier ('' = frontier — review is judgment; the config.yaml rationale), resolved via
+    resolve_model (fails open DOWNWARD, never up on a typo). FAIL-OPEN — a transport OR parse
+    failure returns (None, spend) so a reviewer hiccup never blocks a merge. Returns
+    (verdict|None, review_spend)."""
     from ..roles.common import claude_p, _first_json_object, _load_prompt
     try:
-        diff = subprocess.run(["git", "-C", dev_clone, "diff", f"{base}..{branch}"],
-                              capture_output=True, text=True, timeout=30).stdout[:20000]
+        full = subprocess.run(["git", "-C", dev_clone, "diff", f"{base}..{branch}"],
+                              capture_output=True, text=True, timeout=30).stdout
     except Exception:  # noqa: BLE001 — no diff (e.g. not a git clone in a test) → review empty
-        diff = ""
+        full = ""
+    diff = full[:_REVIEW_DIFF_LIMIT]
+    if len(full) > _REVIEW_DIFF_LIMIT:                 # the reviewer must KNOW it graded a PARTIAL
+        diff += (f"\n\n[diff truncated at {_REVIEW_DIFF_LIMIT:,} of {len(full):,} chars]")
+    # {SPEC} is a fixed NOTE, not a separate thread: the task's spec is ALREADY folded into {TASK}
+    # (execute_claimed_tasks appends scope_check.spec_brief to the task text before dispatch). Re-
+    # threading it here would only duplicate it — do NOT re-plumb the spec to the reviewer (critique).
     prompt = (_load_prompt("reviewer").replace("{TASK}", task)
-              .replace("{SPEC}", "(in the task above)").replace("{DIFF}", diff))
-    text, tok, cost = claude_p(prompt, timeout=180)
+              .replace("{SPEC}", "(folded into the task above)").replace("{DIFF}", diff))
+    tier = ((config.load_config().get("super_worker") or {}).get("reviewer_tier") or "")
+    text, tok, cost = claude_p(prompt, timeout=180, model=config.resolve_model(tier))
     spend = {"review_tokens": int(tok or 0), "review_cost": float(cost or 0.0)}
     raw = _first_json_object(text or "")
     if not raw:
