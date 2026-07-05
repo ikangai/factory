@@ -294,12 +294,22 @@ _CITE_EXTS = ("py", "md", "sql", "html", "js", "css", "yaml", "yml", "json", "sh
 _CITE_RE = re.compile(
     r"(?<![\w.-])((?:[\w.-]+/)*[\w.-]+\.(?:%s))(?::(\d+))?\b" % "|".join(_CITE_EXTS))
 
+# URL path segments are NOT file cites (Fix 1.3b): 'https://docs.python.org/3/library/
+# re.html' would otherwise extract as a repo path that can never resolve — false-flagging
+# the learning stale (or accidentally resolving via the basename fallback).
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
 
 def extract_cites(content: str) -> list[tuple[str, Optional[int]]]:
     """The (path, line) file cites in a learning's content, in order, deduped.
-    line is None for a bare-path cite."""
+    line is None for a bare-path cite. Candidates inside an http(s):// URL are
+    skipped by span — a URL path segment is prose, not a repo cite (Fix 1.3b)."""
+    content = content or ""
+    url_spans = [m.span() for m in _URL_RE.finditer(content)]
     out: list[tuple[str, Optional[int]]] = []
-    for m in _CITE_RE.finditer(content or ""):
+    for m in _CITE_RE.finditer(content):
+        if any(a <= m.start() and m.end() <= b for a, b in url_spans):
+            continue
         cite = (m.group(1), int(m.group(2)) if m.group(2) else None)
         if cite not in out:
             out.append(cite)

@@ -1087,8 +1087,10 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
 def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, content: str = "",
               scope: str = "general", agent: str = "", limit: int = 20,
               learning_id: Optional[str] = None):
-    """`factory learn add [--role R] --content "…"` / `factory learn list [--role R]` /
-    `factory learn retire <id>` / `factory learn verify` — the factory's memory CLI.
+    """`factory learn add [--role R] "…"` (or --content "…") / `factory learn list
+    [--role R]` / `factory learn retire <id>` / `factory learn verify` — the factory's
+    memory CLI. The CLI positional is action-routed by main(): add's TEXT arrives here
+    as `content`, retire's id as `learning_id` (Fix 1.3b).
     Agents (the conductor + super-workers via Bash) record durable learnings here; the
     orchestrator injects them back into each role's prompt via
     reporting.factory_memory.memory_card. Adds are dedup'd. `add` defaults to the `factory`
@@ -1153,7 +1155,7 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
             print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}"
                   f"{eff_s}){mark}: {r['content']}")
         return rows
-    print('[learn] usage: factory learn add --role R --content "…" | '
+    print('[learn] usage: factory learn add [--role R] "…" | '
           'factory learn list [--role R] | factory learn retire <id> | factory learn verify')
     return None
 
@@ -1592,8 +1594,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="preview the push range + issue actions without mutating anything")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
     lrn.add_argument("action", choices=["add", "list", "retire", "verify"])
-    lrn.add_argument("id", nargs="?", default=None,
-                     help="integer learning id (for retire — exact id, see `learn list`)")
+    lrn.add_argument("rest", nargs="?", default=None,
+                     help="the learning text (add — same as --content) or the integer "
+                          "learning id (retire — exact id, see `learn list`)")
     lrn.add_argument("--role", default=None,
                      help="conductor | developer | researcher | factory "
                           "(add defaults to factory; list with no role shows ALL roles)")
@@ -1751,8 +1754,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "graduate":
             cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
-            cmd_learn(store, a.action, role=a.role, content=a.content, scope=a.scope,
-                      agent=a.agent, limit=a.limit, learning_id=a.id)
+            # The learn positional is action-routed (the task-CLI pattern): the learning
+            # TEXT for `add` (--content also works), the integer id for `retire`. Binding
+            # add's text to the id slot silently DROPPED the lesson — the documented
+            # task-add content-drop bug class (Fix 1.3b).
+            cmd_learn(store, a.action, role=a.role,
+                      content=a.content or (a.rest if a.action == "add" else "") or "",
+                      scope=a.scope, agent=a.agent, limit=a.limit,
+                      learning_id=None if a.action == "add" else a.rest)
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":

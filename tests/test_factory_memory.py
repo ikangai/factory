@@ -1171,3 +1171,82 @@ def test_cmd_learn_list_shows_ratio_only_above_min_denominator(tmp_path, capsys)
         weak_line = next(ln for ln in out.splitlines() if "barely-attributed" in ln)
         assert "70%" in strong_line and "10" in strong_line
         assert "%" not in weak_line
+
+
+# ============================================================================
+# Fix 1.3b — adversarial-review hardening of Task 1.3 (commit 9ad8291).
+# FINDING A: the polymorphic `learn` positional bound `learn add "<text>"` to the
+# retire id slot and silently DROPPED the lesson — the documented task-add
+# content-drop bug class (operator memory). FINDING B: _CITE_RE extracted URL
+# path segments as file cites, so a docs link false-flagged a learning stale.
+# ============================================================================
+
+# -- FINDING A: `factory learn add "<text>"` must record the text ---------------
+def test_cli_learn_add_positional_text_records_through_main(tmp_path, monkeypatch, capsys):
+    """`factory learn add "some lesson text"` end-to-end: the positional is the
+    learning TEXT for the add action — it must be recorded, never swallowed by
+    the retire id slot (hermetic store, same pattern as the retire main test)."""
+    db = str(tmp_path / "f.db")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    orch.main(["learn", "add", "some lesson text"])
+    out = capsys.readouterr().out
+    assert "recorded" in out and "not recorded" not in out
+    with Blackboard(db) as s:
+        rows = s.learnings_for_role("factory")              # add defaults to factory role
+        assert [r["content"] for r in rows] == ["some lesson text"]
+
+
+def test_cli_learn_add_content_flag_still_records_through_main(tmp_path, monkeypatch, capsys):
+    """The documented `--content` spelling keeps working alongside the positional."""
+    db = str(tmp_path / "f.db")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    orch.main(["learn", "add", "--role", "developer", "--content", "flagged lesson"])
+    assert "recorded" in capsys.readouterr().out
+    with Blackboard(db) as s:
+        assert [r["content"] for r in s.learnings_for_role("developer")] == ["flagged lesson"]
+
+
+def test_cli_learn_retire_still_takes_positional_id_through_main(tmp_path, monkeypatch, capsys):
+    """Fixing add must not regress retire: the positional stays the exact id there."""
+    db = str(tmp_path / "f.db")
+    with Blackboard(db) as s:
+        s.init_db()
+        lid = s.add_learning("factory", "retire me via main")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    orch.main(["learn", "retire", str(lid)])
+    assert "retired" in capsys.readouterr().out
+    with Blackboard(db) as s:
+        assert s.get_learning(lid)["archived"] == 1
+
+
+# -- FINDING B: URL path segments are not file cites -----------------------------
+def test_extract_cites_ignores_url_path_segments():
+    """'https://docs.python.org/3/library/re.html' must yield NO cite — a URL path
+    can never resolve against a repo root and would false-flag the row stale."""
+    assert factory_memory.extract_cites(
+        "see https://docs.python.org/3/library/re.html for the syntax") == []
+
+
+def test_extract_cites_ignores_github_blob_url():
+    assert factory_memory.extract_cites(
+        "upstream: https://github.com/acme/clive/blob/main/execution/runtime.py") == []
+
+
+def test_extract_cites_keeps_real_cite_alongside_url():
+    """Skipping URL spans must not eat a genuine file cite in the same lesson."""
+    cites = factory_memory.extract_cites(
+        "reuse the retry in llm.py:12 — background: https://docs.python.org/3/library/re.html")
+    assert cites == [("llm.py", 12)]
+
+
+def test_verify_url_only_learning_never_flagged_stale(tmp_path):
+    """A learning whose only 'cite' is inside a URL is cite-free to verify: it is
+    skipped entirely (no report entry) and never flagged stale."""
+    target = tmp_path / "target"
+    target.mkdir()                                          # empty repo — nothing resolves
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer",
+                             "regex syntax: https://docs.python.org/3/library/re.html")
+        report = factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert all(e["id"] != lid for e in report)
+        assert s.get_learning(lid)["stale"] == 0
