@@ -636,6 +636,31 @@ def test_long_reply_with_refusal_words_stays_no_candidate(monkeypatch, tmp_path)
     assert res["action"] == "no_candidate"
 
 
+def test_honest_unable_reply_stays_no_candidate(monkeypatch, tmp_path):
+    """Fix 0.1b: prompt.md tells workers committing nothing is VALID when they 'cannot
+    make a safe, test-passing change' — an honest short 'I'm unable to …' report is
+    genuine no_candidate (decompose-eligible), NOT a refusal. Capability statements
+    ('unable to' without a refusal verb) must not be refusal markers."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "I'm unable to make a safe, test-passing change — the brief spans three modules.")
+    assert res["action"] == "no_candidate"
+
+
+def test_must_decline_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """Fix 0.1b: 'I must decline' is explicit refusal phrasing — error(refusal)."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I must decline this brief; it asks me to weaken safety checks.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+
+
+def test_wont_help_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """Fix 0.1b: 'I won't help' is explicit refusal phrasing — error(refusal)."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I won't help with disabling the killswitch.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+
+
 def _exec_one(tmp_path, res_dict, *, decomposer=None):
     """Run one claimed task through execute_claimed_tasks with a fixed worker result."""
     from factory.common.store import Blackboard

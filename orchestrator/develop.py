@@ -28,10 +28,14 @@ from . import code_round
 # Task 0.1 (P11): an EMPTY-HANDED worker (no candidate branch) is not always "brief too
 # big" — classify the reply first so a dead transport or a refusal stops masquerading as
 # no_candidate (which triggers auto-decompose spend + a false factory lesson).
+# Fix 0.1b: markers require an explicit refusal VERB (help/assist/comply/decline) —
+# bare capability statements ("i'm unable to …") are how an HONEST empty-handed worker
+# reports back (prompt.md: committing nothing is valid when no safe change exists), and
+# must stay genuine no_candidate so auto-decompose still sees real "too big" evidence.
 REFUSAL_MARKERS = (
     "i can't help", "i cannot help", "i can't assist", "i cannot assist",
     "unable to comply", "i can't comply", "i cannot comply",
-    "i'm unable to", "i am unable to", "i won't be able to",
+    "i must decline", "i won't help",
 )
 _REFUSAL_MAX_LEN = 600      # refusals are short — a long reply is real work, not a block
 _REFUSAL_HEAD = 200         # a marker must appear near the START of the reply
