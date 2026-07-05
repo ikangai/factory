@@ -6,324 +6,546 @@
 <title>Harness Factory — Mission Control</title>
 <style>
 :root{
-  --bg:#070b16; --bg2:#0c1224; --card:#101a30; --ink:#e8eefc; --muted:#8092b3; --line:#1a2540;
-  --research:#a78bfa; --plan:#38bdf8; --develop:#fb923c; --gate:#f43f5e; --assess:#22c55e;
+  --blue:#2563eb; --blue-50:#eff6ff; --blue-100:#dbeafe; --blue-700:#1d4ed8;
+  --green:#16a34a; --green-50:#f0fdf4; --green-100:#dcfce7; --green-800:#166534;
+  --amber:#d97706; --amber-50:#fffbeb; --amber-100:#fef3c7; --amber-800:#92400e;
+  --red:#dc2626; --red-50:#fef2f2; --red-100:#fee2e2; --red-800:#991b1b;
+  --violet:#7c3aed; --violet-50:#f5f3ff; --violet-100:#ede9fe;
+  --g50:#f9fafb; --g100:#f3f4f6; --g200:#e5e7eb; --g300:#d1d5db; --g400:#9ca3af;
+  --g500:#6b7280; --g600:#4b5563; --g700:#374151; --g800:#1f2937; --g900:#111827;
 }
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(1200px 700px at 75% -15%,#11254e44,transparent),var(--bg);
-  color:var(--ink);font:14px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.app{max-width:1280px;margin:0 auto;padding:18px 22px 60px}
-header{display:flex;align-items:center;gap:16px;padding-bottom:14px;border-bottom:1px solid var(--line)}
-header h1{font-size:15px;margin:0;letter-spacing:1px;white-space:nowrap;color:#cfe0ff}
-.dot-live{width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:7px;
+body{margin:0;background:var(--g100);color:var(--g900);
+  font:13px/1.5 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+
+/* ── topbar ─────────────────────────────────────────────────────────────── */
+.topbar{height:56px;background:var(--g800);color:#fff;display:flex;align-items:center;
+  gap:12px;padding:0 18px;position:sticky;top:0;z-index:30}
+.topbar>div:first-child{white-space:nowrap;flex-shrink:0}
+.brand{font-size:15px;font-weight:800;letter-spacing:.02em;white-space:nowrap}
+.version{color:var(--g400);font-size:11px;margin-left:6px;font-weight:600}
+@media (max-width:1280px){.version{display:none}}
+.tabs{display:flex;height:100%;align-items:stretch;gap:2px;min-width:0;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabbtn{border:0;border-bottom:3px solid transparent;background:transparent;color:var(--g300);
+  padding:0 10px;font-size:12.5px;font-weight:700;white-space:nowrap;flex:0 0 auto}
+.tabbtn:hover{color:#fff}
+.tabbtn.active{color:#fff;border-bottom-color:#fff}
+.topbar-spacer{flex:1}
+.status,.tag{display:inline-flex;align-items:center;gap:5px;border-radius:999px;
+  padding:3px 9px;font-size:11px;font-weight:800;white-space:nowrap}
+.tag{padding:2px 8px;font-size:10px}
+.blue{background:var(--blue-100);color:var(--blue-700)}
+.green{background:var(--green-100);color:var(--green-800)}
+.amber{background:var(--amber-100);color:var(--amber-800)}
+.red{background:var(--red-100);color:var(--red-800)}
+.violet{background:var(--violet-100);color:var(--violet)}
+.gray{background:var(--g100);color:var(--g600)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+
+/* ── workspace ──────────────────────────────────────────────────────────── */
+.page{max-width:1440px;margin:0 auto;padding:20px 24px 56px}
+.workspace{background:#fff;border:1px solid var(--g200);border-radius:10px;overflow:hidden;
+  min-height:calc(100vh - 130px)}
+.workspace-top{min-height:56px;background:var(--g800);color:#fff;display:flex;align-items:center;
+  gap:12px;padding:10px 16px;flex-wrap:wrap}
+.dot-live{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;flex-shrink:0;
   box-shadow:0 0 0 0 #22c55e;animation:pulse 1.8s infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 #22c55eaa}70%{box-shadow:0 0 0 9px #22c55e00}100%{box-shadow:0 0 0 0 #22c55e00}}
-#mission{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-.medit{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 4px;flex-shrink:0}
-.medit:hover{color:#7dd3fc}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #22c55eaa}70%{box-shadow:0 0 0 8px #22c55e00}100%{box-shadow:0 0 0 0 #22c55e00}}
+#mission{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:120px}
+.medit{background:transparent;border:none;color:var(--g400);font-size:13px;padding:2px 4px;flex-shrink:0}
+.medit:hover{color:#fff}
 .meditor{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
-#mission-input{flex:1;min-width:0;background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px;resize:vertical}
-.msave,.mcancel{border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
-.msave{background:#0ea5e9;color:#04121e;border-color:#0ea5e9}
-.mcancel{background:transparent;color:var(--muted)}
-.merr{color:#f43f5e;font-size:12px;white-space:nowrap}
-.verdict{margin-left:auto;padding:5px 14px;border-radius:99px;font-size:12px;font-weight:700;border:1px solid;white-space:nowrap}
-.v-advancing{color:#22c55e;border-color:#22c55e66;background:#22c55e15}
-.v-steady_state{color:#f59e0b;border-color:#f59e0b66;background:#f59e0b15}
-.v-blocked{color:#f43f5e;border-color:#f43f5e66;background:#f43f5e15}
-.v-reached{color:#a78bfa;border-color:#a78bfa66;background:#a78bfa15}
-.v-none{color:var(--muted);border-color:var(--line)}
-.modetoggle{display:flex;border:1px solid var(--line);border-radius:99px;overflow:hidden;flex-shrink:0;margin-left:10px}
-.mbtn{background:transparent;color:var(--muted);border:none;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;white-space:nowrap}
-.mbtn:hover{color:var(--ink)}
-.mbtn.active[data-mode=auto]{background:#22c55e;color:#04140a}
-.mbtn.active[data-mode=shift]{background:#38bdf8;color:#04121f}
-.apstat{font-size:11px;font-weight:600;margin-left:9px;white-space:nowrap}
-.apstat.run{color:#22c55e}.apstat.warn{color:#fb923c}
-.stopbtn{margin-left:10px;background:transparent;border:1px solid #f43f5e;color:#f43f5e;border-radius:99px;padding:5px 13px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s}
-.stopbtn:hover{background:#f43f5e;color:#fff}
-.stopbtn.halted{border-color:#22c55e;color:#22c55e}.stopbtn.halted:hover{background:#22c55e;color:#04140a}
+#mission-input{flex:1;min-width:0;background:var(--g700);color:#fff;border:1px solid var(--g600);
+  border-radius:6px;padding:5px 8px;font-size:12px;resize:vertical}
+.msave,.mcancel{border:1px solid var(--g600);border-radius:5px;padding:5px 12px;font-size:12px;font-weight:800;white-space:nowrap}
+.msave{background:var(--blue);color:#fff;border-color:var(--blue)}
+.mcancel{background:var(--g700);color:var(--g300)}
+.merr{color:#fca5a5;font-size:12px;white-space:nowrap}
+.spacer{flex:1}
+.modetoggle{display:flex;border:1px solid var(--g600);border-radius:999px;overflow:hidden;flex-shrink:0}
+.mbtn{background:transparent;color:var(--g400);border:none;padding:5px 13px;font-size:11px;font-weight:800;white-space:nowrap}
+.mbtn:hover{color:#fff}
+.mbtn.active[data-mode=auto]{background:var(--green);color:#fff}
+.mbtn.active[data-mode=shift]{background:var(--blue);color:#fff}
+.apstat{font-size:11px;font-weight:700;white-space:nowrap}
+.apstat.run{color:#4ade80}.apstat.warn{color:#fbbf24}
+.stopbtn{background:transparent;border:1px solid #f87171;color:#f87171;border-radius:999px;
+  padding:4px 13px;font-size:11px;font-weight:800;white-space:nowrap;transition:all .2s}
+.stopbtn:hover{background:var(--red);border-color:var(--red);color:#fff}
+.stopbtn.halted{border-color:#4ade80;color:#4ade80}
+.stopbtn.halted:hover{background:var(--green);border-color:var(--green);color:#fff}
 
-/* KPI strip */
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:16px 0}
-.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
-.kpi .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);display:flex;gap:6px;align-items:center}
-.kpi .val{font-size:30px;font-weight:800;line-height:1.1;margin-top:6px;letter-spacing:-1px}
-.kpi .sub{font-size:11px;color:var(--muted);margin-top:2px}
-.kpi.hero .val{background:linear-gradient(180deg,#fff,#7dd3fc);-webkit-background-clip:text;background-clip:text;color:transparent}
-.kpi .good{color:#22c55e}.kpi .bad{color:#f43f5e}
+.content{padding:20px 22px 28px;min-width:0}
+.screen-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:14px}
+.screen-title{margin:0;font-size:21px;line-height:1.2;font-weight:800;letter-spacing:-.01em}
+.screen-sub{color:var(--g500);margin-top:3px;line-height:1.45}
+.actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+.btn{border:1px solid var(--g300);background:#fff;color:var(--g700);border-radius:5px;
+  padding:6px 12px;font-size:12px;font-weight:800;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{background:var(--g50)}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.primary:hover{background:var(--blue-700)}
+.btn.small{padding:3px 8px;font-size:11px}
 
-.cols{display:grid;grid-template-columns:1.05fr 1fr;gap:16px}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
-.panel h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:0 0 10px}
-.muted{color:var(--muted)}
+/* ── KPI strip ──────────────────────────────────────────────────────────── */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;
+  padding:14px 16px;background:var(--g100);border-bottom:1px solid var(--g200)}
+.kpi{border:1px solid var(--g200);border-radius:8px;background:#fff;padding:11px 13px;min-height:82px}
+.kpi-label{color:var(--g500);text-transform:uppercase;letter-spacing:.05em;font-size:10px;font-weight:800}
+.kpi-value{margin-top:5px;font-size:21px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+.kpi-sub{margin-top:2px;color:var(--g500);font-size:11px;line-height:1.35}
+.kpi.tint-green{background:var(--green-50);border-color:var(--green-100)}
+.kpi.tint-amber{background:var(--amber-50);border-color:var(--amber-100)}
+.kpi.tint-red{background:var(--red-50);border-color:var(--red-100)}
 
-/* the loop */
-.stage{display:flex;align-items:center;justify-content:center}
-#loop{width:100%;max-width:420px;height:auto}
-.ring{fill:none;stroke:#16223f;stroke-width:2}
-.flow{fill:none;stroke:url(#g);stroke-width:3;stroke-linecap:round;stroke-dasharray:14 26;opacity:0;transition:opacity .6s}
-.alive .flow{opacity:.9;animation:dash 2.4s linear infinite}@keyframes dash{to{stroke-dashoffset:-40}}
-.node circle{fill:var(--bg2);stroke:#243156;stroke-width:2;transition:all .4s}
-.node .ico{font-size:19px;text-anchor:middle;dominant-baseline:central}
-.node .lbl{fill:var(--muted);font-size:11px;text-anchor:middle;text-transform:uppercase;letter-spacing:.5px;transition:fill .4s}
-.node.active circle{stroke-width:3;filter:drop-shadow(0 0 10px currentColor)}.node.active .lbl{fill:var(--ink);font-weight:700}
-.node[data-key=research].active circle{stroke:var(--research);color:var(--research)}
-.node[data-key=plan].active circle{stroke:var(--plan);color:var(--plan)}
-.node[data-key=develop].active circle{stroke:var(--develop);color:var(--develop)}
-.node[data-key=gate].active circle{stroke:var(--gate);color:var(--gate)}
-.node[data-key=assess].active circle{stroke:var(--assess);color:var(--assess)}
-.comet{fill:#bfe0ff;filter:drop-shadow(0 0 8px #7dd3fc)}
-.rotor{transform-origin:210px 210px;animation:spin 7s linear infinite;opacity:.3;transition:opacity .5s}
-.alive .rotor{opacity:1;animation-duration:3.6s}@keyframes spin{to{transform:rotate(360deg)}}
-.hub{text-anchor:middle}.hub .shift{fill:var(--ink);font-size:24px;font-weight:800}
-.hub .phase{fill:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:2px}
-.devbadge{fill:#fb923c;font-size:12px;font-weight:800;text-anchor:middle;dominant-baseline:central}
+/* ── cards / tables / rows ──────────────────────────────────────────────── */
+.card{background:#fff;border:1px solid var(--g200);border-radius:8px;overflow:hidden;margin-bottom:14px}
+.card-head{padding:11px 14px;border-bottom:1px solid var(--g200);background:var(--g50);
+  display:flex;align-items:center;justify-content:space-between;gap:10px}
+.card-title{font-size:14px;font-weight:800}
+.card-sub{color:var(--g500);font-size:12px;margin-top:2px;line-height:1.4}
+.card-body{padding:13px 14px}
+.split{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr);gap:14px;align-items:start}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+th{padding:7px 10px;border-bottom:1px solid var(--g200);background:var(--g50);color:var(--g500);
+  text-transform:uppercase;letter-spacing:.05em;font-size:10px;font-weight:800;text-align:left;white-space:nowrap}
+td{padding:8px 10px;border-top:1px solid var(--g200);font-size:12px;vertical-align:middle;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+tbody tr:first-child td{border-top:0}
+tbody tr:hover td{background:var(--g50)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.muted{color:var(--g500)}
+.notice{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;border-radius:8px;
+  padding:10px 13px;margin-bottom:13px;line-height:1.45}
+.notice.blue{background:var(--blue-50);border:1px solid var(--blue-100);color:var(--blue-700)}
+.notice.green{background:var(--green-50);border:1px solid var(--green-100);color:var(--green-800)}
+.notice.amber{background:var(--amber-50);border:1px solid var(--amber-100);color:var(--amber-800)}
+.notice.red{background:var(--red-50);border:1px solid var(--red-100);color:var(--red-800)}
 
-/* momentum */
-.spark{display:flex;align-items:flex-end;gap:5px;height:58px;margin:6px 0 12px}
-.spark .s{flex:1;min-width:6px;background:linear-gradient(180deg,#38bdf8,#1d4ed8);border-radius:3px 3px 0 0;position:relative;transition:height .5s}
+/* the work queue */
+.queue-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;align-items:start}
+.queue-list{display:grid;gap:8px}
+.queue-item{border:1px solid var(--g200);border-radius:8px;background:#fff;padding:11px 12px;
+  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;text-align:left;color:var(--g900)}
+.queue-item:hover{border-color:var(--blue);background:var(--blue-50)}
+.queue-item strong{display:block;margin-bottom:2px}
+.queue-item span.qsub{color:var(--g500);font-size:12px;line-height:1.35;display:block;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.object-list{display:grid;gap:8px}
+.object-row{display:grid;grid-template-columns:96px minmax(0,1fr) auto;align-items:center;gap:10px;
+  border:1px solid var(--g200);border-radius:7px;background:#fff;padding:8px 10px;text-align:left;color:var(--g900)}
+.object-row:hover{border-color:var(--blue);background:var(--blue-50)}
+.object-type{color:var(--g500);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.object-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+
+/* momentum spark */
+.spark{display:flex;align-items:flex-end;gap:4px;height:52px;margin:6px 0 10px}
+.spark .s{flex:1;min-width:5px;background:linear-gradient(180deg,#60a5fa,var(--blue));border-radius:3px 3px 0 0;position:relative;transition:height .5s}
 .spark .s.run{background:linear-gradient(180deg,#fbbf24,#f97316);animation:glow 1.6s ease-in-out infinite}
-@keyframes glow{50%{filter:brightness(1.5)}}.spark .s span{position:absolute;top:-15px;left:0;right:0;text-align:center;font-size:10px;color:var(--muted)}
-.strip{display:flex;gap:3px;flex-wrap:wrap;margin-top:4px}.ms{width:13px;height:13px;border-radius:3px}
+@keyframes glow{50%{filter:brightness(1.4)}}
+.spark .s span{position:absolute;top:-15px;left:0;right:0;text-align:center;font-size:10px;color:var(--g500)}
+.strip{display:flex;gap:3px;flex-wrap:wrap;margin-top:4px}
+.ms{width:12px;height:12px;border-radius:3px}
 
-/* built ledger */
-.built .row{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid #101830;font-size:13px}
-.built .row .ok{color:#22c55e}.built .row .ttl{flex:1;min-width:0}
-.built .row code{background:#0008;padding:1px 5px;border-radius:4px;color:#fbbf24;font-size:11px}
-.built .row .src{font-size:10px;color:var(--muted);text-transform:uppercase}
-/* backlog & plan */
-.brow{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #101830;font-size:13px}
-.brow .bstatus{width:88px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
-.brow .src2{font-size:10px;color:var(--muted);text-transform:uppercase;width:74px}
-.brow .btitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.brow.b-in_progress{background:#fb923c12;border-left:3px solid #fb923c;padding-left:8px;border-radius:4px}
-.brow.b-in_progress .bstatus{color:#fb923c}
-.brow.b-open .bstatus{color:#7dd3fc}
-.brow.b-blocked .bstatus{color:#f43f5e}.brow.b-blocked .btitle{color:var(--muted)}
-/* collaboration — agora bus */
-.agents{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}
-.agent{display:flex;align-items:center;gap:6px;background:#0e1626;border:1px solid var(--line);border-radius:99px;padding:4px 11px;font-size:12px}
-.agent .dot{width:7px;height:7px;border-radius:50%;background:#334155;flex-shrink:0}
-.agent.live .dot{background:#22c55e;box-shadow:0 0 6px #22c55e}
-.agent .h{font-weight:700}.agent .sq{font-size:10px;color:var(--muted);text-transform:uppercase}
-.agent:not(.live){opacity:.5}
-.edges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-.edge{font-size:11px;color:#c4b5fd;background:#2e1065aa;border:1px solid #4c1d95;border-radius:5px;padding:2px 8px;white-space:nowrap}
-.feed{max-height:300px;overflow-y:auto;border-top:1px solid var(--line);padding-top:8px}
-.msg{display:flex;gap:9px;padding:5px 0;border-bottom:1px solid #101830;font-size:12.5px;line-height:1.45}
-.msg .mt{color:var(--muted);font-variant-numeric:tabular-nums;flex-shrink:0;font-size:11px}
-.msg .mfrom{font-weight:700;flex-shrink:0;color:#7dd3fc}
-.msg .mto{color:#a78bfa;font-weight:600;flex-shrink:0}
-.msg .mbody{color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.msg.sys{opacity:.45}.msg.sys .mfrom{color:var(--muted)}.msg.sys .mbody{font-style:italic;white-space:normal}
-/* upstream issues */
-.irow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid #101830;font-size:12.5px}
-.irow .inum{color:#7dd3fc;font-weight:700;text-decoration:none;flex-shrink:0;font-variant-numeric:tabular-nums}
-.irow .inum:hover{text-decoration:underline}
-.irow .ititle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.irow .ilbl{font-size:10px;color:#a78bfa;border:1px solid #4c1d95;border-radius:4px;padding:1px 6px;white-space:nowrap}
+/* plan — milestones */
+.mcard{background:#fff;border:1px solid var(--g200);border-radius:8px;padding:11px 13px;
+  margin-bottom:9px;border-left:3px solid var(--g300)}
+.mcard.s-active{border-left-color:var(--amber)}
+.mcard.s-delivered{border-left-color:var(--green)}
+.mcard.s-planned{border-left-color:var(--blue)}
+.mcard.s-dropped{border-left-color:var(--g300);opacity:.55}
+.mcard .mh{display:flex;align-items:baseline;gap:10px}
+.mcard .mh .mt{font-weight:800;flex:1;min-width:0}
+.mcard .mh .mst{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--g500);font-weight:800}
+.mcard .md{font-size:12px;color:var(--g500);margin-top:4px}
+.bar{height:7px;background:var(--g100);border-radius:999px;overflow:hidden;margin-top:7px}
+.bar>i{display:block;height:100%;border-radius:999px}
+.bar.ev>i{background:var(--green)}
+.bar.ac>i{background:#f97316}
+
+/* execution — the loop */
+.stage{display:flex;align-items:center;justify-content:center}
+#loop{width:100%;max-width:380px;height:auto}
+.ring{fill:none;stroke:var(--g200);stroke-width:2}
+.flow{fill:none;stroke:url(#g);stroke-width:3;stroke-linecap:round;stroke-dasharray:14 26;opacity:0;transition:opacity .6s}
+.alive .flow{opacity:.9;animation:dash 2.4s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-40}}
+.node circle{fill:#fff;stroke:var(--g300);stroke-width:2;transition:all .4s}
+.node .ico{font-size:19px;text-anchor:middle;dominant-baseline:central}
+.node .lbl{fill:var(--g500);font-size:11px;text-anchor:middle;text-transform:uppercase;letter-spacing:.5px;transition:fill .4s}
+.node.active circle{stroke-width:3;filter:drop-shadow(0 0 8px currentColor)}
+.node.active .lbl{fill:var(--g900);font-weight:700}
+.node[data-key=research].active circle{stroke:var(--violet);color:var(--violet)}
+.node[data-key=plan].active circle{stroke:var(--blue);color:var(--blue)}
+.node[data-key=develop].active circle{stroke:#f97316;color:#f97316}
+.node[data-key=gate].active circle{stroke:var(--red);color:var(--red)}
+.node[data-key=assess].active circle{stroke:var(--green);color:var(--green)}
+.comet{fill:var(--blue);filter:drop-shadow(0 0 6px #93c5fd)}
+.rotor{transform-origin:210px 210px;animation:spin 7s linear infinite;opacity:.25;transition:opacity .5s}
+.alive .rotor{opacity:1;animation-duration:3.6s}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hub{text-anchor:middle}
+.hub .shift{fill:var(--g900);font-size:24px;font-weight:800}
+.hub .phase{fill:var(--g500);font-size:11px;text-transform:uppercase;letter-spacing:2px}
+.devbadge{fill:#f97316;font-size:12px;font-weight:800;text-anchor:middle;dominant-baseline:central}
+.live .w{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:12.5px;border-bottom:1px solid var(--g100)}
+.live .blip{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 1.6s infinite;flex-shrink:0}
+.live .role-developer{color:#c2410c}.live .role-conductor{color:var(--blue-700)}.live .role-researcher{color:var(--violet)}
+
+/* collaboration feed */
+.agents{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px}
+.agent{display:flex;align-items:center;gap:6px;background:var(--g50);border:1px solid var(--g200);
+  border-radius:999px;padding:3px 10px;font-size:12px}
+.agent .adot{width:7px;height:7px;border-radius:50%;background:var(--g300);flex-shrink:0}
+.agent.live-a .adot{background:#22c55e;box-shadow:0 0 5px #22c55e}
+.agent .h{font-weight:800}.agent .sq{font-size:10px;color:var(--g500);text-transform:uppercase}
+.agent:not(.live-a){opacity:.55}
+.edges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px}
+.edge{font-size:11px;color:var(--violet);background:var(--violet-50);border:1px solid var(--violet-100);
+  border-radius:5px;padding:2px 8px;white-space:nowrap}
+.feed{max-height:280px;overflow-y:auto;border-top:1px solid var(--g200);padding-top:8px}
+.msg{display:flex;gap:9px;padding:5px 0;border-bottom:1px solid var(--g100);font-size:12px;line-height:1.45}
+.msg .mt{color:var(--g400);font-variant-numeric:tabular-nums;flex-shrink:0;font-size:11px}
+.msg .mfrom{font-weight:800;flex-shrink:0;color:var(--blue-700)}
+.msg .mto{color:var(--violet);font-weight:700;flex-shrink:0}
+.msg .mbody{color:var(--g700);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg.sys{opacity:.5}.msg.sys .mbody{font-style:italic;white-space:normal}
 
 /* shifts */
-.shift-row{display:grid;grid-template-columns:54px 92px 1fr;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid #101830;font-size:13px;cursor:pointer}
-.shift-row .id{font-weight:800}.shift-row .meta{font-size:11px;color:var(--muted)}
-.shift-row .rep{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.shift-row{display:grid;grid-template-columns:52px 96px 1fr;gap:12px;align-items:center;
+  padding:8px 4px;border-bottom:1px solid var(--g100);font-size:12.5px;cursor:pointer}
+.shift-row:hover{background:var(--g50)}
+.shift-row .id{font-weight:800}
+.shift-row .meta{font-size:11px;color:var(--g500)}
+.shift-row .rep{color:var(--g500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .shift-row.open .rep{white-space:normal;overflow:visible}
-.badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;border:1px solid}
-.b-completed{color:#22c55e;border-color:#22c55e55;background:#22c55e12}.b-running{color:#fbbf24;border-color:#fbbf2455;background:#fbbf2212}
-.b-error,.b-timed_out{color:#f43f5e;border-color:#f43f5e55}.b-halted{color:#a78bfa;border-color:#a78bfa55}
 
-.live .w{display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13px;border-bottom:1px solid #101830}
-.live .blip{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 1.6s infinite}
-.live .role-developer{color:#fb923c}.live .role-conductor{color:#38bdf8}.live .role-researcher{color:#a78bfa}
-.dig{font-size:12px;color:var(--muted);padding:4px 0;border-bottom:1px solid #101830}
-.full{margin-top:16px}
-#stamp{position:fixed;bottom:8px;right:14px;font-size:11px;color:#46556f}
-.off{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#070b16ee;color:var(--muted)}
+/* backlog rows */
+.brow{display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--g100);font-size:12.5px}
+.brow .bstatus{width:88px;flex-shrink:0}
+.brow .src2{font-size:10px;color:var(--g500);text-transform:uppercase;width:86px;flex-shrink:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brow .btitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.irow{display:flex;align-items:center;gap:9px;padding:5px 4px;border-bottom:1px solid var(--g100);font-size:12.5px}
+.irow .inum{color:var(--blue-700);font-weight:800;text-decoration:none;flex-shrink:0;font-variant-numeric:tabular-nums}
+.irow .inum:hover{text-decoration:underline}
+.irow .ititle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dig{font-size:12px;color:var(--g600);padding:6px 4px;border-bottom:1px solid var(--g100)}
 
-/* tabs (Phase 7 — Mission Control multi-view) */
-.tabs{display:flex;gap:4px;margin:4px 0 14px;border-bottom:1px solid var(--line)}
-.tabbtn{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);
-  padding:9px 15px;font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.4px;cursor:pointer;transition:all .15s}
-.tabbtn:hover{color:var(--ink)}
-.tabbtn.active{color:#7dd3fc;border-bottom-color:#38bdf8}
-/* plan / evm */
-.evmtot{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
-.evmtot .t{background:#0e1626;border:1px solid var(--line);border-radius:8px;padding:9px 12px}
-.evmtot .t .l{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
-.evmtot .t .v{font-size:22px;font-weight:800;margin-top:3px;letter-spacing:-.5px}
-.mcard{background:#0e1626;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px;border-left:3px solid #475569}
-.mcard.s-active{border-left-color:#fb923c}.mcard.s-delivered{border-left-color:#22c55e}.mcard.s-planned{border-left-color:#38bdf8}.mcard.s-dropped{border-left-color:#475569;opacity:.55}
-.mcard .mh{display:flex;align-items:baseline;gap:10px}.mcard .mh .mt{font-weight:700;flex:1;min-width:0}
-.mcard .mh .mst{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
-.mcard .md{font-size:12px;color:var(--muted);margin-top:4px}
-.bar{height:7px;background:#0b1220;border-radius:99px;overflow:hidden;margin-top:8px}
-.bar>i{display:block;height:100%;border-radius:99px}
-.bar.ev>i{background:linear-gradient(90deg,#22c55e,#16a34a)}.bar.ac>i{background:linear-gradient(90deg,#fb923c,#f97316)}
-.esttbl,.tstbl{width:100%;border-collapse:collapse;font-size:12.5px}
-.esttbl td,.esttbl th,.tstbl td,.tstbl th{text-align:left;padding:6px 8px;border-bottom:1px solid #101830}
-.esttbl th,.tstbl th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:700}
-.esttbl .num,.tstbl .num{text-align:right;font-variant-numeric:tabular-nums}
 /* resources */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
-.pcard{background:#0e1626;border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.pcard{background:#fff;border:1px solid var(--g200);border-radius:8px;padding:10px 12px}
 .pcard.retired{opacity:.5}
-.pcard .ph{display:flex;align-items:center;gap:8px}.pcard .pn{font-weight:700}
-.pcard .tier{font-size:10px;text-transform:uppercase;letter-spacing:.5px;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#a78bfa}
-.pcard .pd{font-size:11px;color:var(--muted);margin:5px 0}
-.pcard .pstat{font-size:11px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
-.pcard .retire{margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:5px;font-size:10px;padding:1px 7px;cursor:pointer}
-.pcard .retire:hover{border-color:#f43f5e;color:#f43f5e}
-.rolecard{display:inline-flex;flex-direction:column;gap:2px}
-.addform{margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
-.addform summary{cursor:pointer;color:#7dd3fc;font-size:12px;font-weight:700}
+.pcard .ph{display:flex;align-items:center;gap:8px}
+.pcard .pn{font-weight:800}
+.pcard .tier{font-size:10px;text-transform:uppercase;letter-spacing:.05em;border:1px solid var(--g200);
+  border-radius:5px;padding:1px 6px;color:var(--violet);font-weight:800}
+.pcard .pd{font-size:11px;color:var(--g500);margin:5px 0}
+.pcard .pstat{font-size:11px;color:var(--g500);display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.pcard .retire{margin-left:auto;background:transparent;border:1px solid var(--g300);color:var(--g500);
+  border-radius:5px;font-size:10px;padding:1px 7px}
+.pcard .retire:hover{border-color:var(--red);color:var(--red)}
+.good{color:var(--green)}.bad{color:var(--red)}
+.addform{margin-top:12px;border:1px solid var(--g200);border-radius:8px;padding:8px 12px;background:var(--g50)}
+.addform summary{cursor:pointer;color:var(--blue-700);font-size:12px;font-weight:800}
 .addrow{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
-.addrow input,.addrow select,#wp-overlay{background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;font-size:12px}
-.addrow input{flex:1;min-width:120px}#wp-overlay{width:100%;margin-bottom:8px;resize:vertical}
-.capsrow{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #101830;font-size:12.5px}
-.capsrow label{flex:1}.capsrow .ov{font-size:10px;color:#fb923c;text-transform:uppercase}
-.capsrow input[type=number]{width:80px;background:#0b1220;color:#e2e8f0;border:1px solid var(--line);border-radius:6px;padding:4px 7px;font:inherit}
+.addrow input,.addrow select,#wp-overlay{background:#fff;color:var(--g900);border:1px solid var(--g300);
+  border-radius:6px;padding:6px 8px;font-size:12px}
+.addrow input{flex:1;min-width:120px}
+#wp-overlay{width:100%;margin-bottom:8px;resize:vertical}
+.capsrow{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--g100);font-size:12.5px}
+.capsrow label{flex:1}
+.capsrow .ov{font-size:10px;color:var(--amber-800);text-transform:uppercase;font-weight:800}
+.capsrow input[type=number]{width:80px;background:#fff;color:var(--g900);border:1px solid var(--g300);border-radius:6px;padding:4px 7px}
+.formbtn{background:var(--blue);color:#fff;border:1px solid var(--blue);border-radius:5px;padding:5px 12px;font-size:12px;font-weight:800}
+
+/* report */
+.report-paper{border:1px solid var(--g200);border-radius:8px;background:#fff;padding:22px;
+  max-width:920px;margin:0 auto;box-shadow:0 2px 8px rgba(15,23,42,.06)}
+.report-title{display:flex;justify-content:space-between;gap:16px;border-bottom:2px solid var(--g900);
+  padding-bottom:12px;margin-bottom:14px;align-items:flex-start}
+.report-title h3{margin:0;font-size:22px}
+.report-section{margin-top:16px}
+.report-section h4{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--g500)}
+.narrative-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.narrative-box{border:1px solid var(--g200);border-radius:6px;padding:10px;min-height:104px;line-height:1.45;font-size:12px}
+.narrative-box strong{display:block;margin-bottom:5px;font-size:12px}
+.rp-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.rp-kpis .kpi{min-height:64px}
+
+#stamp{position:fixed;bottom:8px;right:14px;font-size:11px;color:var(--g400)}
+.off{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#f3f4f6ee;color:var(--g600);z-index:99}
+code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-800);font-size:11px}
+
+@media (max-width:1100px){
+  .split,.two,.queue-grid{grid-template-columns:1fr}
+  .narrative-grid,.rp-kpis{grid-template-columns:1fr 1fr}
+}
 </style>
 </head>
 <body>
-<div class="app">
-  <header>
-    <h1>🏭 HARNESS FACTORY</h1>
-    <span class="dot-live"></span><span id="mission">connecting…</span>
-    <button id="mission-edit" class="medit" title="Edit the mission — steers the live conductor loop">✏️</button>
-    <span class="meditor" id="mission-editor" style="display:none">
-      <textarea id="mission-input" rows="1" maxlength="2000" placeholder="Mission statement (steers the loop)…"></textarea>
-      <button class="msave" id="mission-save">Save</button>
-      <button class="mcancel" id="mission-cancel">Cancel</button>
-      <span class="merr" id="mission-err"></span>
-    </span>
-    <span class="verdict v-none" id="verdict">—</span>
-    <div class="modetoggle" id="modetoggle" title="AUTO: self-drives shift after shift · SHIFT: one shift, then waits for you">
-      <button class="mbtn" data-mode="shift">⏸&nbsp;Shift</button>
-      <button class="mbtn" data-mode="auto">▶&nbsp;Auto</button>
-    </div>
-    <span class="apstat" id="apstat"></span>
-    <button class="stopbtn" id="stopbtn" title="Halt the fleet now (STOP)">⛔&nbsp;Stop</button>
-  </header>
-
-  <!-- CEO KPI strip (visible on every tab) -->
-  <div class="kpis" id="kpis"></div>
-
-  <nav class="tabs" id="tabs">
-    <button class="tabbtn active" data-tab="overview">Overview</button>
+<header class="topbar">
+  <div><span class="brand">🏭 HARNESS FACTORY</span><span class="version">mission control</span></div>
+  <nav class="tabs" id="tabs" aria-label="Main navigation">
+    <button class="tabbtn active" data-tab="queue">Queue</button>
     <button class="tabbtn" data-tab="plan">Plan</button>
+    <button class="tabbtn" data-tab="execution">Execution</button>
     <button class="tabbtn" data-tab="resources">Resources</button>
     <button class="tabbtn" data-tab="timesheets">Timesheets</button>
+    <button class="tabbtn" data-tab="finance">Finance</button>
     <button class="tabbtn" data-tab="research">Research</button>
-    <button class="tabbtn" data-tab="shifts">Shifts</button>
+    <button class="tabbtn" data-tab="report">Report</button>
   </nav>
+  <div class="topbar-spacer"></div>
+  <span class="status gray" id="rag"><span class="dot"></span>connecting…</span>
+</header>
 
-  <section id="tab-overview" class="tabsec">
-  <div class="cols">
-    <div class="panel stage-wrap">
-      <h3>The loop — what's happening now</h3>
-      <div class="stage">
-        <svg id="loop" viewBox="0 0 420 420">
-          <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>
-          <circle class="ring" cx="210" cy="210" r="140"/><path class="flow" d=""/>
-          <g class="rotor"><circle class="comet" cx="210" cy="70" r="6"/></g>
-          <g id="nodes"></g>
-          <g class="hub"><text class="shift" x="210" y="204" id="hub-shift">—</text>
-            <text class="phase" x="210" y="230" id="hub-phase">idle</text></g>
-        </svg>
+<main class="page">
+  <section class="workspace">
+    <div class="workspace-top">
+      <span class="dot-live"></span>
+      <span id="mission">connecting…</span>
+      <button id="mission-edit" class="medit" title="Edit the mission — steers the live conductor loop">✏️</button>
+      <span class="meditor" id="mission-editor" style="display:none">
+        <textarea id="mission-input" rows="1" maxlength="2000" placeholder="Mission statement (steers the loop)…"></textarea>
+        <button class="msave" id="mission-save">Save</button>
+        <button class="mcancel" id="mission-cancel">Cancel</button>
+        <span class="merr" id="mission-err"></span>
+      </span>
+      <div class="spacer"></div>
+      <div class="modetoggle" id="modetoggle" title="AUTO: self-drives shift after shift · SHIFT: one shift, then waits for you">
+        <button class="mbtn" data-mode="shift">⏸&nbsp;Shift</button>
+        <button class="mbtn" data-mode="auto">▶&nbsp;Auto</button>
       </div>
-      <h3 style="margin-top:8px">Live workers</h3>
-      <div class="live" id="live"><div class="muted">none running</div></div>
+      <span class="apstat" id="apstat"></span>
+      <button class="stopbtn" id="stopbtn" title="Halt the fleet now (STOP)">⛔&nbsp;Stop</button>
     </div>
 
-    <div>
-      <div class="panel">
-        <h3>Mission momentum — how far along</h3>
-        <div id="momentum-verdict" style="font-weight:700;margin-bottom:4px">—</div>
-        <div class="muted" style="font-size:12px">merges per shift</div>
-        <div class="spark" id="spark"></div>
-        <div class="muted" style="font-size:12px">progress signal (advancing→steady)</div>
-        <div class="strip" id="strip"></div>
-      </div>
-      <div class="panel full">
-        <h3>What's been built <span class="muted" id="built-count"></span></h3>
-        <div class="built" id="built"><div class="muted">nothing shipped yet</div></div>
-      </div>
-    </div>
-  </div>
+    <!-- KPI strip — visible on every tab -->
+    <div class="kpis" id="kpis"></div>
 
-  <div class="panel full">
-    <h3>Collaboration — agora bus <span class="muted" id="collab-h"></span></h3>
-    <div class="agents" id="collab-agents"></div>
-    <div class="edges" id="collab-edges"></div>
-    <div class="feed" id="collab-feed"><div class="muted">no bus activity yet</div></div>
-  </div>
-
-  <div class="panel full">
-    <h3>Backlog &amp; plan <span class="muted" id="backlog-h"></span></h3>
-    <div id="backlog"><div class="muted">backlog empty</div></div>
-  </div>
-
-  <div class="panel full">
-    <h3>Upstream issues — fed to research &amp; the conductor <span class="muted" id="issues-h"></span></h3>
-    <div id="issues"><div class="muted">no issues</div></div>
-  </div>
-
-  </section><!-- /tab-overview -->
-
-  <section id="tab-plan" class="tabsec" style="display:none">
-    <div class="panel full"><h3>Earned value — the plan vs the actuals</h3>
-      <div id="evm-tot" class="evmtot"><div class="muted">no plan yet</div></div>
-      <div class="muted" style="font-size:12px;margin:12px 0 4px">cumulative token burn per shift</div>
-      <div class="spark" id="evm-spark"></div></div>
-    <div class="panel full"><h3>Milestones — the plan <span class="muted" id="plan-h"></span></h3>
-      <div id="plan-cards"><div class="muted">no plan yet — the conductor drafts milestones</div></div></div>
-    <div class="panel full"><h3>Estimate vs actual — the conductor's calibration signal</h3>
-      <div id="evm-est"><div class="muted">no estimated+worked tasks yet</div></div></div>
-  </section>
-
-  <section id="tab-resources" class="tabsec" style="display:none">
-    <div class="panel full"><h3>Worker profiles — the bench <span class="muted" id="prof-h"></span></h3>
-      <div id="prof-cards" class="cards"></div>
-      <details class="addform"><summary>+ generate a profile</summary>
-        <div class="addrow">
-          <input id="wp-name" placeholder="slug (e.g. python-dev)">
-          <input id="wp-desc" placeholder="description (what it's good at)">
-          <select id="wp-model"><option value="">frontier</option><option value="standard" selected>standard</option><option value="fast">fast</option></select>
+    <div class="content">
+      <!-- ── WORK QUEUE (home) ─────────────────────────────────────────── -->
+      <section id="tab-queue" class="tabsec">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Work Queue</h1>
+            <div class="screen-sub">The operator starts from required actions, not from scattered tables. Each item opens the surface that owns the object.</div></div>
+          <div class="actions"><button class="btn" data-goto="plan">Open plan</button><button class="btn primary" data-goto="report">Steering report</button></div>
         </div>
-        <textarea id="wp-overlay" rows="2" maxlength="2000" placeholder="persona overlay — emphasis + working style ONLY (never bypass-tests instructions)"></textarea>
-        <div><button class="msave" id="wp-add">Add profile</button> <span class="merr" id="wp-err"></span></div>
-      </details></div>
-    <div class="panel full"><h3>Runtime knobs <span class="muted">— applies at the next shift</span></h3>
-      <div id="caps-form"></div>
-      <div style="margin-top:10px"><button class="msave" id="caps-save">Save knobs</button> <span class="merr" id="caps-err"></span></div></div>
-    <div class="panel full"><h3>Roles — the live conductor engine</h3>
-      <div id="role-cards" class="cards"></div>
-      <details id="legacy-box" style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">legacy roles (the pre-conductor engine)</summary>
-        <div id="legacy-roles" class="muted" style="margin-top:6px"></div></details></div>
-  </section>
+        <div class="queue-grid">
+          <section class="card">
+            <div class="card-head"><div><div class="card-title">Action queue</div>
+              <div class="card-sub">Derived live from the blackboard, the bus and the brakes.</div></div>
+              <span class="muted" id="queue-h"></span></div>
+            <div class="card-body queue-list" id="queue-list"><div class="muted">connecting…</div></div>
+          </section>
+          <div>
+            <section class="card">
+              <div class="card-head"><div><div class="card-title">Mission</div>
+                <div class="card-sub" id="mq-sub">—</div></div><span id="mq-rag"></span></div>
+              <div class="card-body object-list" id="mission-card"></div>
+            </section>
+            <section class="card">
+              <div class="card-head"><div><div class="card-title">Momentum</div>
+                <div class="card-sub" id="momentum-note">merges per shift · progress signal</div></div></div>
+              <div class="card-body">
+                <div class="spark" id="spark"></div>
+                <div class="strip" id="strip"></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
 
-  <section id="tab-timesheets" class="tabsec" style="display:none">
-    <div class="panel full"><h3>Rollup <span class="muted">— per role (all-time incl. legacy) &amp; per profile</span></h3>
-      <div id="ts-roll"><div class="muted">no engagements yet</div></div></div>
-    <div class="panel full"><h3>Engagements — who worked when, how long, at what spend, to what verdict</h3>
-      <div id="ts-rows"><div class="muted">no engagements yet</div></div></div>
-  </section>
+      <!-- ── PLAN ──────────────────────────────────────────────────────── -->
+      <section id="tab-plan" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Plan</h1>
+            <div class="screen-sub">Milestones are the baseline; the backlog is the setup; blocked briefs need narrowing.</div></div>
+          <div class="actions"><button class="btn" data-goto="finance">Open finance</button></div>
+        </div>
+        <div class="two">
+          <section class="card"><div class="card-head"><div><div class="card-title">Milestones</div>
+            <div class="card-sub">The conductor drafts these toward the mission.</div></div><span class="muted" id="plan-h"></span></div>
+            <div class="card-body" id="plan-cards"><div class="muted">no plan yet</div></div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Estimate vs actual</div>
+            <div class="card-sub">The conductor's calibration signal.</div></div></div>
+            <div class="card-body" id="evm-est"><div class="muted">no estimated+worked tasks yet</div></div></section>
+        </div>
+        <section class="card"><div class="card-head"><div><div class="card-title">Backlog</div>
+          <div class="card-sub">in&nbsp;progress = claimed this shift · open = waiting · blocked = needs a narrower brief</div></div>
+          <span class="muted" id="backlog-h"></span></div>
+          <div class="card-body" id="backlog"><div class="muted">backlog empty</div></div></section>
+      </section>
 
-  <section id="tab-research" class="tabsec" style="display:none">
-    <div class="panel full"><h3>Staged research briefs <span class="muted" id="rb-h"></span></h3>
-      <div id="rb-briefs"><div class="muted">no staged briefs</div></div></div>
-    <div class="panel full"><h3>Research → shipped funnel</h3><div id="rb-funnel" class="muted">—</div></div>
-    <div class="panel full"><h3>Digests — what shipped recently (fuel for the researchers)</h3>
-      <div id="digests"><div class="muted">no research digests yet</div></div></div>
-  </section>
+      <!-- ── EXECUTION ─────────────────────────────────────────────────── -->
+      <section id="tab-execution" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Execution</h1>
+            <div class="screen-sub">The live loop feeds actuals: every shift is a conductor run; every dispatch lands as a timesheet row.</div></div>
+          <div class="actions"><button class="btn" data-goto="timesheets">Timesheets</button><button class="btn" data-goto="finance">Finance</button></div>
+        </div>
+        <div class="split">
+          <section class="card"><div class="card-head"><div><div class="card-title">The loop — what's happening now</div></div></div>
+            <div class="card-body">
+              <div class="stage">
+                <svg id="loop" viewBox="0 0 420 420">
+                  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+                  <circle class="ring" cx="210" cy="210" r="140"/><path class="flow" d=""/>
+                  <g class="rotor"><circle class="comet" cx="210" cy="70" r="6"/></g>
+                  <g id="nodes"></g>
+                  <g class="hub"><text class="shift" x="210" y="204" id="hub-shift">—</text>
+                    <text class="phase" x="210" y="230" id="hub-phase">idle</text></g>
+                </svg>
+              </div>
+              <div class="card-title" style="margin:8px 0 4px;font-size:12px">Live workers</div>
+              <div class="live" id="live"><div class="muted">none running</div></div>
+            </div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Collaboration — agora bus</div>
+            <div class="card-sub" id="collab-h">—</div></div></div>
+            <div class="card-body">
+              <div class="agents" id="collab-agents"></div>
+              <div class="edges" id="collab-edges"></div>
+              <div class="feed" id="collab-feed"><div class="muted">no bus activity yet</div></div>
+            </div></section>
+        </div>
+        <section class="card"><div class="card-head"><div><div class="card-title">Shifts — every conductor run</div>
+          <div class="card-sub">click a row for the full report</div></div></div>
+          <div class="card-body" id="shifts"><div class="muted">no shifts yet</div></div></section>
+      </section>
 
-  <section id="tab-shifts" class="tabsec" style="display:none">
-    <div class="panel full"><h3>Shifts — every conductor run <span class="muted">(click a row for the report)</span></h3>
-      <div id="shifts"><div class="muted">no shifts yet</div></div></div>
+      <!-- ── RESOURCES ─────────────────────────────────────────────────── -->
+      <section id="tab-resources" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Resources</h1>
+            <div class="screen-sub">The bench: worker profiles with their track record, the runtime knobs, and the live roles.</div></div>
+          <div class="actions"><button class="btn" data-goto="timesheets">Timesheets</button></div>
+        </div>
+        <section class="card"><div class="card-head"><div><div class="card-title">Worker profiles — the bench</div>
+          <div class="card-sub">merge-rate under 50% flags a profile for review</div></div><span class="muted" id="prof-h"></span></div>
+          <div class="card-body">
+            <div id="prof-cards" class="cards"></div>
+            <details class="addform"><summary>+ generate a profile</summary>
+              <div class="addrow">
+                <input id="wp-name" placeholder="slug (e.g. python-dev)">
+                <input id="wp-desc" placeholder="description (what it's good at)">
+                <select id="wp-model"><option value="">frontier</option><option value="standard" selected>standard</option><option value="fast">fast</option></select>
+              </div>
+              <textarea id="wp-overlay" rows="2" maxlength="2000" placeholder="persona overlay — emphasis + working style ONLY (never bypass-tests instructions)"></textarea>
+              <div><button class="formbtn" id="wp-add">Add profile</button> <span class="merr" style="color:var(--red)" id="wp-err"></span></div>
+            </details>
+          </div></section>
+        <div class="two">
+          <section class="card"><div class="card-head"><div><div class="card-title">Runtime knobs</div>
+            <div class="card-sub">applies at the next shift</div></div></div>
+            <div class="card-body">
+              <div id="caps-form"></div>
+              <div style="margin-top:10px"><button class="formbtn" id="caps-save">Save knobs</button>
+                <span class="merr" style="color:var(--red)" id="caps-err"></span></div>
+            </div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Roles — the live conductor engine</div></div></div>
+            <div class="card-body">
+              <div id="role-cards" class="cards"></div>
+              <details id="legacy-box" style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">legacy roles (the pre-conductor engine)</summary>
+                <div id="legacy-roles" class="muted" style="margin-top:6px"></div></details>
+            </div></section>
+        </div>
+      </section>
+
+      <!-- ── TIMESHEETS ────────────────────────────────────────────────── -->
+      <section id="tab-timesheets" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Timesheets</h1>
+            <div class="screen-sub">Every engagement posts its cost into the actuals — who worked when, how long, at what spend, to what verdict.</div></div>
+          <div class="actions"><button class="btn" data-goto="finance">Open finance</button></div>
+        </div>
+        <div class="two">
+          <section class="card"><div class="card-head"><div><div class="card-title">Rollup</div>
+            <div class="card-sub">per role (all-time incl. legacy) &amp; per profile</div></div></div>
+            <div class="card-body" id="ts-roll"><div class="muted">no engagements yet</div></div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Engagements</div>
+            <div class="card-sub">the payroll ledger, newest first</div></div></div>
+            <div class="card-body" id="ts-rows"><div class="muted">no engagements yet</div></div></section>
+        </div>
+      </section>
+
+      <!-- ── FINANCE ───────────────────────────────────────────────────── -->
+      <section id="tab-finance" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Finance cockpit</h1>
+            <div class="screen-sub">Earned value against the plan — tokens are the currency, milestones are the budget lines.</div></div>
+          <div class="actions"><button class="btn" data-goto="plan">Open plan</button><button class="btn primary" data-goto="report">Steering report</button></div>
+        </div>
+        <div class="kpis" style="border:1px solid var(--g200);border-radius:8px;margin-bottom:14px" id="fin-kpis"><div class="muted">no plan yet</div></div>
+        <div class="split">
+          <section class="card"><div class="card-head"><div><div class="card-title">Money spent — burn by shift</div>
+            <div class="card-sub">actuals by conductor run</div></div></div>
+            <div class="card-body">
+              <div class="spark" id="evm-spark"></div>
+              <div id="fin-shifts"><div class="muted">no shifts yet</div></div>
+            </div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Question shortcuts</div>
+            <div class="card-sub">each line opens the owning surface</div></div></div>
+            <div class="card-body object-list" id="fin-links"></div></section>
+        </div>
+        <section class="card"><div class="card-head"><div><div class="card-title">Milestone budgets</div>
+          <div class="card-sub">burn vs budget per milestone — over-budget lines tint red</div></div></div>
+          <div class="card-body" id="fin-milestones"><div class="muted">no milestones yet</div></div></section>
+      </section>
+
+      <!-- ── RESEARCH ──────────────────────────────────────────────────── -->
+      <section id="tab-research" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Research</h1>
+            <div class="screen-sub">Staged briefs are the factory's cost sheets — proposed work waiting to be converted into tasks.</div></div>
+          <div class="actions"><button class="btn" data-goto="plan">Open plan</button></div>
+        </div>
+        <div class="two">
+          <section class="card"><div class="card-head"><div><div class="card-title">Staged research briefs</div></div>
+            <span class="muted" id="rb-h"></span></div>
+            <div class="card-body" id="rb-briefs"><div class="muted">no staged briefs</div></div></section>
+          <section class="card"><div class="card-head"><div><div class="card-title">Research → shipped funnel</div></div></div>
+            <div class="card-body"><div id="rb-funnel" class="muted">—</div></div></section>
+        </div>
+        <section class="card"><div class="card-head"><div><div class="card-title">Upstream issues</div>
+          <div class="card-sub">the target's open GitHub issues — fed to research &amp; the conductor</div></div>
+          <span class="muted" id="issues-h"></span></div>
+          <div class="card-body" id="issues"><div class="muted">no issues</div></div></section>
+        <section class="card"><div class="card-head"><div><div class="card-title">Digests</div>
+          <div class="card-sub">what shipped recently (fuel for the researchers)</div></div></div>
+          <div class="card-body" id="digests"><div class="muted">no research digests yet</div></div></section>
+      </section>
+
+      <!-- ── REPORT ────────────────────────────────────────────────────── -->
+      <section id="tab-report" class="tabsec" style="display:none">
+        <div class="screen-head">
+          <div><h1 class="screen-title">Steering report</h1>
+            <div class="screen-sub">A one-page executive brief rendered live — print it, or read it before redirecting the mission.</div></div>
+          <div class="actions"><button class="btn" onclick="window.print()">Print</button></div>
+        </div>
+        <div class="report-paper">
+          <div class="report-title">
+            <div><h3>Factory Status Report</h3><div class="muted" id="rp-mission">—</div></div>
+            <span class="status gray" id="rp-rag"><span class="dot"></span>—</span>
+          </div>
+          <div class="rp-kpis" id="rp-kpis"></div>
+          <div class="report-section"><h4>Narrative</h4>
+            <div class="narrative-grid">
+              <div class="narrative-box"><strong>Achievements</strong><div id="rp-ach" class="muted">—</div></div>
+              <div class="narrative-box"><strong>Blockers / risks</strong><div id="rp-block" class="muted">—</div></div>
+              <div class="narrative-box"><strong>Next steps</strong><div id="rp-next" class="muted">—</div></div>
+            </div></div>
+          <div class="report-section"><h4>Top attention items</h4><div id="rp-att" class="muted">—</div></div>
+        </div>
+      </section>
+    </div>
   </section>
-</div>
+</main>
 <div class="off" id="off">factory server unreachable — is <code>&nbsp;factory viz --serve&nbsp;</code> running?</div>
 <div id="stamp"></div>
 
@@ -332,31 +554,43 @@ const PHASES=[{key:'research',ico:'🔬',lbl:'Research'},{key:'plan',ico:'🧭',
  {key:'develop',ico:'⚒',lbl:'Develop'},{key:'gate',ico:'🛡',lbl:'Gate'},{key:'assess',ico:'🎯',lbl:'Assess'}];
 const CX=210,CY=210,R=140,el=id=>document.getElementById(id),SVG='http://www.w3.org/2000/svg';
 // HTML-escape every dynamic value before it goes into innerHTML — task titles, reports,
-// digests, and GH issue text are attacker-influenceable (XSS guard).
+// digests, bus messages and GH issue text are attacker-influenceable (XSS guard).
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtN=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':''+n;
 const fmtT=s=>{s=Math.round(s);if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+(s%60)+'s';return Math.floor(m/60)+'h '+(m%60)+'m';};
+const pill=(text,color)=>`<span class="status ${color}"><span class="dot"></span>${esc(text)}</span>`;
+const tagp=(text,color)=>`<span class="tag ${color}">${esc(text)}</span>`;
+// RAG mapping — the PM health signal (CompassAI grammar).
+const RAG={advancing:['On Track','green'],steady_state:['Steady','amber'],
+           blocked:['Blocked','red'],reached:['Delivered','violet']};
+function ragOf(d){
+  if(d.halted)return['Halted','red'];
+  return RAG[d.status]||['Idle','gray'];
+}
+function kpi(lbl,val,sub,tint){return `<div class="kpi ${tint||''}"><div class="kpi-label">${lbl}</div><div class="kpi-value">${val}</div><div class="kpi-sub">${sub||''}</div></div>`;}
+function bar(cls,pct){return `<div class="bar ${cls}"><i style="width:${Math.max(0,Math.min(100,pct||0))}%"></i></div>`;}
+function objRow(type,text,label,color,tab){
+  return `<button class="object-row" data-goto="${tab}"><span class="object-type">${type}</span><strong>${text}</strong>${tagp(label,color)}</button>`;}
+let editing=false;   // true while the mission editor is open — the header refresh must not clobber the field
+
 function buildLoop(){const g=el('nodes');let p='';PHASES.forEach((ph,i)=>{
   const a=(-90+i*72)*Math.PI/180,x=CX+R*Math.cos(a),y=CY+R*Math.sin(a);p+=(i?' L ':'M ')+x+' '+y;
   const n=document.createElementNS(SVG,'g');n.setAttribute('class','node');n.dataset.key=ph.key;
   n.innerHTML=`<circle cx="${x}" cy="${y}" r="29"></circle><text class="ico" x="${x}" y="${y}">${ph.ico}</text>`+
     `<text class="lbl" x="${x}" y="${y+45}">${ph.lbl}</text>`+(ph.key==='develop'?`<text class="devbadge" x="${x+23}" y="${y-21}" id="devbadge"></text>`:'');
   g.appendChild(n);});document.querySelector('.flow').setAttribute('d',p+' Z');}
-function kpi(lbl,val,sub,cls){return `<div class="kpi ${cls||''}"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="sub">${sub||''}</div></div>`;}
-function tot(l,v){return `<div class="t"><div class="l">${l}</div><div class="v">${v}</div></div>`;}
-function bar(cls,pct){return `<div class="bar ${cls}"><i style="width:${Math.max(0,Math.min(100,pct||0))}%"></i></div>`;}
-let editing=false;   // true while the mission editor is open — the header refresh must not clobber the field
 
 async function fetchJSON(p){const r=await fetch(p,{cache:'no-store'});const d=await r.json().catch(()=>null);
   if(!r.ok||(d&&d.error))throw new Error((d&&d.error)||('HTTP '+r.status));return d;}
 
-// The HEADER (mission, verdict, mode, STOP, KPI strip) is visible on every tab — kept live by a
-// slow global tick + the Overview 2s tick. Split out of the per-tab renderers.
+// The HEADER (mission strip, RAG, mode, STOP, KPI strip) is visible on every tab — kept
+// live by a slow global tick + the active tab's own tick.
 function headerRender(d){
-  const k=d.kpi||{},mo=d.momentum||{};
-  window._mission=d.mission||'';
+  const k=d.kpi||{};
+  window._mission=d.mission||'';window._fleet=d;
   if(!editing)el('mission').textContent=(d.mission||'— no mission set —')+(d.target?'  ·  🎯 '+d.target:'');
-  const v=el('verdict');v.textContent=mo.verdict||'—';v.className='verdict v-'+(d.status||'none');
+  const [rt,rc]=ragOf(d);
+  el('rag').className='status '+rc;el('rag').innerHTML='<span class="dot"></span>'+esc(rt);
   document.querySelectorAll('.mbtn').forEach(b=>b.classList.toggle('active',b.dataset.mode===(d.mode||'shift')));
   const ap=d.autopilot||{},aps=el('apstat'),sb=el('stopbtn');
   if(d.halted){aps.textContent='⛔ fleet halted';aps.className='apstat warn';}
@@ -366,58 +600,51 @@ function headerRender(d){
   }else{aps.textContent='';aps.className='apstat';}
   if(d.halted){sb.textContent='▶ Resume';sb.dataset.halted='1';sb.classList.add('halted');}
   else{sb.textContent='⛔ Stop';sb.dataset.halted='0';sb.classList.remove('halted');}
+  const q=d.queue||[],openN=q.filter(a=>a.severity!=='green').length;
   el('kpis').innerHTML=
-    kpi('🚢 Shipped','<span>'+(k.shipped||0)+'</span>',(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked','hero')+
+    kpi('📋 Open actions',openN,openN?'the Work Queue needs you':'all clear',openN?'tint-amber':'tint-green')+
+    kpi('🚢 Shipped',k.shipped||0,(k.backlog_open||0)+' open · '+(k.blocked||0)+' blocked',(k.blocked||0)?'tint-amber':'')+
     kpi('🔄 Shifts',k.shifts||0,(d.running_shift?'shift '+d.running_shift+' running':'idle'))+
-    kpi('⏱ Exec time',fmtT(k.exec_seconds||0),'avg '+fmtT(k.avg_shift_seconds||0)+'/shift')+
     kpi('🪙 Tokens',fmtN(k.total_tokens||0),(k.tokens_per_merge?fmtN(k.tokens_per_merge)+'/merge':'—'))+
     kpi('💵 Cost','$'+(k.total_cost_usd||0).toFixed(2),'all-time burn')+
     kpi('👷 Workers',(k.workers_live||0),(k.workers_total||0)+' dispatched total')+
     kpi('🔬 Research',(k.research_proposed||0)+'→'+(k.research_shipped||0),
-        (k.research_proposed>0?'<span class="good">finding work</span>':'<span class="bad">dry</span>'));
+        (k.research_proposed>0?'finding work':'dry'),(k.research_proposed>0?'':'tint-red'));
   el('stamp').textContent='updated '+new Date().toLocaleTimeString();
 }
 
-function overviewRender(d){
-  const mo=d.momentum||{},k=d.kpi||{};
-  document.querySelectorAll('.node').forEach(n=>n.classList.toggle('active',n.dataset.key===d.phase));
-  el('loop').classList.toggle('alive',d.phase&&d.phase!=='idle');
-  el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(k.shifts||'—');
-  el('hub-phase').textContent=d.phase||'idle';
-  const dev=(d.live||[]).filter(w=>w.role==='developer worker').length;el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
-  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${esc(String(w.role).split(' ')[0])}">${esc(w.role)}</b> <span class="muted">pid ${esc(w.pid)}${w.where?(' · …/'+esc(String(w.where).split('/').pop())):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
-  el('momentum-verdict').textContent=mo.verdict||'—';
+// ── Work Queue (home) ─────────────────────────────────────────────────────
+const SEVC={red:'red',amber:'amber',blue:'blue',green:'green'};
+const SEVL={red:'Act now',amber:'Action',blue:'FYI',green:'OK'};
+function queueRender(d){
+  const q=d.queue||[],mo=d.momentum||{},k=d.kpi||{};
+  el('queue-h').textContent=q.length?('· '+q.filter(a=>a.severity!=='green').length+' open'):'';
+  el('queue-list').innerHTML=q.length?q.map(a=>
+    `<button class="queue-item" data-goto="${esc(a.tab)}"><div><strong>${esc(a.title)}</strong>`+
+    `<span class="qsub">${esc(a.sub)}</span></div>${pill(SEVL[a.severity]||a.severity,SEVC[a.severity]||'gray')}</button>`).join('')
+    :'<div class="muted">connecting…</div>';
+  const [rt,rc]=ragOf(d);
+  el('mq-rag').innerHTML=pill(rt,rc);
+  el('mq-sub').textContent=d.mission||'— no mission set —';
+  const plan=d.plan||[],active=plan.find(m=>m.status==='active');
+  el('mission-card').innerHTML=
+    objRow('Plan',plan.length?(plan.length+' milestone(s)'+(active?(' · active: '+esc(active.title)):'')):'no plan yet — the conductor drafts it','Open','blue','plan')+
+    objRow('Execution',d.running_shift?('shift '+esc(d.running_shift)+' running · '+esc(d.phase)):('idle · '+(k.shifts||0)+' shifts run'),'Open',d.running_shift?'green':'gray','execution')+
+    objRow('Finance','$'+((k.total_cost_usd||0)).toFixed(2)+' burned · '+fmtN(k.total_tokens||0)+' tok','Open','amber','finance')+
+    objRow('Research',(d.briefs_staged||0)+' staged brief(s) · '+(k.research_proposed||0)+' proposed','Open','violet','research')+
+    objRow('Delivered',(d.built||[]).length?((d.built||[]).length+' shipped — latest: '+esc((d.built[0]||{}).title||'')):'nothing shipped yet','Report','green','report');
+  el('momentum-note').textContent=mo.verdict||'merges per shift · progress signal';
   const ser=mo.merges_series||[],smax=Math.max(1,...ser);
   el('spark').innerHTML=ser.length?ser.map((n,i)=>`<div class="s ${(d.running_shift&&i===ser.length-1)?'run':''}" title="${n} merged" style="height:${8+82*n/smax}%"><span>${n||''}</span></div>`).join(''):'<span class="muted">—</span>';
-  const SC={advancing:'#22c55e',steady_state:'#f59e0b',blocked:'#f43f5e',reached:'#a78bfa'};
-  el('strip').innerHTML=(mo.status_series||[]).map(s=>`<span class="ms" title="${esc(s)}" style="background:${SC[s]||'#475569'}"></span>`).join('')||'<span class="muted">—</span>';
-  el('built-count').textContent=(d.built||[]).length?('· '+d.built.length):'';
-  el('built').innerHTML=(d.built||[]).length?d.built.map(b=>`<div class="row"><span class="ok">✓</span><span class="ttl">${esc(b.title)}</span>${b.sha?`<code>${esc(b.sha)}</code>`:''}<span class="src">${esc(b.source)}</span></div>`).join(''):'<div class="muted">nothing shipped yet</div>';
-  const bk=d.backlog||[];el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
-  el('backlog').innerHTML=bk.length?bk.map(t=>{const tag={in_progress:'▶ planned',open:'queued',blocked:'blocked'}[t.status]||esc(t.status);
-    const why=(t.status==='blocked'&&t.result)?` <span class="muted">— ${esc(t.result)}</span>`:'';
-    return `<div class="brow b-${esc(t.status)}" title="${esc(t.detail||t.title)}"><span class="bstatus">${tag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}${why}</span></div>`;}).join(''):'<div class="muted">backlog empty</div>';
-  const c=d.collab||{};
-  el('collab-h').textContent=c.active?(`· ● active · ${c.total} msgs · ${c.mentions} @mentions · ${(c.live||0)} live / ${(c.agents||[]).length} agents (rest are past shifts)`):'· idle (no bus activity)';
-  el('collab-agents').innerHTML=(c.agents||[]).length?c.agents.map(a=>`<span class="agent ${a.live?'live':''}"><span class="dot"></span><span class="h">${esc(a.handle)}</span>${a.squad?`<span class="sq">${esc(String(a.squad).replace('factory-',''))}</span>`:''}</span>`).join(''):'<span class="muted">no agents on the bus</span>';
-  el('collab-edges').innerHTML=(c.edges||[]).map(e=>`<span class="edge">${esc(e.from)} → @${esc(e.to)}${e.n>1?(' ×'+e.n):''}</span>`).join('');
-  el('collab-feed').innerHTML=(c.messages||[]).length?c.messages.map(m=>{const sys=m.kind==='system'||m.sender==='system';const to=(m.to&&m.to.length)?` <span class="mto">→ @${m.to.map(esc).join(' @')}</span>`:'';return `<div class="msg ${sys?'sys':''}"><span class="mt">${esc(String(m.ts||'').substr(11,5))}</span><span class="mfrom">${esc(m.sender)}</span>${to}<span class="mbody">${esc(m.body)}</span></div>`;}).join(''):'<div class="muted">no bus activity yet</div>';
-  const iss=d.issues||{};
-  el('issues-h').textContent=iss.count?(`· ${iss.count} open · ${esc(iss.repo)} · every shift's research + planning sees these`):(iss.repo?'· none open':'· (gh/network needed)');
-  el('issues').innerHTML=(iss.issues||[]).length?iss.issues.map(it=>`<div class="irow"><a class="inum" href="https://github.com/${esc(iss.repo)}/issues/${esc(it.number)}" target="_blank" rel="noopener">#${esc(it.number)}</a><span class="ititle">${esc(it.title)}</span>${it.labels?`<span class="ilbl">${esc(it.labels)}</span>`:''}</div>`).join(''):'<div class="muted">no open issues fetched (needs gh + network)</div>';
+  const SC={advancing:'#16a34a',steady_state:'#d97706',blocked:'#dc2626',reached:'#7c3aed'};
+  el('strip').innerHTML=(mo.status_series||[]).map(s=>`<span class="ms" title="${esc(s)}" style="background:${SC[s]||'#d1d5db'}"></span>`).join('')||'<span class="muted">—</span>';
 }
 
-function planRender(plan,e){
-  plan=plan||[];e=e||{};
+// ── Plan ──────────────────────────────────────────────────────────────────
+function planRender(plan,e,d){
+  plan=plan||[];e=e||{};d=d||window._fleet||{};
   el('plan-h').textContent=plan.length?('· '+plan.length):'';
   const mev={};(e.milestones||[]).forEach(m=>mev[m.id]=m);
-  el('evm-tot').innerHTML=e.pv?
-    tot('PV planned',fmtN(e.pv)+' tok')+tot('EV earned',fmtN(e.ev)+' tok')+tot('AC actual',fmtN(e.ac_tokens)+' tok')+
-    tot('% complete',e.percent_complete!=null?Math.round(e.percent_complete*100)+'%':'—')+
-    tot('CPI',e.cpi!=null?e.cpi.toFixed(2):'—')+tot('Overhead',fmtN(e.overhead_tokens||0)+' tok')
-    :'<div class="muted">no plan yet — the conductor drafts milestones toward the mission</div>';
-  const ser=(e.series&&e.series.ac_cumulative)||[],smax=Math.max(1,...ser);
-  el('evm-spark').innerHTML=ser.length?ser.map(n=>`<div class="s" title="${fmtN(n)} tok" style="height:${8+82*n/smax}%"></div>`).join(''):'<span class="muted">—</span>';
   el('plan-cards').innerHTML=plan.length?plan.map(m=>{
     const ev=mev[m.id]||{},pr=m.progress||{done:0,total:0};
     return `<div class="mcard s-${esc(m.status)}"><div class="mh"><span class="mt">${esc(m.title)}</span>`+
@@ -430,21 +657,51 @@ function planRender(plan,e){
   }).join(''):'<div class="muted">no plan yet — the conductor drafts milestones</div>';
   const es=e.estimates||[];
   el('evm-est').innerHTML=es.length?
-    '<table class="esttbl"><tr><th>task</th><th class="num">est</th><th class="num">actual</th><th class="num">ratio</th></tr>'+
+    '<table><tr><th>task</th><th class="num">est</th><th class="num">actual</th><th class="num">ratio</th></tr>'+
     es.map(r=>`<tr><td>${esc(r.title||r.task)}</td><td class="num">${fmtN(r.est)}</td><td class="num">${fmtN(r.actual)}</td><td class="num">${(r.est?r.actual/r.est:0).toFixed(1)}×</td></tr>`).join('')+'</table>'
     :'<div class="muted">no estimated+worked tasks yet</div>';
+  const bk=d.backlog||[];
+  el('backlog-h').textContent=bk.length?('· '+bk.length+' active'):'';
+  el('backlog').innerHTML=bk.length?bk.map(t=>{
+    const stag={in_progress:tagp('▶ planned','amber'),open:tagp('queued','blue'),blocked:tagp('blocked','red')}[t.status]||tagp(t.status,'gray');
+    const why=(t.status==='blocked'&&t.result)?` <span class="muted">— ${esc(t.result)}</span>`:'';
+    return `<div class="brow" title="${esc(t.detail||t.title)}"><span class="bstatus">${stag}</span><span class="src2">${esc(t.source)}${t.ref?('/'+esc(t.ref)):''}</span><span class="btitle">${esc(t.title)}${why}</span></div>`;}).join('')
+    :'<div class="muted">backlog empty</div>';
 }
 
+// ── Execution ─────────────────────────────────────────────────────────────
+function executionRender(d){
+  const k=d.kpi||{};
+  document.querySelectorAll('.node').forEach(n=>n.classList.toggle('active',n.dataset.key===d.phase));
+  el('loop').classList.toggle('alive',d.phase&&d.phase!=='idle');
+  el('hub-shift').textContent=d.running_shift?('S'+d.running_shift):(k.shifts||'—');
+  el('hub-phase').textContent=d.phase||'idle';
+  const dev=(d.live||[]).filter(w=>w.role==='developer worker').length;el('devbadge')&&(el('devbadge').textContent=dev?('×'+dev):'');
+  el('live').innerHTML=(d.live||[]).length?d.live.map(w=>`<div class="w"><span class="blip"></span><b class="role-${esc(String(w.role).split(' ')[0])}">${esc(w.role)}</b> <span class="muted">pid ${esc(w.pid)}${w.where?(' · …/'+esc(String(w.where).split('/').pop())):''}</span></div>`).join(''):'<div class="muted">none running — loop idle</div>';
+  const c=d.collab||{};
+  el('collab-h').textContent=c.active?(`● active · ${c.total} msgs · ${c.mentions} @mentions · ${(c.live||0)} live / ${(c.agents||[]).length} agents`):'idle (no bus activity)';
+  el('collab-agents').innerHTML=(c.agents||[]).length?c.agents.map(a=>`<span class="agent ${a.live?'live-a':''}"><span class="adot"></span><span class="h">${esc(a.handle)}</span>${a.squad?`<span class="sq">${esc(String(a.squad).replace('factory-',''))}</span>`:''}</span>`).join(''):'<span class="muted">no agents on the bus</span>';
+  el('collab-edges').innerHTML=(c.edges||[]).map(e=>`<span class="edge">${esc(e.from)} → @${esc(e.to)}${e.n>1?(' ×'+e.n):''}</span>`).join('');
+  el('collab-feed').innerHTML=(c.messages||[]).length?c.messages.map(m=>{const sys=m.kind==='system'||m.sender==='system';const to=(m.to&&m.to.length)?` <span class="mto">→ @${m.to.map(esc).join(' @')}</span>`:'';return `<div class="msg ${sys?'sys':''}"><span class="mt">${esc(String(m.ts||'').substr(11,5))}</span><span class="mfrom">${esc(m.sender)}</span>${to}<span class="mbody">${esc(m.body)}</span></div>`;}).join(''):'<div class="muted">no bus activity yet</div>';
+  const sh=d.shifts||[];
+  const open=new Set(Array.from(document.querySelectorAll('#shifts .shift-row.open')).map(r=>r.dataset.shift));
+  const BADGE={completed:'green',running:'amber',error:'red',timed_out:'red',halted:'violet',budget_exhausted:'amber'};
+  el('shifts').innerHTML=sh.length?sh.map(s=>`<div class="shift-row" data-shift="${esc(s.id)}"><span class="id">S${esc(s.id)}</span><span>${tagp(s.status,BADGE[s.status]||'gray')}</span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep" title="${esc(s.report||'')}">${esc(s.report||'(no report)')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
+  if(open.size)document.querySelectorAll('#shifts .shift-row').forEach(r=>{if(open.has(r.dataset.shift))r.classList.add('open');});
+}
+
+// ── Resources ─────────────────────────────────────────────────────────────
 function resourcesRender(r){
   r=r||{};const profs=r.profiles||[];
   el('prof-h').textContent=profs.length?('· '+profs.filter(p=>p.active).length+' active'):'';
   el('prof-cards').innerHTML=profs.length?profs.map(p=>{
     const acc=p.est_accuracy!=null?p.est_accuracy.toFixed(1)+'×':'—';
-    const completed=(p.merged||0)+(p.blocked||0),rateS=completed?Math.round(100*(p.merged||0)/completed)+'%':'—';
+    const completed=(p.merged||0)+(p.blocked||0),rate=completed?Math.round(100*(p.merged||0)/completed):null;
+    const health=rate==null?tagp('no data','gray'):rate>=50?tagp(rate+'% merged','green'):tagp(rate+'% merged','amber');
     const retire=(p.name!=='generalist'&&p.active)?`<button class="retire" data-retire="${esc(p.name)}">retire</button>`:'';
     return `<div class="pcard ${p.active?'':'retired'}"><div class="ph"><span class="pn">${esc(p.name)}</span><span class="tier">${esc(p.model)}</span>${retire}</div>`+
       `<div class="pd">${esc(p.description||'')}</div>`+
-      `<div class="pstat"><span>${p.engagements||0} eng</span><span>${rateS} merged</span><span>${fmtN(p.tokens||0)} tok</span><span>est ${acc}</span>${p.active?'':'<span>retired</span>'}</div></div>`;
+      `<div class="pstat"><span>${p.engagements||0} eng</span>${health}<span>${fmtN(p.tokens||0)} tok</span><span>est ${acc}</span>${p.active?'':'<span>retired</span>'}</div></div>`;
   }).join(''):'<div class="muted">no profiles — the bench seeds at run start</div>';
   el('role-cards').innerHTML=(r.roles||[]).map(x=>`<div class="pcard"><div class="ph"><span class="pn">${esc(x.name)}</span><span class="tier">${esc(x.model_tier)}</span></div>`+
     `<div class="pstat"><span>${esc(x.transport)}</span>${x.wired?'<span class="good">wired</span>':'<span class="bad">missing</span>'}</div><div class="pd">${esc(x.prompt_path)}</div></div>`).join('');
@@ -456,60 +713,118 @@ function resourcesRender(r){
     return `<div class="capsrow"><label>${esc(kk)}</label>${ov}${inp}</div>`;}).join('')||'<div class="muted">no knobs</div>';
 }
 
+// ── Timesheets ────────────────────────────────────────────────────────────
 function timesheetsRender(t){
   t=t||{};const byA=t.by_agent||[],byP=t.by_profile||[],rows=t.rows||[];
   el('ts-roll').innerHTML=
-    '<table class="tstbl"><tr><th>role</th><th class="num">eng</th><th class="num">tokens</th><th class="num">$</th><th class="num">min</th></tr>'+
+    '<table><tr><th>role</th><th class="num">eng</th><th class="num">tokens</th><th class="num">$</th><th class="num">min</th></tr>'+
     (byA.length?byA.map(a=>`<tr><td>${esc(a.role)}</td><td class="num">${a.engagements||0}</td><td class="num">${fmtN(a.tokens||0)}</td><td class="num">$${(a.cost||0).toFixed(2)}</td><td class="num">${((a.seconds||0)/60).toFixed(1)}</td></tr>`).join(''):'<tr><td colspan="5" class="muted">none</td></tr>')+'</table>'+
-    (byP.length?'<div class="muted" style="margin:10px 0 4px">per profile</div><table class="tstbl"><tr><th>profile</th><th class="num">eng</th><th class="num">merged</th><th class="num">tokens</th><th class="num">est acc</th></tr>'+
+    (byP.length?'<div class="muted" style="margin:10px 0 4px">per profile</div><table><tr><th>profile</th><th class="num">eng</th><th class="num">merged</th><th class="num">tokens</th><th class="num">est acc</th></tr>'+
       byP.map(p=>`<tr><td>${esc(p.profile)}</td><td class="num">${p.engagements||0}</td><td class="num">${p.merged||0}</td><td class="num">${fmtN(p.tokens||0)}</td><td class="num">${p.est_accuracy!=null?p.est_accuracy.toFixed(1)+'×':'—'}</td></tr>`).join('')+'</table>':'');
   el('ts-rows').innerHTML=rows.length?
-    '<table class="tstbl"><tr><th>shift</th><th>agent</th><th>task</th><th class="num">min</th><th class="num">tokens</th><th class="num">$</th><th>verdict</th></tr>'+
+    '<table><tr><th>shift</th><th>agent</th><th>task</th><th class="num">min</th><th class="num">tokens</th><th class="num">$</th><th>verdict</th></tr>'+
     rows.map(r=>`<tr><td>S${esc(r.shift)}</td><td>${esc(r.agent)}</td><td>${esc(r.task_title||'')}</td><td class="num">${((r.seconds||0)/60).toFixed(1)}</td><td class="num">${fmtN(r.tokens||0)}</td><td class="num">$${(r.cost||0).toFixed(2)}</td><td>${esc(r.verdict||'')}</td></tr>`).join('')+'</table>'
     :'<div class="muted">no engagements yet</div>';
 }
 
+// ── Finance ───────────────────────────────────────────────────────────────
+function financeRender(e,d){
+  e=e||{};d=d||window._fleet||{};const k=d.kpi||{};
+  el('fin-kpis').innerHTML=e.pv?
+    kpi('PV planned',fmtN(e.pv),'tokens budgeted')+
+    kpi('EV earned',fmtN(e.ev),'value delivered')+
+    kpi('AC actual',fmtN(e.ac_tokens),'tokens burned')+
+    kpi('% complete',e.percent_complete!=null?Math.round(e.percent_complete*100)+'%':'—','of the plan')+
+    kpi('CPI',e.cpi!=null?e.cpi.toFixed(2):'—',e.cpi!=null?(e.cpi>=1?'under budget':'over budget'):'—',
+        e.cpi!=null?(e.cpi>=1?'tint-green':(e.cpi>=.9?'tint-amber':'tint-red')):'')+
+    kpi('Overhead',fmtN(e.overhead_tokens||0),'conductor + research')
+    :'<div class="muted">no plan yet — the conductor drafts milestones toward the mission</div>';
+  const ser=(e.series&&e.series.ac_cumulative)||[],smax=Math.max(1,...ser);
+  el('evm-spark').innerHTML=ser.length?ser.map(n=>`<div class="s" title="${fmtN(n)} tok" style="height:${8+82*n/smax}%"></div>`).join(''):'<span class="muted">—</span>';
+  const sh=(d.shifts||[]).slice(0,10);
+  el('fin-shifts').innerHTML=sh.length?
+    '<table><tr><th>shift</th><th class="num">tokens</th><th class="num">$</th><th class="num">shipped</th></tr>'+
+    sh.map(s=>`<tr><td>S${esc(s.id)}</td><td class="num">${fmtN(s.tokens)}</td><td class="num">$${(s.cost||0).toFixed(2)}</td><td class="num">${esc(s.shipped)}</td></tr>`).join('')+'</table>'
+    :'<div class="muted">no shifts yet</div>';
+  el('fin-links').innerHTML=
+    objRow('Spend','$'+((k.total_cost_usd||0)).toFixed(2)+' all-time · '+fmtN(k.total_tokens||0)+' tok','Shifts','amber','execution')+
+    objRow('Payroll',fmtN(k.total_tokens||0)+' tok across engagements','Timesheets','green','timesheets')+
+    objRow('Budget lines',((d.plan||[]).length)+' milestone(s)','Plan','blue','plan')+
+    objRow('Efficiency',(k.tokens_per_merge?fmtN(k.tokens_per_merge)+' tok/merge':'no merges yet'),'Queue','violet','queue');
+  const plan=d.plan||[],mev={};(e.milestones||[]).forEach(m=>mev[m.id]=m);
+  el('fin-milestones').innerHTML=plan.length?
+    '<table><tr><th>milestone</th><th>status</th><th class="num">budget</th><th class="num">burn</th><th class="num">Δ</th></tr>'+
+    plan.map(m=>{const ac=(mev[m.id]||{}).ac_tokens||0,over=m.budget_tokens&&ac>m.budget_tokens;
+      return `<tr><td>${esc(m.title)}</td><td>${tagp(m.status,{active:'amber',delivered:'green',planned:'blue'}[m.status]||'gray')}</td><td class="num">${fmtN(m.budget_tokens||0)}</td><td class="num">${fmtN(ac)}</td><td class="num">${over?tagp('+'+fmtN(ac-m.budget_tokens),'red'):tagp('ok','green')}</td></tr>`;}).join('')+'</table>'
+    :'<div class="muted">no milestones yet</div>';
+}
+
+// ── Research ──────────────────────────────────────────────────────────────
 function researchRender(rb,d){
   rb=rb||{};d=d||{};const briefs=rb.briefs||[],rs=d.research||{},k=d.kpi||{};
   el('rb-h').textContent=briefs.length?('· '+briefs.length+' staged'):'';
-  el('rb-briefs').innerHTML=briefs.length?briefs.map(b=>`<div class="brow"><span class="btitle">${esc(b.title||b.summary||'(brief)')}</span>${b.technique?`<span class="src2">${esc(b.technique)}</span>`:''}${b.citation?`<span class="ilbl">${esc(b.citation)}</span>`:''}</div>`).join(''):'<div class="muted">no staged briefs</div>';
+  el('rb-briefs').innerHTML=briefs.length?briefs.map(b=>`<div class="brow"><span class="btitle">${esc(b.title||b.summary||'(brief)')}</span>${b.technique?`<span class="src2">${esc(b.technique)}</span>`:''}${b.citation?tagp(b.citation,'violet'):''}</div>`).join(''):'<div class="muted">no staged briefs</div>';
   el('rb-funnel').textContent=`${rs.proposed!=null?rs.proposed:(k.research_proposed||0)} proposed → ${rs.shipped!=null?rs.shipped:(k.research_shipped||0)} shipped`;
+  const iss=d.issues||{};
+  el('issues-h').textContent=iss.count?(`· ${iss.count} open · ${esc(iss.repo)}`):(iss.repo?'· none open':'· (gh/network needed)');
+  el('issues').innerHTML=(iss.issues||[]).length?iss.issues.map(it=>`<div class="irow"><a class="inum" href="https://github.com/${esc(iss.repo)}/issues/${esc(it.number)}" target="_blank" rel="noopener">#${esc(it.number)}</a><span class="ititle">${esc(it.title)}</span>${it.labels?tagp(it.labels,'violet'):''}</div>`).join(''):'<div class="muted">no open issues fetched (needs gh + network)</div>';
   el('digests').innerHTML=(d.digests||[]).length?d.digests.map(x=>`<div class="dig">📦 ${esc(x)}</div>`).join(''):'<div class="muted">no research digests yet</div>';
 }
 
-function shiftsRender(d){
-  const sh=d.shifts||[];
-  // remember which rows the user expanded so the 10s auto-refresh doesn't collapse them
-  const open=new Set(Array.from(document.querySelectorAll('#shifts .shift-row.open')).map(r=>r.dataset.shift));
-  el('shifts').innerHTML=sh.length?sh.map(s=>`<div class="shift-row" data-shift="${esc(s.id)}"><span class="id">S${esc(s.id)}</span><span><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></span><span><span class="meta">${fmtT(s.seconds)} · ${fmtN(s.tokens)} tok · $${(s.cost||0).toFixed(2)} · ${esc(s.shipped)} shipped</span> &nbsp;<span class="rep" title="${esc(s.report||'')}">${esc(s.report||'(no report)')}</span></span></div>`).join(''):'<div class="muted">no shifts yet</div>';
-  if(open.size)document.querySelectorAll('#shifts .shift-row').forEach(r=>{if(open.has(r.dataset.shift))r.classList.add('open');});
+// ── Report — the one-page steering brief ──────────────────────────────────
+function reportRender(d,e){
+  d=d||{};e=e||{};const k=d.kpi||{},q=d.queue||[];
+  el('rp-mission').textContent=(d.mission||'— no mission set —')+(d.target?(' · '+d.target):'');
+  const [rt,rc]=ragOf(d);
+  el('rp-rag').className='status '+rc;el('rp-rag').innerHTML='<span class="dot"></span>'+esc(rt);
+  el('rp-kpis').innerHTML=
+    kpi('CPI',e.cpi!=null?e.cpi.toFixed(2):'—','cost performance')+
+    kpi('% complete',e.percent_complete!=null?Math.round(e.percent_complete*100)+'%':'—','of the plan')+
+    kpi('Shipped',k.shipped||0,'merges into the target')+
+    kpi('Burn','$'+((k.total_cost_usd||0)).toFixed(2),fmtN(k.total_tokens||0)+' tokens');
+  const built=(d.built||[]).slice(0,4);
+  el('rp-ach').innerHTML=built.length?built.map(b=>`<div>✓ ${esc(b.title)}</div>`).join(''):'nothing shipped yet';
+  const blockers=q.filter(a=>a.severity==='red'||a.severity==='amber').slice(0,4);
+  el('rp-block').innerHTML=blockers.length?blockers.map(a=>`<div>• ${esc(a.title)}</div>`).join(''):'none — all clear';
+  el('rp-next').textContent=d.resume_note||((d.plan||[]).find(m=>m.status==='active')||{}).title||'awaiting the next shift';
+  el('rp-att').innerHTML=q.filter(a=>a.severity!=='green').length?
+    '<table><tr><th>severity</th><th>item</th><th>owning surface</th></tr>'+
+    q.filter(a=>a.severity!=='green').slice(0,6).map(a=>`<tr><td>${tagp(a.severity,SEVC[a.severity]||'gray')}</td><td>${esc(a.title)}</td><td>${esc(a.tab)}</td></tr>`).join('')+'</table>'
+    :'<div class="muted">nothing needs steering attention</div>';
 }
 
-// -- per-tab fetchers ---------------------------------------------------------
-async function refreshOverview(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);overviewRender(d);}catch(e){el('off').style.display='flex';}}
-async function refreshPlan(){try{const [p,e]=await Promise.all([fetchJSON('/api/plan'),fetchJSON('/api/evm')]);planRender(p,e);}catch(e){}}
+// ── per-tab fetchers ──────────────────────────────────────────────────────
+async function refreshQueue(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);queueRender(d);}catch(e){el('off').style.display='flex';}}
+async function refreshPlan(){try{const [p,e,d]=await Promise.all([fetchJSON('/api/plan'),fetchJSON('/api/evm'),fetchJSON('/api/fleet')]);headerRender(d);planRender(p,e,d);}catch(e){}}
+async function refreshExecution(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);executionRender(d);}catch(e){el('off').style.display='flex';}}
 async function refreshResources(){try{resourcesRender(await fetchJSON('/api/resources'));}catch(e){}}
 async function refreshTimesheets(){try{timesheetsRender(await fetchJSON('/api/timesheets'));}catch(e){}}
-async function refreshResearch(){try{const [rb,d]=await Promise.all([fetchJSON('/api/research'),fetchJSON('/api/fleet')]);researchRender(rb,d);}catch(e){}}
-async function refreshShifts(){try{shiftsRender(await fetchJSON('/api/fleet'));}catch(e){}}
-const REFRESH={overview:refreshOverview,plan:refreshPlan,resources:refreshResources,timesheets:refreshTimesheets,research:refreshResearch,shifts:refreshShifts};
+async function refreshFinance(){try{const [e,d]=await Promise.all([fetchJSON('/api/evm'),fetchJSON('/api/fleet')]);headerRender(d);financeRender(e,d);}catch(e){}}
+async function refreshResearch(){try{const [rb,d]=await Promise.all([fetchJSON('/api/research'),fetchJSON('/api/fleet')]);headerRender(d);researchRender(rb,d);}catch(e){}}
+async function refreshReport(){try{const [d,e]=await Promise.all([fetchJSON('/api/fleet'),fetchJSON('/api/evm')]);headerRender(d);reportRender(d,e);}catch(e){}}
+const REFRESH={queue:refreshQueue,plan:refreshPlan,execution:refreshExecution,resources:refreshResources,
+               timesheets:refreshTimesheets,finance:refreshFinance,research:refreshResearch,report:refreshReport};
+const LEGACY={overview:'queue',shifts:'execution'};   // old hashes keep working
 
-let tabTimer=null,curTab='overview';
+let tabTimer=null,curTab='queue';
 function activateTab(name){
-  if(!REFRESH[name])name='overview';
+  name=LEGACY[name]||name;
+  if(!REFRESH[name])name='queue';
   curTab=name;
   document.querySelectorAll('.tabsec').forEach(s=>s.style.display=(s.id==='tab-'+name)?'':'none');
   document.querySelectorAll('.tabbtn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
   if(location.hash!=='#'+name)location.hash=name;
   if(tabTimer)clearInterval(tabTimer);
   REFRESH[name]();
-  tabTimer=setInterval(REFRESH[name],name==='overview'?2000:10000);   // one tab interval alive at a time
+  tabTimer=setInterval(REFRESH[name],(name==='queue'||name==='execution')?2000:10000);
 }
 
-// -- wiring -------------------------------------------------------------------
+// ── wiring ────────────────────────────────────────────────────────────────
 buildLoop();
 document.querySelectorAll('.tabbtn').forEach(b=>b.addEventListener('click',()=>activateTab(b.dataset.tab)));
-window.addEventListener('hashchange',()=>{const n=location.hash.replace('#','');if(n&&n!==curTab)activateTab(n);});
+window.addEventListener('hashchange',()=>{const n=location.hash.replace('#','');if(n&&(LEGACY[n]||n)!==curTab)activateTab(n);});
+// every [data-goto] (queue items, object rows, toolbar buttons) navigates to the owning tab
+document.addEventListener('click',e=>{const t=e.target.closest&&e.target.closest('[data-goto]');if(t)activateTab(t.dataset.goto);});
 document.querySelectorAll('.mbtn').forEach(b=>b.addEventListener('click',async()=>{
   try{
     const r=await fetch('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:b.dataset.mode})});
@@ -523,8 +838,8 @@ el('stopbtn').addEventListener('click',async()=>{
   try{await fetch(halted?'/api/resume':'/api/stop',{method:'POST'});}catch(e){}
   headerTick();
 });
-// Mission editor — the human's steering wheel, inline (no window.prompt). While open,
-// `editing` pauses the mission-line refresh so the header tick can't clobber what's being typed.
+// Mission editor — the human's steering wheel, inline. While open, `editing` pauses the
+// mission-line refresh so the header tick can't clobber what's being typed.
 function closeMissionEditor(){editing=false;el('mission-err').textContent='';el('mission-editor').style.display='none';el('mission').style.display='';el('mission-edit').style.display='';}
 el('mission-edit').addEventListener('click',()=>{
   editing=true;el('mission-input').value=window._mission||'';
@@ -568,13 +883,13 @@ el('caps-save').addEventListener('click',async()=>{
   }
   err.textContent='saved — applies next shift';refreshResources();
 });
-// Shifts tab — click a row to expand the full report.
+// Execution tab — click a shift row to expand the full report.
 el('shifts').addEventListener('click',e=>{const row=e.target.closest&&e.target.closest('.shift-row');if(row)row.classList.toggle('open');});
 
 // The header stays live on EVERY tab via a slow global tick; the active tab drives its own content.
 async function headerTick(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);}catch(e){el('off').style.display='flex';}}
 headerTick();setInterval(headerTick,10000);
-activateTab((location.hash||'').replace('#','')||'overview');
+activateTab((location.hash||'').replace('#','')||'queue');
 </script>
 </body>
 </html>

@@ -452,3 +452,70 @@ def test_generate_writes_a_self_contained_file(tmp_path):
     with open(out, encoding="utf-8") as fh:
         body = fh.read()
     assert body.startswith("<!doctype html") and "Harness Factory" in body
+
+
+# --------------------------------------------------------------------------- #
+# the Work Queue — derived operator actions (PMO redesign)                     #
+# --------------------------------------------------------------------------- #
+def _calm_payload(**over):
+    """A payload where nothing needs the operator (the all-clear baseline)."""
+    p = {"halted": False, "mission": "m", "mode": "shift", "autopilot": {"running": False},
+         "status": "advancing", "backlog": [], "collab": {"messages": []},
+         "briefs_staged": 0, "phase": "develop", "running_shift": 3}
+    p.update(over)
+    return p
+
+
+def test_derive_queue_orders_operator_actions_by_severity():
+    """The operator starts from required actions (CompassAI grammar): red before amber
+    before blue, and every action names the owning tab."""
+    payload = _calm_payload(
+        halted=True, mode="auto", status="blocked", phase="idle", running_shift=None,
+        backlog=[{"id": "t1", "title": "a huge bundled brief", "status": "blocked",
+                  "result": "no_candidate"},
+                 {"id": "t2", "title": "fine", "status": "open", "result": ""}],
+        collab={"messages": [{"sender": "ada", "to": ["human"], "body": "need a decision",
+                              "kind": "chat", "ts": "2026-07-03T08:00:00"}]},
+        briefs_staged=2)
+    q = fleet_viz.derive_queue(payload)
+    ids = [a["id"] for a in q]
+    assert ids[0] == "halted"                                        # STOP outranks everything
+    rank = {"red": 0, "amber": 1, "blue": 2, "green": 3}
+    sev = [rank[a["severity"]] for a in q]
+    assert sev == sorted(sev)                                        # severity-ordered
+    assert all(a["tab"] for a in q)                                  # each opens an owning surface
+    assert any(a["id"] == "blocked:t1" and a["tab"] == "plan" for a in q)
+    assert any(a["id"] == "autopilot" for a in q)                    # auto mode, runner idle
+    assert any(a["id"] == "escalation" and a["tab"] == "execution" for a in q)
+    assert any(a["id"] == "briefs" and a["tab"] == "research" for a in q)
+    assert not any(a["id"] == "blocked:t2" for a in q)               # open ≠ blocked
+
+
+def test_derive_queue_all_clear_blocked_cap_and_no_mission():
+    q = fleet_viz.derive_queue(_calm_payload())
+    assert [a["severity"] for a in q] == ["green"] and q[0]["id"] == "all_clear"
+    many = _calm_payload(backlog=[{"id": f"t{i}", "title": f"task {i}", "status": "blocked",
+                                   "result": "no_candidate"} for i in range(9)])
+    q2 = fleet_viz.derive_queue(many)
+    blocked = [a for a in q2 if a["id"].startswith("blocked:")]
+    assert len(blocked) == 5                                         # capped, not a wall
+    assert any(a["id"] == "blocked_more" for a in q2)                # …but the rest is counted
+    q3 = fleet_viz.derive_queue(_calm_payload(mission=None))
+    assert any(a["id"] == "mission" and a["severity"] == "red" for a in q3)
+    parked = fleet_viz.derive_queue(_calm_payload(phase="idle", running_shift=None))
+    assert any(a["id"] == "parked" and a["severity"] == "blue" for a in parked)
+
+
+def test_fleet_json_carries_queue_and_resume_note(tmp_path, monkeypatch):
+    """/api/fleet feeds the Work Queue home tab: the derived actions ride the payload,
+    plus the latest shift's resume note (the Report tab's 'next steps')."""
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        s.set_mission("m", target_repo="r")
+        sh = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.end_shift(sh, status="completed", report="done", resume_note="next: ship the queue")
+        j = fleet_viz.fleet_json(s)
+    assert isinstance(j["queue"], list) and j["queue"]               # never empty (all-clear floor)
+    assert all({"id", "title", "sub", "severity", "tab"} <= set(a) for a in j["queue"])
+    assert j["resume_note"] == "next: ship the queue"
+    assert isinstance(j["briefs_staged"], int)
