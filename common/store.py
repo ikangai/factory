@@ -101,6 +101,13 @@ class Blackboard:
         lcols = {r[1] for r in self.conn.execute("PRAGMA table_info(learnings)").fetchall()}
         if lcols and "hits" not in lcols:
             self.conn.execute("ALTER TABLE learnings ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
+        # learnings hygiene (Task 1.3): retire flag + deterministic-staleness flag.
+        if lcols and "archived" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        if lcols and "stale" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -704,10 +711,32 @@ class Blackboard:
         dedups onto it (Task 0.5: count the recurrence instead of destroying it)."""
         self._exec("UPDATE learnings SET hits = hits + 1 WHERE id = ?", (learning_id,))
 
-    def learnings_for_role(self, role: str, limit: int = 10) -> list[dict]:
-        """A role's learnings, newest first (id DESC is stable even within one tick)."""
+    def archive_learning(self, learning_id: int) -> None:
+        """Retire a learning (`factory learn retire`, Task 1.3): archived=1 hides it from
+        prompts (learnings_for_role default view) — the row itself is kept as history AND
+        stays visible to record_learning's dedup window so a re-report of the same lesson
+        dedups onto it (hidden, hits-bumped) instead of resurrecting it as a live row.
+        Callers refuse unknown ids via get_learning FIRST (exact-id discipline)."""
+        self._exec("UPDATE learnings SET archived = 1 WHERE id = ?", (learning_id,))
+
+    def set_learning_stale(self, learning_id: int, stale: bool) -> None:
+        """Flag / clear the deterministic-staleness bit (`factory learn verify`, Task 1.3).
+        Advisory only: a stale row still surfaces, with a card suffix warning the reader."""
+        self._exec("UPDATE learnings SET stale = ? WHERE id = ?",
+                   (1 if stale else 0, learning_id))
+
+    def learnings_for_role(self, role: str, limit: int = 10, *,
+                           include_archived: bool = False) -> list[dict]:
+        """A role's LIVE (non-retired) learnings, newest first (id DESC is stable even
+        within one tick). Retired rows (archived=1) never surface by default — prompts
+        read this seam as-is (Task 1.3). include_archived=True is the DEDUP window's
+        view (record_learning): a retired lesson must keep absorbing re-reports (bump
+        hits, stay hidden) instead of resurrecting as a fresh live row — the factory
+        auto-records templated lessons on recurring failures, so the exact lesson an
+        operator retired WILL be reported again verbatim."""
+        where = "role = ?" if include_archived else "role = ? AND archived = 0"
         return self._all(
-            "SELECT * FROM learnings WHERE role = ? ORDER BY id DESC LIMIT ?",
+            f"SELECT * FROM learnings WHERE {where} ORDER BY id DESC LIMIT ?",
             (role, limit))
 
     def all_learnings(self, limit: int = 50) -> list[dict]:

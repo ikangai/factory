@@ -1081,14 +1081,46 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
 
 
 def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, content: str = "",
-              scope: str = "general", agent: str = "", limit: int = 20):
-    """`factory learn add [--role R] --content "…"` / `factory learn list [--role R]` — the
-    factory's memory CLI. Agents (the conductor + super-workers via Bash) record durable
-    learnings here; the orchestrator injects them back into each role's prompt via
+              scope: str = "general", agent: str = "", limit: int = 20,
+              learning_id: Optional[str] = None):
+    """`factory learn add [--role R] --content "…"` / `factory learn list [--role R]` /
+    `factory learn retire <id>` / `factory learn verify` — the factory's memory CLI.
+    Agents (the conductor + super-workers via Bash) record durable learnings here; the
+    orchestrator injects them back into each role's prompt via
     reporting.factory_memory.memory_card. Adds are dedup'd. `add` defaults to the `factory`
-    role; `list` with no role shows EVERY role's learnings. (design:
-    docs/plans/2026-06-27-factory-memory-design.md)"""
+    role; `list` with no role shows EVERY role's learnings. `retire` is the operator's
+    correction handle (archived=1, hidden from every prompt — exact integer id, unknown ids
+    refuse loudly); `verify` is the zero-token staleness check (flags dead file cites,
+    advisory only). (design: docs/plans/2026-06-27-factory-memory-design.md; Task 1.3)"""
     from ..reporting import factory_memory
+    if action == "retire":
+        # Exact-id discipline (mirrors cmd_plan's _need_task): the id is the integer
+        # PRIMARY KEY — anything that isn't one, or doesn't exist, refuses explicitly.
+        # A silent 0-row "success" is the documented `task claim` bug class.
+        try:
+            lid = int(learning_id)                        # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            print(f"[learn] retire needs an integer learning id, got {learning_id!r} — "
+                  "see `factory learn list` (0 rows)")
+            return None
+        row = store.get_learning(lid)
+        if row is None:
+            print(f"[learn] no learning matches id {lid} exactly — "
+                  "see `factory learn list` (0 rows)")
+            return None
+        store.archive_learning(lid)
+        print(f"[learn] retired #{lid} [{row['role']}]: {row['content']} (1 row)")
+        return lid
+    if action == "verify":
+        report = factory_memory.verify_learnings(store)
+        stale = [e for e in report if e["stale"]]
+        for e in stale:
+            print(f"[learn] #{e['id']} [{e['role']}] may be stale — dead cite(s): "
+                  + ", ".join(e["stale_cites"]))
+        print(f"[learn] verified {len(report)} cite-carrying learning(s): "
+              f"{len(stale)} stale, {len(report) - len(stale)} ok "
+              "(advisory — nothing deleted or archived)")
+        return report
     if action == "add":
         role = role or "factory"                          # add defaults to the cross-cutting role
         rec = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
@@ -1108,10 +1140,13 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
         if not rows:
             print(f"[learn] no learnings for {role or 'any role'} yet.")
         for r in rows:
-            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}): "
-                  f"{r['content']}")
+            mark = (" [archived]" if r.get("archived")
+                    else " [stale?]" if r.get("stale") else "")
+            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)})"
+                  f"{mark}: {r['content']}")
         return rows
-    print('[learn] usage: factory learn add --role R --content "…" | factory learn list [--role R]')
+    print('[learn] usage: factory learn add --role R --content "…" | '
+          'factory learn list [--role R] | factory learn retire <id> | factory learn verify')
     return None
 
 
@@ -1548,7 +1583,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
-    lrn.add_argument("action", choices=["add", "list"])
+    lrn.add_argument("action", choices=["add", "list", "retire", "verify"])
+    lrn.add_argument("id", nargs="?", default=None,
+                     help="integer learning id (for retire — exact id, see `learn list`)")
     lrn.add_argument("--role", default=None,
                      help="conductor | developer | researcher | factory "
                           "(add defaults to factory; list with no role shows ALL roles)")
@@ -1707,7 +1744,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
             cmd_learn(store, a.action, role=a.role, content=a.content, scope=a.scope,
-                      agent=a.agent, limit=a.limit)
+                      agent=a.agent, limit=a.limit, learning_id=a.id)
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":

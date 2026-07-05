@@ -679,3 +679,262 @@ def test_cmd_learn_list_shows_hits(tmp_path, capsys):
         orch.cmd_learn(s, "list", role="developer")
         out = capsys.readouterr().out
         assert "hits 2" in out
+
+
+# ============================================================================
+# Task 1.3 (learnings hygiene): `learn retire` + deterministic staleness verify.
+# retire = the operator's correction handle (must exist BEFORE any LLM authors
+# lessons); verify = zero-token regex cite-check, advisory only — flags stale,
+# never deletes, never archives on its own.
+# ============================================================================
+
+# -- store: archived column ---------------------------------------------------
+def test_archive_learning_hides_from_role_learnings(tmp_path):
+    with _store(tmp_path) as s:
+        a = s.add_learning("developer", "outdated advice")
+        b = s.add_learning("developer", "current advice")
+        s.archive_learning(a)
+        assert [r["id"] for r in s.learnings_for_role("developer")] == [b]
+        assert (s.get_learning(a) or {}).get("archived") == 1    # row survives, just hidden
+
+
+def test_migrate_adds_archived_and_stale_to_old_db(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)                       # a pre-Task-1.3 learnings table
+    conn.execute("""CREATE TABLE learnings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL,
+        agent TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'general',
+        content TEXT NOT NULL, shift_id INTEGER,
+        uses INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
+    conn.commit()
+    conn.close()
+    with Blackboard(db) as s:
+        s.init_db()
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(learnings)").fetchall()}
+        assert "archived" in cols and "stale" in cols
+
+
+def test_set_learning_stale_roundtrip(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see gone.py:5")
+        assert s.get_learning(lid)["stale"] == 0
+        s.set_learning_stale(lid, True)
+        assert s.get_learning(lid)["stale"] == 1
+        s.set_learning_stale(lid, False)
+        assert s.get_learning(lid)["stale"] == 0
+
+
+# -- CLI: factory learn retire (exact-id discipline) ---------------------------
+def test_cmd_learn_retire_archives_exact_id(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("factory", "retire me")
+        orch.cmd_learn(s, "retire", learning_id=str(lid))
+        assert s.get_learning(lid)["archived"] == 1
+        assert "retired" in capsys.readouterr().out
+
+
+def test_cmd_learn_retire_refuses_unknown_id(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("factory", "keep me")
+        orch.cmd_learn(s, "retire", learning_id="9999")
+        assert "0 rows" in capsys.readouterr().out           # explicit refusal, never silent
+        assert s.get_learning(lid)["archived"] == 0
+
+
+def test_cmd_learn_retire_refuses_non_integer_id(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("factory", "keep me too")
+        orch.cmd_learn(s, "retire", learning_id="task-abc123")
+        assert "0 rows" in capsys.readouterr().out
+        assert s.get_learning(lid)["archived"] == 0
+
+
+def test_retired_learning_leaves_memory_card(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "bad advice that got retired")
+        s.archive_learning(lid)
+        assert factory_memory.memory_card(s, "developer") == ""
+
+
+# -- retire must be durable against re-recording (dedup sees archived rows) ----
+def test_learnings_for_role_include_archived_is_the_dedup_window(tmp_path):
+    with _store(tmp_path) as s:
+        a = s.add_learning("developer", "retired advice")
+        b = s.add_learning("developer", "live advice")
+        s.archive_learning(a)
+        assert [r["id"] for r in s.learnings_for_role("developer")] == [b]
+        assert [r["id"] for r in
+                s.learnings_for_role("developer", include_archived=True)] == [b, a]
+
+
+def test_retired_learning_absorbs_rereport_without_resurrecting(tmp_path):
+    """The factory auto-records templated lessons on recurring failures (lesson_for_block),
+    so the EXACT lesson an operator retires WILL be reported again verbatim. Dedup must
+    still match the archived row — bump hits, return created=False — instead of creating
+    a fresh live row that silently undoes the operator's `learn retire`."""
+    with _store(tmp_path) as s:
+        lid, created = factory_memory.record_learning(s, "factory", "retire me forever")
+        assert created
+        s.archive_learning(lid)
+        again = factory_memory.record_learning(s, "factory", "retire me forever")
+        assert again == (lid, False)                    # deduped onto the RETIRED row
+        row = s.get_learning(lid)
+        assert row["archived"] == 1                     # stays hidden
+        assert row["hits"] == 2                         # recurrence still counted
+        assert s.learnings_for_role("factory") == []    # the advice does NOT come back
+        assert factory_memory.memory_card(s, "factory") == ""
+
+
+# -- extract_cites (regex, zero tokens) ----------------------------------------
+def test_extract_cites_paths_lines_and_bare_basenames():
+    cites = factory_memory.extract_cites(
+        "the retry helper lives in llm.py:262, reuse it — judges in reporting/scope_check.py")
+    assert ("llm.py", 262) in cites
+    assert ("reporting/scope_check.py", None) in cites
+
+
+def test_extract_cites_ignores_plain_prose():
+    assert factory_memory.extract_cites("narrow the brief to one landable slice") == []
+    assert factory_memory.extract_cites("") == []
+
+
+# -- verify_learnings (deterministic staleness) ---------------------------------
+def test_verify_flags_missing_file_as_stale(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "the helper lives in gone.py:10")
+        report = factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 1
+        assert any(e["id"] == lid and e["stale"] for e in report)
+
+
+def test_verify_flags_line_beyond_eof_as_stale(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "session.py").write_text("line1\nline2\n")
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see session.py:278 for the retry")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 1
+
+
+def test_verify_unique_basename_rglob_fallback(tmp_path):
+    """Live cites are mostly bare basenames (session.py:278) — a path-prefix
+    resolve would no-op; a UNIQUE basename anywhere in the tree must resolve."""
+    target = tmp_path / "target"
+    (target / "pkg" / "sub").mkdir(parents=True)
+    (target / "pkg" / "sub" / "session.py").write_text("\n".join(["x"] * 300) + "\n")
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "the retry helper is at session.py:278")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 0
+
+
+def test_verify_ambiguous_basename_is_not_stale(tmp_path):
+    """Two files share the cited basename → can't know which; an advisory tool
+    must not false-positive, so ambiguity is NOT stale evidence."""
+    target = tmp_path / "target"
+    (target / "a").mkdir(parents=True)
+    (target / "b").mkdir(parents=True)
+    (target / "a" / "session.py").write_text("x\n")
+    (target / "b" / "session.py").write_text("x\n")
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see session.py:278")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 0
+
+
+def test_verify_resolves_cites_per_role(tmp_path):
+    """factory-role cites check against the factory repo; developer/conductor
+    cites check against the TARGET checkout (a live row cites reporting/scope_check.py)."""
+    fac = tmp_path / "fac"
+    (fac / "reporting").mkdir(parents=True)
+    (fac / "reporting" / "scope_check.py").write_text("x\n")
+    target = tmp_path / "target"
+    target.mkdir()
+    with _store(tmp_path) as s:
+        f = s.add_learning("factory", "judges live in reporting/scope_check.py")
+        d = s.add_learning("developer", "judges live in reporting/scope_check.py")
+        factory_memory.verify_learnings(
+            s, roots={"factory": str(fac), "developer": str(target)})
+        assert s.get_learning(f)["stale"] == 0
+        assert s.get_learning(d)["stale"] == 1
+
+
+def test_verify_clears_stale_when_cite_resolves_again(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see helper.py:1")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 1
+        (target / "helper.py").write_text("x\n")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert s.get_learning(lid)["stale"] == 0
+
+
+def test_verify_is_advisory_never_deletes_or_archives(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see gone.py:9")
+        factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        row = s.get_learning(lid)
+        assert row is not None and row["archived"] == 0 and row["stale"] == 1
+        assert [r["id"] for r in s.learnings_for_role("developer")] == [lid]
+
+
+def test_verify_skips_archived_rows(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see gone.py:9")
+        s.archive_learning(lid)
+        report = factory_memory.verify_learnings(s, roots={"developer": str(target)})
+        assert all(e["id"] != lid for e in report)
+        assert s.get_learning(lid)["stale"] == 0             # untouched
+
+
+# -- stale suffix in the memory card -------------------------------------------
+def test_memory_card_flags_stale_rows(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "the retry helper is at session.py:278")
+        s.set_learning_stale(lid, True)
+        card = factory_memory.memory_card(s, "developer")
+        assert "session.py:278 (may be stale — cited file moved)" in card
+
+
+def test_memory_card_no_stale_suffix_when_fresh(tmp_path):
+    with _store(tmp_path) as s:
+        s.add_learning("developer", "a perfectly fresh lesson")
+        assert "may be stale" not in factory_memory.memory_card(s, "developer")
+
+
+# -- CLI: factory learn verify ---------------------------------------------------
+def test_cmd_learn_verify_prints_summary(tmp_path, capsys, monkeypatch):
+    target = tmp_path / "t"
+    target.mkdir()
+    monkeypatch.setattr(factory_memory, "_role_root", lambda role: str(target))
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "see gone.py:9")
+        s.add_learning("developer", "no cites here at all")
+        orch.cmd_learn(s, "verify")
+        out = capsys.readouterr().out
+        assert "stale" in out and f"#{lid}" in out
+        assert s.get_learning(lid)["stale"] == 1
+
+
+def test_cli_learn_retire_wired_through_main(tmp_path, monkeypatch, capsys):
+    """`factory learn retire <id>` end-to-end: the argparse arm carries the positional
+    id into cmd_learn (hermetic store — same pattern as the viz --selfcheck test)."""
+    db = str(tmp_path / "f.db")
+    with Blackboard(db) as s:
+        s.init_db()
+        lid = s.add_learning("factory", "wired lesson")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    orch.main(["learn", "retire", str(lid)])
+    assert "retired" in capsys.readouterr().out
+    with Blackboard(db) as s:
+        assert s.get_learning(lid)["archived"] == 1

@@ -11,7 +11,9 @@ Design: docs/plans/2026-06-27-factory-memory-design.md
 """
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import Optional
 
 ROLES = ("conductor", "developer", "researcher", "factory")
@@ -60,12 +62,17 @@ def record_learning(store, role: str, content: str, *, agent: str = "",
     """Record a learning for `role`. Returns (id, created): created=False when the content
     deduped onto an existing learning for the SAME role — its `hits` counter is bumped so
     recurrence is COUNTED, not destroyed (Task 0.5). Returns None only for blank content.
-    Dedup is role-scoped — the same lesson can be relevant to two roles."""
+    Dedup is role-scoped — the same lesson can be relevant to two roles.
+    The dedup window INCLUDES retired (archived=1) rows on purpose (Task 1.3): the factory
+    auto-records templated lessons on recurring failures, so a lesson the operator retired
+    will be re-reported verbatim — it must dedup onto the archived row (hits bumped,
+    created=False, still hidden from prompts), never resurrect as a fresh live row."""
     content = (content or "").strip()
     if not content:
         return None
     if dedup:
-        hit = _is_dup(content, store.learnings_for_role(role, limit=200))
+        hit = _is_dup(content, store.learnings_for_role(role, limit=200,
+                                                        include_archived=True))
         if hit is not None:
             store.bump_learning_hits(hit["id"])
             return hit["id"], False
@@ -80,7 +87,8 @@ _RECURRING_MIN_HITS = 3
 def _card_line(r: dict) -> str:
     hits = r.get("hits") or 0
     tag = f" (recurring x{hits})" if hits >= _RECURRING_MIN_HITS else ""
-    return f"- {r['content']}{tag}"
+    stale = " (may be stale — cited file moved)" if r.get("stale") else ""
+    return f"- {r['content']}{tag}{stale}"
 
 
 def memory_card(store, role: str, *, limit: int = 8, include_factory: bool = True) -> str:
@@ -202,3 +210,89 @@ def lesson_for_block(action: str, stage: str = "") -> Optional[str]:
     if action == "error" and stage in _ERROR_BY_STAGE:
         return _ERROR_BY_STAGE[stage]
     return _BLOCK_LESSONS.get(action or "")
+
+
+# -- learnings hygiene: deterministic staleness verify (Task 1.3) -------------
+# A lesson that cites a file that no longer exists (or a line beyond EOF) is
+# probably describing code that moved. Regex + stat — zero tokens, advisory only.
+
+# File cites as they actually appear in live rows: bare basenames ("session.py:278"),
+# relative paths ("reporting/scope_check.py"), optionally ":<line>". Extension-anchored
+# so prose abbreviations ("e.g.", version numbers) never match.
+_CITE_EXTS = ("py", "md", "sql", "html", "js", "css", "yaml", "yml", "json", "sh", "toml")
+_CITE_RE = re.compile(
+    r"(?<![\w.-])((?:[\w.-]+/)*[\w.-]+\.(?:%s))(?::(\d+))?\b" % "|".join(_CITE_EXTS))
+
+
+def extract_cites(content: str) -> list[tuple[str, Optional[int]]]:
+    """The (path, line) file cites in a learning's content, in order, deduped.
+    line is None for a bare-path cite."""
+    out: list[tuple[str, Optional[int]]] = []
+    for m in _CITE_RE.finditer(content or ""):
+        cite = (m.group(1), int(m.group(2)) if m.group(2) else None)
+        if cite not in out:
+            out.append(cite)
+    return out
+
+
+def _role_root(role: str) -> str:
+    """The repo a role's file cites refer to: the factory itself for the 'factory' role
+    (a live row cites reporting/scope_check.py); the TARGET checkout for every other role
+    (developer/conductor/researcher lessons describe the target codebase)."""
+    from ..common import paths
+    if role == "factory":
+        return str(paths.FACTORY_ROOT)
+    from .scope_check import _target_root                   # adapter resolve, fail-open
+    return _target_root()
+
+
+def _cite_status(root: str, path: str, line: Optional[int]) -> str:
+    """'ok' | 'stale' | 'ambiguous'. Path-prefix resolve first; live cites are mostly
+    bare basenames, so fall back to a unique-basename rglob (dot-dirs like .git skipped).
+    Multiple basename matches = 'ambiguous' — we can't know which file was meant, and an
+    advisory tool must not false-positive, so ambiguity is NOT stale evidence."""
+    p = Path(root) / path
+    if not p.is_file():
+        base = os.path.basename(path)
+        matches = [m for m in Path(root).rglob(base)
+                   if m.is_file()
+                   and not any(part.startswith(".") for part in m.relative_to(root).parts)]
+        if len(matches) == 1:
+            p = matches[0]
+        elif matches:
+            return "ambiguous"
+        else:
+            return "stale"
+    if line is not None:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                if line > sum(1 for _ in fh):               # cite points beyond EOF
+                    return "stale"
+        except OSError:
+            return "stale"
+    return "ok"
+
+
+def verify_learnings(store, *, roots: Optional[dict] = None, limit: int = 1000) -> list[dict]:
+    """`factory learn verify` — deterministically check every live learning's file cites
+    against the repo its role works in (`roots` overrides the per-role resolve for tests).
+    A dead cite (missing path / line beyond EOF) sets stale=1; a cite that resolves again
+    clears it. ADVISORY ONLY: never deletes, never archives — retiring stays the operator's
+    call (`factory learn retire`). Returns one report entry per cite-carrying learning."""
+    report: list[dict] = []
+    for r in store.all_learnings(limit):
+        if r.get("archived"):
+            continue
+        cites = extract_cites(r.get("content", ""))
+        if not cites:
+            continue
+        root = (roots or {}).get(r["role"]) or _role_root(r["role"])
+        dead = [f"{path}:{line}" if line else path
+                for path, line in cites if _cite_status(root, path, line) == "stale"]
+        stale = bool(dead)
+        if stale != bool(r.get("stale")):
+            store.set_learning_stale(r["id"], stale)
+        report.append({"id": r["id"], "role": r["role"], "stale": stale,
+                       "cites": [f"{p}:{ln}" if ln else p for p, ln in cites],
+                       "stale_cites": dead})
+    return report

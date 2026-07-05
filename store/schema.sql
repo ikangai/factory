@@ -202,6 +202,8 @@ CREATE TABLE IF NOT EXISTS learnings (
     shift_id   INTEGER,
     uses       INTEGER NOT NULL DEFAULT 0,   -- times surfaced into a prompt (relevance signal)
     hits       INTEGER NOT NULL DEFAULT 1,   -- times reported: each dedup-hit bumps (recurrence signal, Task 0.5)
+    archived   INTEGER NOT NULL DEFAULT 0,   -- retired via `factory learn retire` (correction handle, Task 1.3)
+    stale      INTEGER NOT NULL DEFAULT 0,   -- `factory learn verify` found a dead file cite (advisory, Task 1.3)
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);
