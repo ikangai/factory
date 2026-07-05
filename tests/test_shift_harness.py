@@ -271,6 +271,8 @@ def test_run_shift_budget_exhausted_skips_executor(tmp_path, monkeypatch):
     ends 'budget_exhausted', and the budget note is APPENDED to the conductor's own resume
     note (never replacing it — the next shift's {RESUME} seam needs both)."""
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
     with _store(tmp_path) as s:
         s.set_mission("x")
         ran = {"exec": False}
@@ -294,6 +296,8 @@ def test_run_shift_budget_trips_on_exact_equality_and_notes_alone(tmp_path, monk
     """spent == token_budget trips (>=); a conductor with no resume note gets the budget
     note standing alone (no stray separator)."""
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
     with _store(tmp_path) as s:
         s.set_mission("x")
         res = shiftmod.run_shift(s, token_budget=500, conductor=_spender(500, resume_note=""),
@@ -307,6 +311,8 @@ def test_run_shift_budget_exhausted_requeues_claimed_tasks(tmp_path, monkeypatch
     """The existing post-shift requeue still runs on the budget path — claimed work goes
     back to the backlog instead of stranding in_progress."""
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
     with _store(tmp_path) as s:
         s.set_mission("x")
         s.add_task("t1", "x", source="issue")
@@ -326,6 +332,8 @@ def test_run_shift_budget_zero_means_unlimited(tmp_path, monkeypatch):
     """token_budget == 0 is the 'unlimited' convention (matches loop_token_budget) — the
     brake never trips, the executor runs, no budget note is appended."""
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
     with _store(tmp_path) as s:
         s.set_mission("x")
         ran = {"exec": False}
