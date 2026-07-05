@@ -88,6 +88,13 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
         lambda t: f"- [{t['source']}{('/' + t['source_ref']) if t['source_ref'] else ''}] "
                   f"{t['id']}: {t['title']}",
         "(empty — mine new work from the target's issues + research)")
+    # Task 1.1: the {BLOCKED} seam. The backlog above injects status='open' ONLY, so blocked
+    # outcomes never reached the prompt — this guarantees the freshest failures (with the
+    # reason each blocked) are prompt input, newest-first.
+    blocked = _bullets(
+        store.recent_blocked_tasks(limit=8),
+        lambda t: f"- {t['id']}: {t['title']} — {(t['result'] or '')[:160]}",
+        "(none blocked — nothing to reopen)")
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
     target = mission.get("target_repo") or config.target_repo_slug()   # robust fallback if unset
     issues = fetch_issues(target) or "(none fetched)"
@@ -100,6 +107,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{MEMORY}", factory_memory.memory_card(store, "conductor"))
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
+            .replace("{BLOCKED}", blocked)
             .replace("{PLAN}", _plan_bullets(store))
             .replace("{WORKERS}", _workers_bullets(store))
             .replace("{DIGESTS}", digests))

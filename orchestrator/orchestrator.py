@@ -688,14 +688,21 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
             shutil.rmtree(work, ignore_errors=True)   # throwaway clone never touches the real target
 
 
+# Task 1.1: the reopen provenance marker. Prepended (one line per reopen — they STACK) to the
+# narrowed brief, so the reopen count needs no schema change: count these lines in detail.
+_REOPEN_PREFIX = "previously blocked: "
+_MAX_REOPENS = 2                       # a 3rd reopen is refused → escalate to @human
+
+
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
              source: str = "human", result: str = "", status: Optional[str] = None,
              detail: str = "") -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
     `task add "<title>" [--detail "<spec/brief>"]`, `task claim <id>`,
-    `task done <id> [--result <sha>]`, `task block <id> [--result why]`. claim/done STAMP the
-    running shift, so the loop can tell what a shift shipped (the basis for mission-progress).
-    `--detail` carries the bounded brief/spec to the developer (it used to be dropped)."""
+    `task done <id> [--result <sha>]`, `task block <id> [--result why]`,
+    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1).
+    claim/done STAMP the running shift, so the loop can tell what a shift shipped (the basis
+    for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
             print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
@@ -713,6 +720,34 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
     elif action == "block":
         store.set_task_status(rest, "blocked", result=result)
         print(f"[task] blocked {rest}")
+    elif action == "reopen":
+        # The blocked → narrowed-brief → redispatch loop, without hand-editing tasks.detail.
+        # Exact-id discipline (mirrors cmd_plan's _need_task): a partial/unknown id refuses
+        # loudly — the silent-0-row-success bug class documented on `task claim`.
+        t = store.get_task(rest)
+        if t is None:
+            print(f"[task] no task matches id '{rest}' exactly — pass the full task-<hash> (0 rows)")
+            return
+        if t["status"] != "blocked":
+            print(f"[task] {rest} is not blocked (status={t['status']}) — "
+                  "reopen narrows BLOCKED tasks only (0 rows)")
+            return
+        if not detail:
+            print("[task] reopen requires --detail with the NARROWED brief — redispatching "
+                  "the same brief re-runs the same failure (0 rows)")
+            return
+        # Provenance lines stack newest-first; counting them IS the reopen counter (no schema).
+        prior = [ln for ln in (t.get("detail") or "").splitlines()
+                 if ln.startswith(_REOPEN_PREFIX)]
+        if len(prior) >= _MAX_REOPENS:
+            print(f"[task] {rest} was already reopened {_MAX_REOPENS}x and blocked again — "
+                  "refusing a 3rd reopen; escalate to @human via agora (0 rows)")
+            return
+        reason = " ".join((t.get("result") or "").split()) or "(no reason recorded)"
+        store.set_task_detail(rest, "\n".join([_REOPEN_PREFIX + reason] + prior + [detail]))
+        store.set_task_status(rest, "open", result="")   # result is NOT NULL — clear via ''
+        print(f"[task] reopened {rest} (reopen {len(prior) + 1} of {_MAX_REOPENS}) — "
+              "detail narrowed, status open (1 row)")
 
 
 def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int = 200) -> None:
@@ -1534,9 +1569,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="deterministic dashboard gate: node --check the inline JS + "
                           "placeholder/section scans; exit 1 on failure (no browser/server)")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
-    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
-    tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
-    tsk.add_argument("--detail", default="", help="bounded brief/spec for `task add` (target surface + acceptance)")
+    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen"])
+    tsk.add_argument("rest", nargs="?", help='title (add) or FULL task id (claim/done/block/reopen)')
+    tsk.add_argument("--detail", default="",
+                     help="bounded brief/spec for `task add` (target surface + acceptance); "
+                          "the NARROWED brief for `task reopen` (required there)")
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")

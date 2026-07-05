@@ -381,6 +381,20 @@ class Blackboard:
             rows = self._all("SELECT * FROM tasks ORDER BY created_at")
         return [self._with_spec(r) for r in rows]
 
+    def recent_blocked_tasks(self, limit: int = 8) -> list[dict]:
+        """The last N blocked tasks NEWEST-FIRST by updated_at (Task 1.1's {BLOCKED} seam).
+        Dedicated query: list_tasks orders by created_at ASC, which buries the freshest
+        failures — exactly the rows the conductor must react to first."""
+        rows = self._all("SELECT * FROM tasks WHERE status = 'blocked' "
+                         "ORDER BY updated_at DESC LIMIT ?", (int(limit),))
+        return [self._with_spec(r) for r in rows]
+
+    def set_task_detail(self, id: str, detail: str) -> None:
+        """Replace a task's brief (the `task reopen` verb narrows a blocked task's detail;
+        callers own exact-id discipline — this is a plain UPDATE)."""
+        self._exec("UPDATE tasks SET detail = ?, updated_at = ? WHERE id = ?",
+                   (detail, now_iso(), id))
+
     def set_task_status(self, id: str, status: str, *, result: Optional[str] = None,
                         shift_id: Optional[int] = None) -> None:
         sets, params = ["status = ?", "updated_at = ?"], [status, now_iso()]
