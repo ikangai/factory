@@ -37,6 +37,11 @@ in a few words) and ONE when you FINISH ("tests green, merging" or "blocked: <wh
 operator sees your work in the live feed. Two posts, no more — don't let it eat into your turns.
 
 ## Hard rules
+- If your task carries an **ACCEPTANCE CONTRACT** line naming a test ref (e.g.
+  `tests/test_x.py::test_it`), that is the spec's declared done-condition: the factory will run
+  EXACTLY that ref in your candidate after the suite passes. **Create the test at exactly that
+  path/name and make it pass** — a missing or red file blocks the merge and is counted as your
+  non-compliance, not a factory typo.
 - Work ONLY inside this clone. Do not touch anything outside it.
 - NEVER modify the target's **frozen safety surface**: {FROZEN}. A diff touching those is
   auto-rejected by the factory regardless — don't waste effort there.

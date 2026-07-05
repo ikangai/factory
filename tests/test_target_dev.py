@@ -59,6 +59,32 @@ def test_run_tests_uses_configured_command(monkeypatch):
     assert seen["cmd"] == ["pytest", "-x"]           # config overrides the clive default
 
 
+def test_run_named_test_rejects_parent_traversal(monkeypatch):
+    """Defense-in-depth: even if a '..' ref reaches the adapter directly, pytest is NEVER
+    spawned against a traversal path — it maps to a fail-open 'missing' (a telemetry skip,
+    not a discard) so nothing outside the candidate's tests/ can be imported/executed."""
+    called = {"ran": False}
+
+    def boom(*a, **k):
+        called["ran"] = True
+        raise AssertionError("subprocess must not run for a traversal ref")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    status, report = CliveAdapter().run_named_test(
+        "/tmp/clone", "tests/../../../etc/passwd.py::test_x")
+    assert status == "missing" and called["ran"] is False and report
+
+
+def test_run_named_test_runs_a_safe_ref(monkeypatch):
+    """A ref with no '..' segment runs normally (guard is not over-broad)."""
+    seen = {}
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: seen.__setitem__("cmd", cmd) or _done(0, "1 passed"))
+    status, _ = CliveAdapter().run_named_test("/tmp/clone", "tests/test_x.py::test_y")
+    assert status == "passed"
+    assert "tests/test_x.py::test_y" in seen["cmd"]
+
+
 def test_clone_constructs_git_clone(monkeypatch):
     monkeypatch.setattr(config, "clive_entry", lambda: ("/fake/clive", "/fake/clive/clive.py"))
     seen = {}

@@ -133,6 +133,15 @@ super_worker:
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
   # Test-only / docs-only / empty diffs pass. Enabled 2026-06-30 (operator).
   require_test: true
+  # Task 3.1 (Phase 3): spec-named acceptance EXECUTION gate (objective done-condition, P2). When
+  # true, the spec's OWN named acceptance test — a tests/<path>.py[::name] ref extracted from
+  # spec.acceptance — is RUN in the candidate AFTER the suite gate: a RED run discards the
+  # candidate (stage 'acceptance'); a MISSING test (the worker didn't create the contracted ref)
+  # is a telemetry-first SKIP (counted as a scope='acceptance' factory learning, NOT yet
+  # discarded — that flip waits until the prompt contract is live and the skip rate is known).
+  # A prose acceptance with no runnable ref → nothing runs (fail-open). Default OFF; board-
+  # toggleable (in SETTINGS_SPEC — it is a gate the operator trials, not a brake).
+  acceptance_exec: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits

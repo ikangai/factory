@@ -47,6 +47,9 @@ class FakeAdapter:
     def run_tests(self, repo, **k):
         return (self._tests_passed, "report")
 
+    def run_named_test(self, cwd, ref, **k):
+        self.calls.append(("named", ref)); return getattr(self, "_named", ("passed", "acc ok"))
+
     def merge_branch(self, repo, branch, **k):
         self.calls.append(("merge", branch)); return "MERGESHA"
 
@@ -864,4 +867,138 @@ def test_no_scope_miss_on_no_candidate_without_spec(tmp_path):
     dev_fn = lambda text, **k: {"action": "no_candidate"}
     develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
     assert not any(r["scope"] == "scope_check" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+# ============================================================================
+# Task 3.1: execute the spec's named acceptance test (stage='acceptance').
+#   - develop_and_merge threads acceptance_ref into run_code_round (adapter seam);
+#   - execute_claimed_tasks extracts the ref ON THE MAIN THREAD from each task's
+#     spec (only when the acceptance_exec gate is on), surfaces it as a HARD CONTRACT
+#     line in the brief, and counts acceptance_skipped as telemetry at close-out.
+# ============================================================================
+
+def test_develop_and_merge_runs_acceptance_ref(monkeypatch, tmp_path):
+    """acceptance_ref threads through develop_and_merge → run_code_round → adapter.run_named_test."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade,
+                                    acceptance_ref="tests/test_x.py::test_it")
+    assert res["action"] == "merged"
+    assert ("named", "tests/test_x.py::test_it") in ad.calls
+
+
+def test_develop_and_merge_acceptance_red_discards(monkeypatch, tmp_path):
+    """A red named acceptance test discards the candidate at stage 'acceptance' (never merges)."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    ad._named = ("failed", "E assert False")
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade,
+                                    acceptance_ref="tests/test_x.py::test_it")
+    assert res["action"] == "discarded" and res["stage"] == "acceptance"
+    assert "assert False" in res["tests_report"]
+    assert "merge" not in [c[0] for c in ad.calls]
+
+
+def test_develop_and_merge_no_ref_never_runs_named_test(monkeypatch, tmp_path):
+    """No acceptance_ref (gate off / prose spec) → run_named_test is never invoked (today's path)."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "merged" and "named" not in [c[0] for c in ad.calls]
+
+
+def _acc_store(tmp_path, spec):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    if spec is not None:
+        s.set_task_spec("task-1", spec)
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_execute_extracts_ref_and_adds_contract_when_gate_on(tmp_path):
+    """Correction (a): with acceptance_exec ON, the rail extracts the spec's ref on the MAIN
+    THREAD, threads it as acceptance_ref, AND surfaces it in the brief as a hard contract line."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "prove: tests/test_x.py::test_it"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, acceptance_exec=True)
+    assert seen["k"]["acceptance_ref"] == "tests/test_x.py::test_it"
+    assert "ACCEPTANCE CONTRACT" in seen["text"] and "tests/test_x.py::test_it" in seen["text"]
+    s.close()
+
+
+def test_execute_no_ref_when_gate_off(tmp_path):
+    """Gate OFF (default): no ref is extracted or threaded, no contract line — byte-for-byte today."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "tests/test_x.py::test_it"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake)      # acceptance_exec defaults off
+    assert seen["k"].get("acceptance_ref") is None
+    assert "ACCEPTANCE CONTRACT" not in seen["text"]
+    s.close()
+
+
+def test_execute_prose_acceptance_yields_no_ref(tmp_path):
+    """Gate ON but the spec's acceptance is prose (no runnable ref) → acceptance_ref None, no
+    contract line — fail-open (the gate simply doesn't run)."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py", "acceptance": "a retry test passes"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, acceptance_exec=True)
+    assert seen["k"].get("acceptance_ref") is None
+    assert "ACCEPTANCE CONTRACT" not in seen["text"]
+    s.close()
+
+
+def test_execute_counts_acceptance_skipped_telemetry(tmp_path):
+    """Correction (b): a candidate whose result carries acceptance_skipped records a per-shift
+    'acceptance' factory learning (telemetry-first) — recurrence is counted via the hits column."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "tests/test_x.py::test_it"})
+    dev_fn = lambda text, **k: {"action": "merged", "merge_sha": "z",
+                                "acceptance_skipped": "tests/test_x.py::test_it"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, acceptance_exec=True)
+    skips = [r for r in s.learnings_for_role("factory") if r["scope"] == "acceptance"]
+    assert len(skips) == 1
+    assert s.get_task("task-1")["status"] == "done"      # skipped != discarded — it still merged
+    s.close()
+
+
+def test_acceptance_discard_gets_stage_lesson(tmp_path):
+    """A discarded(acceptance) result blocks the task with the acceptance-specific canned lesson."""
+    from factory.reporting import factory_memory
+    s, sh = _acc_store(tmp_path, None)
+    dev_fn = lambda text, **k: {"action": "discarded", "stage": "acceptance",
+                                "tests_report": "E assert False"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, acceptance_exec=True)
+    assert s.get_task("task-1")["status"] == "blocked"
+    assert factory_memory.lesson_for_block("discarded", "acceptance") is not None
+    lessons = [r["content"] for r in s.learnings_for_role("factory") if r["scope"] == "blocked"]
+    assert any("acceptance" in c.lower() for c in lessons)
     s.close()

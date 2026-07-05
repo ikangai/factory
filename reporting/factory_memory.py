@@ -258,6 +258,11 @@ _DISCARD_BY_STAGE = {
               "off frozen files entirely.",
     "no_test": "a candidate was discarded for shipping a source change with NO test — write the "
                "acceptance test FIRST, then the code (the gate requires a test).",
+    # Task 3.1: the spec's OWN named acceptance test ran RED in the candidate — the change didn't
+    # satisfy its declared done-condition. Create/fix exactly the contracted test ref and make it pass.
+    "acceptance": "a candidate was discarded because the spec's named ACCEPTANCE test ran RED — the "
+                  "change didn't satisfy its declared done-condition; create/fix exactly the "
+                  "contracted test ref (tests/…::name) and make it pass before merging.",
     # Task 2.3: a reviewer reject is not the generic gate-discard — the blind pre-merge reviewer
     # judged the change out-of-scope/unsafe; its reason rides in the blocked result. Name it.
     "review": "a candidate was rejected by the blind pre-merge REVIEWER — read its reason in the "

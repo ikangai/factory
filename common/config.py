@@ -39,6 +39,7 @@ SETTINGS_SPEC = {
     "super_worker.require_test": bool,
     "super_worker.auto_decompose": bool,
     "super_worker.reviewer": bool,          # Phase 8 (config-gated reviewer role)
+    "super_worker.acceptance_exec": bool,   # Task 3.1 (spec's named acceptance test — a board gate)
 }
 
 

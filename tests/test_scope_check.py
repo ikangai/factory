@@ -282,3 +282,13 @@ def test_execute_runs_scope_prefilter_when_judge_given(tmp_path):
                                   scope_judge=lambda t: {"decision": "reject", "reason": "too broad"})
         assert dispatched == []                            # rejected before any worker spun up
         assert s.get_task("task-1")["status"] == "blocked"
+
+
+# -- Task 3.1 correction (c): the scope-check prompt nudges RUNNABLE acceptance refs ----------
+def test_scope_check_prompt_nudges_runnable_test_refs():
+    """The judge should emit acceptance as a runnable `tests/…::name` ref (the objective done-
+    condition the acceptance-exec gate can execute), and must only cite refs it can ground."""
+    from factory.roles import common as rcommon
+    prompt = rcommon._load_prompt("scope_check")
+    assert "tests/<path>.py::<test_name>" in prompt
+    assert "RUNNABLE" in prompt

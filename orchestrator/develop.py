@@ -106,7 +106,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                  real: bool = False, grade_fn: Optional[Callable] = None,
                  champion_scores: Optional[dict] = None, merge_lock=None,
                  memory: str = "", profile_overlay: str = "", model: str = "",
-                 require_test: Optional[bool] = None, reviewer: bool = False) -> dict:
+                 require_test: Optional[bool] = None, reviewer: bool = False,
+                 acceptance_ref: Optional[str] = None) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -123,7 +124,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  champion_scores=cs, grade_fn=gf, as_user=as_user,
                                  claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
-                                 require_test=require_test, reviewer=reviewer)
+                                 require_test=require_test, reviewer=reviewer,
+                                 acceptance_ref=acceptance_ref)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
@@ -132,7 +134,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  champion_scores=cs, grade_fn=gf,
                                  as_user=as_user, claude_bin=claude_bin, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
-                                 require_test=require_test, reviewer=reviewer)
+                                 require_test=require_test, reviewer=reviewer,
+                                 acceptance_ref=acceptance_ref)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -145,7 +148,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           scope_judge: Optional[Callable] = None,
                           decomposer: Optional[Callable] = None,
                           require_test: Optional[bool] = None,
-                          reviewer: bool = False) -> int:
+                          reviewer: bool = False,
+                          acceptance_exec: bool = False) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -190,11 +194,19 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     # would be a confounded near-noise signal), and its surfaced ids get the task's OUTCOME
     # attributed back at close-out. A profile supplies only a persona overlay + a rail-resolved
     # model tier; capability stays rail-fixed.
+    # Task 3.1 (P2): when the acceptance-exec gate is ON, extract each task's OWN named
+    # acceptance test (a tests/<path>.py[::name] ref parsed from spec.acceptance) ON THE MAIN
+    # THREAD — the workers run in threads that must not touch the store, and the parse is pure.
+    # A prose acceptance / no safe ref → None (the gate simply doesn't run for that task).
+    from ..reporting import acceptance
     profiles = {}
     cards: dict = {}                                 # task id → (card text, surfaced learning ids)
+    accept_refs: dict = {}                           # task id → the named acceptance ref (or None)
     for t in claimed:
         topic = (t.get("title") or "") + " " + (t.get("detail") or "")
         cards[t["id"]] = factory_memory.memory_card_with_ids(store, "developer", topic=topic)
+        accept_refs[t["id"]] = (acceptance.extract_test_ref(t.get("spec") or {})
+                                if acceptance_exec else None)
         raw = t.get("profile") or ""
         prof = store.get_profile(raw)                    # '' / 'generalist' → synthetic generalist
         if prof is None:                                 # a NAMED profile that no longer exists:
@@ -219,6 +231,12 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         if task.get("spec") and "SPEC:" not in (task.get("detail") or ""):   # avoid a double-fold:
             from ..reporting import scope_check                              # detail may already
             text += scope_check.spec_brief(task["spec"])                     # carry the spec block
+        acc_ref = accept_refs.get(task["id"])
+        if acc_ref:                                    # Task 3.1 correction (a): a HARD CONTRACT line —
+            text += ("\n\nACCEPTANCE CONTRACT (hard): after your suite passes, the factory will run "
+                     f"EXACTLY `{acc_ref}` in your candidate. You MUST create/keep that test at that "
+                     f"path and make it pass — a missing or red `{acc_ref}` blocks the merge. This is "
+                     "the spec's declared done-condition; a missing file is your non-compliance.")
         prof = profiles[task["id"]]
         print(f"[execute] ▶ {task['id']}: {task['title']}"
               + (f" [{prof['name']}]" if prof["name"] != "generalist" else ""), flush=True)
@@ -226,7 +244,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
                              merge_lock=merge_lock, memory=cards[task["id"]][0],
                              profile_overlay=prof["overlay"], model=prof["model"],
-                             require_test=require_test, reviewer=reviewer)
+                             require_test=require_test, reviewer=reviewer,
+                             acceptance_ref=acc_ref)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
             return task, {"action": "error", "error": str(e)}
 
@@ -237,6 +256,18 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     for task, res in results:
         action = res.get("action")
         has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
+        # Task 3.1 correction (b): TELEMETRY-FIRST skip count. The acceptance-exec gate wanted to
+        # run the spec's named test but the candidate never created it — count the skip (a scope=
+        # 'acceptance' factory learning; dedup bumps its `hits` so recurrence = the skip rate) so
+        # the operator can decide when to flip to discard-on-missing. NOT a settings key; applies on
+        # ANY close-out path (a missing test that then merged still counts). MAIN thread only.
+        if res.get("acceptance_skipped"):
+            factory_memory.record_learning(
+                store, "factory",
+                "the acceptance-exec gate found the spec's named acceptance test MISSING in a "
+                "candidate — the worker didn't create it at the contracted path; skipped, not yet "
+                "discarded (telemetry-first). Author acceptance refs the worker actually creates.",
+                scope="acceptance", shift_id=shift_id)
         # Task 1.4 consult-telemetry: attribute the task's OUTCOME to the learnings its
         # worker card surfaced — one batched UPDATE per task, MAIN thread only. A halted
         # run is incomplete (STOP braked it), so it attributes nothing. Fix 1.4b: attribute
@@ -395,7 +426,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                       claude_bin: str = "claude", label: Optional[str] = None,
                       merge_lock=None, memory: str = "",
                       profile_overlay: str = "", model: str = "",
-                      require_test: Optional[bool] = None, reviewer: bool = False) -> dict:
+                      require_test: Optional[bool] = None, reviewer: bool = False,
+                      acceptance_ref: Optional[str] = None) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -478,7 +510,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
-                    changed_paths=changed, label=branch, require_test=rt)
+                    changed_paths=changed, label=branch, require_test=rt,
+                    acceptance_ref=acceptance_ref)   # Task 3.1: run the spec's named test in the candidate
                 res.update(evidence)                  # learnings + reply_head (Task 0.4);
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
