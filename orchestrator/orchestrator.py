@@ -1056,19 +1056,25 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
     from ..reporting import factory_memory
     if action == "add":
         role = role or "factory"                          # add defaults to the cross-cutting role
-        lid = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
+        rec = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
                                              shift_id=store.current_shift_id())
-        if lid is None:
-            print(f"[learn] not recorded (empty or duplicate): {content!r}")
-        else:
+        if rec is None:
+            print(f"[learn] not recorded (empty): {content!r}")
+            return None
+        lid, created = rec
+        if created:
             print(f"[learn] recorded #{lid} for {role}: {content}")
+        else:                                             # dedup-hit → recurrence counted (Task 0.5)
+            hits = (store.get_learning(lid) or {}).get("hits", 1)
+            print(f"[learn] reinforced #{lid} (x{hits}) for {role}: {content}")
         return lid
     if action == "list":
         rows = store.learnings_for_role(role, limit=limit) if role else store.all_learnings(limit)
         if not rows:
             print(f"[learn] no learnings for {role or 'any role'} yet.")
         for r in rows:
-            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}): {r['content']}")
+            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}): "
+                  f"{r['content']}")
         return rows
     print('[learn] usage: factory learn add --role R --content "…" | factory learn list [--role R]')
     return None

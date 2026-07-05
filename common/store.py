@@ -96,6 +96,11 @@ class Blackboard:
             self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN seconds REAL NOT NULL DEFAULT 0")
         if bcols and "profile" not in bcols:
             self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
+        # learnings gained a recurrence counter (Task 0.5): each dedup-hit bumps it instead
+        # of silently discarding the report — the frequency signal.
+        lcols = {r[1] for r in self.conn.execute("PRAGMA table_info(learnings)").fetchall()}
+        if lcols and "hits" not in lcols:
+            self.conn.execute("ALTER TABLE learnings ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -670,10 +675,20 @@ class Blackboard:
         """Append a learning for `role`. Returns its id. CRUD only — dedup/format live
         in reporting.factory_memory."""
         cur = self._exec(
-            "INSERT INTO learnings(role, agent, scope, content, shift_id, uses, "
-            "created_at) VALUES (?,?,?,?,?,0,?)",
+            "INSERT INTO learnings(role, agent, scope, content, shift_id, uses, hits, "
+            "created_at) VALUES (?,?,?,?,?,0,1,?)",
             (role, agent, scope, content, shift_id, now_iso()))
         return cur.lastrowid
+
+    def get_learning(self, learning_id: int) -> Optional[dict]:
+        """One learning by exact integer id, or None — the id is the PRIMARY KEY, so
+        there is no partial-match ambiguity here."""
+        return self._one("SELECT * FROM learnings WHERE id = ?", (learning_id,))
+
+    def bump_learning_hits(self, learning_id: int) -> None:
+        """Increment ONE learning's recurrence counter — called when a fresh report
+        dedups onto it (Task 0.5: count the recurrence instead of destroying it)."""
+        self._exec("UPDATE learnings SET hits = hits + 1 WHERE id = ?", (learning_id,))
 
     def learnings_for_role(self, role: str, limit: int = 10) -> list[dict]:
         """A role's learnings, newest first (id DESC is stable even within one tick)."""

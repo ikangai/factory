@@ -35,41 +35,59 @@ def _key(text: str) -> str:
 _DUP_RATIO = 0.6
 
 
-def _is_dup(content: str, existing: list[dict]) -> bool:
+def _is_dup(content: str, existing: list[dict]) -> Optional[dict]:
+    """Return the matched existing row when `content` is a near-dup of it, else None —
+    the caller needs the row's id to bump its recurrence counter (Task 0.5)."""
     nc = _key(content)
     if not nc:
-        return False
+        return None
     for e in existing:
         ne = _key(e.get("content", ""))
         if not ne:
             continue
         if ne == nc:
-            return True
+            return e
         if ne in nc or nc in ne:
             short, lng = sorted((ne, nc), key=len)
             if len(lng) and len(short) / len(lng) >= _DUP_RATIO:
-                return True
-    return False
+                return e
+    return None
 
 
 def record_learning(store, role: str, content: str, *, agent: str = "",
                     scope: str = "general", shift_id: Optional[int] = None,
-                    dedup: bool = True) -> Optional[int]:
-    """Record a learning for `role` (returns its id), or None if blank or a near-dup
-    of an existing learning for the SAME role (dedup is role-scoped — the same lesson
-    can be relevant to two roles)."""
+                    dedup: bool = True) -> Optional[tuple[int, bool]]:
+    """Record a learning for `role`. Returns (id, created): created=False when the content
+    deduped onto an existing learning for the SAME role — its `hits` counter is bumped so
+    recurrence is COUNTED, not destroyed (Task 0.5). Returns None only for blank content.
+    Dedup is role-scoped — the same lesson can be relevant to two roles."""
     content = (content or "").strip()
     if not content:
         return None
-    if dedup and _is_dup(content, store.learnings_for_role(role, limit=200)):
-        return None
-    return store.add_learning(role, content, agent=agent, scope=scope, shift_id=shift_id)
+    if dedup:
+        hit = _is_dup(content, store.learnings_for_role(role, limit=200))
+        if hit is not None:
+            store.bump_learning_hits(hit["id"])
+            return hit["id"], False
+    return store.add_learning(role, content, agent=agent, scope=scope, shift_id=shift_id), True
+
+
+# A lesson reported this many times (hits) is flagged in the card — recurrence is the
+# cheapest severity signal the factory has (Task 0.5).
+_RECURRING_MIN_HITS = 3
+
+
+def _card_line(r: dict) -> str:
+    hits = r.get("hits") or 0
+    tag = f" (recurring x{hits})" if hits >= _RECURRING_MIN_HITS else ""
+    return f"- {r['content']}{tag}"
 
 
 def memory_card(store, role: str, *, limit: int = 8, include_factory: bool = True) -> str:
     """Render a role's recent learnings (+ the shared factory lessons) as a compact
     markdown block to prepend to its prompt — or "" when there's nothing yet. Bumps
-    `uses` on every surfaced learning."""
+    `uses` on every surfaced learning; lessons reported >= 3 times are flagged
+    `(recurring xN)` so the reader weighs them accordingly."""
     rows = store.learnings_for_role(role, limit=limit)
     factory_rows = (store.learnings_for_role("factory", limit=limit)
                     if include_factory and role != "factory" else [])
@@ -77,10 +95,10 @@ def memory_card(store, role: str, *, limit: int = 8, include_factory: bool = Tru
         return ""
     lines = [f"## What you've learned so far ({role})",
              "Durable lessons from past shifts — apply them; don't relearn them.", ""]
-    lines += [f"- {r['content']}" for r in rows]
+    lines += [_card_line(r) for r in rows]
     if factory_rows:
         lines += ["", "### Factory-wide lessons"]
-        lines += [f"- {r['content']}" for r in factory_rows]
+        lines += [_card_line(r) for r in factory_rows]
     store.bump_learning_uses([r["id"] for r in rows] + [r["id"] for r in factory_rows])
     return "\n".join(lines)
 

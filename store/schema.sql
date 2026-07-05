@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS learnings (
     content    TEXT NOT NULL,
     shift_id   INTEGER,
     uses       INTEGER NOT NULL DEFAULT 0,   -- times surfaced into a prompt (relevance signal)
+    hits       INTEGER NOT NULL DEFAULT 1,   -- times reported: each dedup-hit bumps (recurrence signal, Task 0.5)
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);

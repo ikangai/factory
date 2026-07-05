@@ -71,9 +71,10 @@ def test_record_learning_stores_and_returns_id(tmp_path):
 
 def test_record_learning_dedups_near_duplicates(tmp_path):
     with _store(tmp_path) as s:
-        factory_memory.record_learning(s, "developer", "Narrow the brief to one slice")
+        first_id, _ = factory_memory.record_learning(s, "developer",
+                                                     "Narrow the brief to one slice")
         dup = factory_memory.record_learning(s, "developer", "narrow the brief to one slice.")
-        assert dup is None                                  # case/punctuation-insensitive dup
+        assert dup == (first_id, False)                     # case/punctuation-insensitive dup
         assert len(s.learnings_for_role("developer")) == 1
 
 
@@ -264,19 +265,19 @@ def test_is_dup_short_generic_does_not_swallow_long_specific():
     existing = [{"content": "narrow the brief"}]
     assert factory_memory._is_dup(
         "narrow the brief to one file and split the rest into a sequenced follow-up",
-        existing) is False
+        existing) is None
 
 
 def test_is_dup_exact_and_close_still_dedup():
-    assert factory_memory._is_dup("narrow the brief", [{"content": "narrow the brief"}]) is True
-    assert factory_memory._is_dup("narrow the briefs", [{"content": "narrow the brief"}]) is True
+    assert factory_memory._is_dup("narrow the brief", [{"content": "narrow the brief"}])
+    assert factory_memory._is_dup("narrow the briefs", [{"content": "narrow the brief"}])
 
 
 def test_record_learning_dedups_identical_non_ascii(tmp_path):
     with _store(tmp_path) as s:
         a = factory_memory.record_learning(s, "developer", "日本語のレッスンを学んだ")
         b = factory_memory.record_learning(s, "developer", "日本語のレッスンを学んだ")
-        assert a is not None and b is None                  # dedup must fire for non-ASCII too
+        assert a is not None and b == (a[0], False)         # dedup must fire for non-ASCII too
 
 
 # -- coerce_learnings: researcher JSON shape guard ---------------------------
@@ -557,3 +558,124 @@ def test_develop_and_merge_carries_reply_head_and_tests_report_on_red_tests(monk
     assert res["action"] == "discarded" and res["stage"] == "tests"
     assert res["tests_report"] == "1 failed: test_z red"    # already rode out of run_code_round
     assert res["reply_head"] == "did the work"              # now rides alongside it
+
+
+# ============================================================================
+# Task 0.5: count recurrence on dedup-hit (`hits` column) — a deduped report
+# must BUMP the matched learning's counter, not vanish. The frequency signal
+# is the factory's cheapest severity ranking.
+# ============================================================================
+
+# -- store: hits column + bump + exact-id read --------------------------------
+def test_add_learning_starts_with_hits_one(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("factory", "first sighting")
+        assert s.learnings_for_role("factory")[0]["hits"] == 1
+        assert s.get_learning(lid)["hits"] == 1
+
+
+def test_bump_learning_hits_increments_one_row(tmp_path):
+    with _store(tmp_path) as s:
+        a = s.add_learning("factory", "A")
+        b = s.add_learning("factory", "B")
+        s.bump_learning_hits(a)
+        s.bump_learning_hits(a)
+        assert s.get_learning(a)["hits"] == 3
+        assert s.get_learning(b)["hits"] == 1               # only the matched row bumps
+
+
+def test_get_learning_unknown_id_is_none(tmp_path):
+    with _store(tmp_path) as s:
+        assert s.get_learning(999) is None
+
+
+def test_migrate_adds_hits_to_predating_db(tmp_path):
+    """A DB created before the column existed gains `hits` via _migrate (CREATE TABLE
+    IF NOT EXISTS alone won't alter the existing table)."""
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE learnings (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, "
+        "agent TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'general', "
+        "content TEXT NOT NULL, shift_id INTEGER, uses INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT NOT NULL)")
+    conn.execute("INSERT INTO learnings(role, content, created_at) VALUES ('factory','pre','t')")
+    conn.commit()
+    conn.close()
+    with Blackboard(db) as s:
+        s.init_db()
+        rows = s.learnings_for_role("factory")
+        assert rows and rows[0]["hits"] == 1                # backfilled default
+        lid = s.add_learning("factory", "post-migration lesson")
+        assert s.get_learning(lid)["hits"] == 1
+
+
+# -- module: _is_dup returns the matched ROW ----------------------------------
+def test_is_dup_returns_matched_row(tmp_path):
+    existing = [{"id": 7, "content": "narrow the brief"}]
+    hit = factory_memory._is_dup("narrow the brief", existing)
+    assert hit is existing[0]                               # the row, not a bare bool
+
+
+# -- module: record_learning returns (id, created) + bumps on dup -------------
+def test_record_learning_new_returns_created_true(tmp_path):
+    with _store(tmp_path) as s:
+        rec = factory_memory.record_learning(s, "developer", "fresh lesson")
+        assert isinstance(rec, tuple)
+        lid, created = rec
+        assert isinstance(lid, int) and created is True
+
+
+def test_record_learning_dup_bumps_hits_and_returns_created_false(tmp_path):
+    with _store(tmp_path) as s:
+        first_id, _ = factory_memory.record_learning(s, "factory", "graduate when divergence grows")
+        rec = factory_memory.record_learning(s, "factory", "graduate when divergence grows")
+        assert rec == (first_id, False)                     # same id, not created
+        assert len(s.learnings_for_role("factory")) == 1    # still one row
+        assert s.get_learning(first_id)["hits"] == 2        # recurrence counted
+
+
+# -- module: memory_card surfaces the recurrence signal -----------------------
+def test_memory_card_marks_recurring_at_three_hits(tmp_path):
+    with _store(tmp_path) as s:
+        for _ in range(3):
+            factory_memory.record_learning(s, "developer", "the flaky gate strikes again")
+        card = factory_memory.memory_card(s, "developer")
+        assert "the flaky gate strikes again (recurring x3)" in card
+
+
+def test_memory_card_no_recurring_marker_below_three_hits(tmp_path):
+    with _store(tmp_path) as s:
+        factory_memory.record_learning(s, "developer", "seen twice only")
+        factory_memory.record_learning(s, "developer", "seen twice only")
+        card = factory_memory.memory_card(s, "developer")
+        assert "seen twice only" in card and "recurring" not in card
+
+
+def test_memory_card_marks_recurring_factory_rows_too(tmp_path):
+    with _store(tmp_path) as s:
+        for _ in range(4):
+            factory_memory.record_learning(s, "factory", "shared recurring hazard")
+        card = factory_memory.memory_card(s, "developer")
+        assert "shared recurring hazard (recurring x4)" in card
+
+
+# -- CLI: reinforced print + hits in list -------------------------------------
+def test_cmd_learn_add_dup_prints_reinforced_with_count(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        orch.cmd_learn(s, "add", role="developer", content="same lesson")
+        capsys.readouterr()
+        lid = orch.cmd_learn(s, "add", role="developer", content="same lesson")
+        out = capsys.readouterr().out
+        assert "reinforced" in out and f"#{lid}" in out and "(x2)" in out
+        assert len(s.learnings_for_role("developer")) == 1
+
+
+def test_cmd_learn_list_shows_hits(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        factory_memory.record_learning(s, "developer", "counted lesson")
+        factory_memory.record_learning(s, "developer", "counted lesson")
+        orch.cmd_learn(s, "list", role="developer")
+        out = capsys.readouterr().out
+        assert "hits 2" in out
