@@ -55,14 +55,41 @@ def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
+def _evm_header(store) -> str:
+    """Task 1.5: one EVM header line for the {PLAN} seam — CPI (earned ÷ actual tokens),
+    percent complete, overhead share of the whole ledger. This is the factory's only
+    cost-efficiency signal, and until now nothing automated consumed it; this routes it to
+    the one decision-maker who can react (shrink scope/estimates — the contract sentence).
+    Fail-open (advisory line, never a gate): evm() raising, or a zero-spend ledger (fresh
+    store — CPI/overhead are undefined-or-noise with nothing spent), returns '' and the
+    seam renders exactly as before."""
+    try:
+        from ..reporting import evm as evm_mod
+        snap = evm_mod.evm(store)
+        overhead = int(snap.get("overhead_tokens") or 0)
+        total = int(snap.get("ac_tokens") or 0) + overhead      # conservation: the whole ledger
+        if total <= 0:
+            return ""
+        cpi, pct = snap.get("cpi"), snap.get("percent_complete")
+    except Exception:
+        return ""
+    cpi_s = f"CPI {cpi:.2f}" if cpi is not None else "CPI n/a"  # None = no attributed spend yet
+    pct_s = f"{pct:.0%} complete" if pct is not None else "completion n/a"   # None = no PV baseline
+    return f"EVM: {cpi_s} | {pct_s} | overhead {overhead / total:.0%} of spend"
+
+
 def _plan_bullets(store) -> str:
-    """Render the plan for the {PLAN} seam: per-milestone progress, budget, and — the signal
-    the conductor revises the plan against (Task 2.4) — the linked tasks' estimated vs ACTUAL
-    tokens (`./bin/factory timesheet` has the per-engagement breakdown)."""
+    """Render the plan for the {PLAN} seam: the EVM header (Task 1.5), then per-milestone
+    progress, budget, and — the signal the conductor revises the plan against (Task 2.4) —
+    the linked tasks' estimated vs ACTUAL tokens (`./bin/factory timesheet` has the
+    per-engagement breakdown)."""
     ms = store.list_milestones()
     if not ms:
         return "(no plan yet — draft 2-4 milestones with `./bin/factory plan add …`)"
     lines = []
+    header = _evm_header(store)
+    if header:
+        lines.append(header)
     for m in ms:
         p = store.milestone_progress(m["id"])
         e = store.milestone_effort(m["id"])

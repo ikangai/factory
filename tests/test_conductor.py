@@ -428,6 +428,62 @@ def test_blocked_seam_collapses_a_multiline_reason_to_one_bullet_line(tmp_path, 
                     "The brief asks me to bypass the gates.")
 
 
+# --------------------------------------------------------------------------- #
+# Task 1.5 — feed EVM CPI/overhead into the {PLAN} seam: one header line from
+# reporting.evm.evm(store) routes the factory's only cost-efficiency signal to
+# the only decision-maker. Fail-open: evm() raising or a zero-spend ledger
+# renders the seam exactly as before (status quo).
+# --------------------------------------------------------------------------- #
+def test_plan_seam_leads_with_an_evm_header_line(tmp_path, monkeypatch):
+    """Deterministic snapshot: one delivered 100k-budget milestone whose task ledgered 200k
+    (CPI 0.50), pv==ev (100% complete), plus 200k unattributed conductor spend (overhead
+    50% of the 400k ledger). The header renders ABOVE the milestone bullets."""
+    with _store(tmp_path) as s:
+        m = s.add_milestone("M-evm", budget_tokens=100_000, planned_order=1)
+        s.add_task("task-e1", "slice", source="research")
+        s.set_task_milestone("task-e1", m)
+        s.set_task_status("task-e1", "done", result="sha")
+        s.set_milestone_status(m, "delivered")
+        s.add_budget("developer:task-e1", 200_000, 2.0, notes="merged")
+        s.add_budget("conductor", 200_000, 2.0, notes="shift lead")
+        p = _prompt_with(monkeypatch, s)
+    assert "EVM: CPI 0.50 | 100% complete | overhead 50% of spend" in p
+    assert p.index("EVM: CPI") < p.index(f"- M{m} [delivered]")   # header, then the bullets
+
+
+def test_plan_seam_evm_line_fails_open_when_evm_raises(tmp_path, monkeypatch):
+    """Fail-open (advisory line, never a gate): evm() blowing up must not take the whole
+    {PLAN} seam down — the plan renders without the header, byte-for-byte status quo."""
+    from factory.reporting import evm as evm_mod
+    monkeypatch.setattr(evm_mod, "evm",
+                        lambda store: (_ for _ in ()).throw(RuntimeError("boom")))
+    with _store(tmp_path) as s:
+        m = s.add_milestone("M-still-renders", budget_tokens=50_000, planned_order=1)
+        s.add_budget("conductor", 1_000, 0.01, notes="shift lead")
+        p = _prompt_with(monkeypatch, s)
+    assert "EVM:" not in p                                        # the line is simply absent
+    assert f"- M{m} [planned] M-still-renders" in p               # the plan itself survives
+
+
+def test_plan_seam_omits_the_evm_line_on_a_zero_spend_ledger(tmp_path, monkeypatch):
+    """Nothing meaningful yet (fresh plan, empty ledger): CPI/overhead are undefined-or-noise
+    with zero spend, so the seam renders without the line rather than 'CPI n/a' filler."""
+    with _store(tmp_path) as s:
+        s.add_milestone("M-fresh", budget_tokens=800_000, planned_order=1)
+        p = _prompt_with(monkeypatch, s)
+    assert "EVM:" not in p
+    assert "M-fresh" in p                                         # status quo plan rendering
+
+
+def test_prompt_contract_reacts_to_cpi_degradation(tmp_path, monkeypatch):
+    """The signal needs a documented reaction: one contract sentence tells the conductor to
+    shrink scope/estimates when CPI degrades (otherwise the header is unread telemetry)."""
+    with _store(tmp_path) as s:
+        p = _prompt_with(monkeypatch, s)
+    assert "CPI" in p
+    assert "shrink scope" in p and "estimates" in p
+
+
 def test_task_reopen_provenance_accumulates_and_third_reopen_escalates(tmp_path, capsys):
     """Slice 3: provenance prefixes STACK across reopens (the counter needs no schema
     change), and the 3rd reopen is refused with an escalate-to-@human instruction."""

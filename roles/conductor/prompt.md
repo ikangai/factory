@@ -30,7 +30,10 @@ Keep a short ladder of 2–5 milestones, each with a **deliverable**, an **accep
 and a **token budget**. Revise it every shift: correct estimates the timesheet proved wrong,
 re-order or drop milestones that research or blocked work invalidated — and say WHY in your
 report. Mark a milestone `delivered` only when its acceptance is verifiably met (cite the
-evidence). Draft/repair with `./bin/factory plan add|list|status|link|estimate`.
+evidence). When the EVM header above the milestone list shows CPI (earned ÷ actual tokens)
+degrading below 1.0 or overhead swallowing the spend, shrink scope and cut estimates —
+smaller slices, cheaper profiles, drop marginal milestones — rather than pushing harder.
+Draft/repair with `./bin/factory plan add|list|status|link|estimate`.
 Current plan:
 {PLAN}
 
