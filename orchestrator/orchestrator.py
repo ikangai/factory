@@ -1296,11 +1296,18 @@ def cmd_issue(action: str, *, title: Optional[str] = None, body: str = "",
 
 
 def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
-            port: int = 8788):
+            port: int = 8788, selfcheck: bool = False):
     """The fleet visualization of the (super) worker instances + activities. `--serve`:
     a LIVE 'mission control' — an animated conductor-loop that shows the active phase, the
     live workers, and the mission's progress, auto-updating while a run is in flight.
+    `--selfcheck`: the deterministic dashboard gate (roadmap Task 0.6) — node --check the
+    inline JS + raw-{PLACEHOLDER}/section scans, no browser, no server, zero tokens.
     Default: write + open a one-shot HTML snapshot (logs/fleet.html)."""
+    if selfcheck:
+        from ..checks import visual_check
+        report = visual_check.check_dashboard()
+        print(visual_check.format_report(report))
+        return report
     if serve:
         from ..dashboard import fleet_server
         return fleet_server.serve(port=port, open_browser=open_browser)
@@ -1523,6 +1530,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
     viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
     viz.add_argument("--no-open", action="store_true", help="don't open the browser")
+    viz.add_argument("--selfcheck", action="store_true",
+                     help="deterministic dashboard gate: node --check the inline JS + "
+                          "placeholder/section scans; exit 1 on failure (no browser/server)")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
     tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
     tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
@@ -1640,7 +1650,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "research-feed":
             cmd_research_feed(store, prod=a.prod)
         elif a.cmd == "viz":
-            cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port)
+            out = cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port,
+                          selfcheck=a.selfcheck)
+            if a.selfcheck and not (isinstance(out, dict) and out.get("ok")):
+                return 1                                   # the selfcheck is a GATE
         elif a.cmd == "run":
             if a.loop:
                 cmd_run_loop(store, mission=a.mission, token_budget=a.budget,

@@ -519,3 +519,108 @@ def test_fleet_json_carries_queue_and_resume_note(tmp_path, monkeypatch):
     assert all({"id", "title", "sub", "severity", "tab"} <= set(a) for a in j["queue"])
     assert j["resume_note"] == "next: ship the queue"
     assert isinstance(j["briefs_staged"], int)
+
+
+# --------------------------------------------------------------------------- #
+# Task 0.6 — deterministic dashboard self-check (checks/visual_check.py)       #
+# The operator-memory lesson made executable: a JS syntax error in the inline  #
+# <script> silently freezes the board while the server stays green.            #
+# --------------------------------------------------------------------------- #
+def test_visual_check_extracts_inline_scripts_only():
+    """extract_scripts: every inline <script> body with its 1-indexed html line;
+    external <script src=…> blocks are not ours to syntax-check."""
+    from factory.checks import visual_check
+    html = ('<html><head><script src="cdn.js"></script></head><body>\n'
+            '<script>\nconst a=1;\n</script>\n'
+            '<p>x</p>\n<script type="text/javascript">let b=2;</script></body></html>')
+    blocks = visual_check.extract_scripts(html)
+    assert len(blocks) == 2                                          # src= block skipped
+    assert blocks[0][0] == 2 and blocks[0][1].strip() == "const a=1;"
+    assert blocks[1][0] == 6 and blocks[1][1].strip() == "let b=2;"
+
+
+def test_visual_check_node_flags_a_js_syntax_error(tmp_path):
+    """The recorded failure class: broken inline JS must FAIL the check, with the
+    offending <script>'s html line named in the error."""
+    import shutil as _shutil
+
+    import pytest
+    from factory.checks import visual_check
+    if _shutil.which("node") is None:
+        pytest.skip("node not installed — JS syntax gate not exercised")
+    page = tmp_path / "board.html"
+    sections = "".join(f'<section id="{s}"></section>' for s in visual_check.REQUIRED_SECTIONS)
+    page.write_text("<html><body>" + sections +
+                    "<script>\nfunction broken({ ,\n</script></body></html>", encoding="utf-8")
+    rep = visual_check.check_dashboard(str(page))
+    assert rep["ok"] is False and rep["node_available"] is True
+    assert rep["js_errors"] and "line" in rep["js_errors"][0]        # names where it broke
+    assert rep["placeholders"] == [] and rep["missing_sections"] == []
+
+
+def test_visual_check_flags_raw_placeholders_and_missing_sections(tmp_path, monkeypatch):
+    """Deterministic scans run even without node (reported skip, not a crash): raw
+    {PLACEHOLDER} braces and missing named sections each fail the check; JS template
+    literals like `${LIVE_OK}` are legitimate and must NOT be flagged."""
+    from factory.checks import visual_check
+    monkeypatch.setattr(visual_check.shutil, "which", lambda _b: None)   # no node anywhere
+    page = tmp_path / "board.html"
+    page.write_text('<html><body><section id="tab-queue"></section>'
+                    '<div>{MISSION}</div><script>const s=`${LIVE_OK}`;</script>'
+                    '</body></html>', encoding="utf-8")
+    rep = visual_check.check_dashboard(str(page))
+    assert rep["ok"] is False
+    assert rep["placeholders"] == ["{MISSION}"]                      # ${LIVE_OK} not flagged
+    assert "tab-plan" in rep["missing_sections"]
+    assert "tab-queue" not in rep["missing_sections"]
+    assert rep["node_available"] is False and rep["js_errors"] == [] # skip reported, not failed
+
+
+def test_visual_check_passes_on_the_live_dashboard():
+    """THE gate: the shipped dashboard/static/fleet.html must always pass — this is the
+    `node --check` operator habit as a permanent zero-token test."""
+    import pytest
+    from factory.checks import visual_check
+    rep = visual_check.check_dashboard()                             # default = the live page
+    assert rep["path"].endswith(os.path.join("dashboard", "static", "fleet.html"))
+    assert rep["scripts"] >= 1                                       # the board HAS inline JS
+    assert rep["placeholders"] == [] and rep["missing_sections"] == []
+    if not rep["node_available"]:
+        pytest.skip("node not installed — placeholder/section scans passed; JS syntax unverified")
+    assert rep["js_errors"] == [] and rep["ok"] is True
+
+
+def test_cmd_viz_selfcheck_runs_the_gate_and_returns_the_report(tmp_path, monkeypatch, capsys):
+    """CLI arm `factory viz --selfcheck`: cmd_viz runs the checker, prints the report, and
+    returns the dict (never opens a browser / writes a snapshot on this path)."""
+    from factory.checks import visual_check
+    from factory.orchestrator import orchestrator
+    from factory.reporting import fleet_viz as fv
+    monkeypatch.setattr(fv, "generate_fleet_html",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("snapshot path taken")))
+    monkeypatch.setattr(visual_check, "check_dashboard",
+                        lambda *a, **k: {"ok": False, "path": "p", "scripts": 1,
+                                         "node_available": True,
+                                         "js_errors": ["<script> at html line 2: SyntaxError: Unexpected token ','"],
+                                         "placeholders": [], "missing_sections": []})
+    with _store(tmp_path) as s:
+        out = orchestrator.cmd_viz(s, open_browser=True, selfcheck=True)
+    assert isinstance(out, dict) and out["ok"] is False              # the report rides out
+    printed = capsys.readouterr().out
+    assert "selfcheck" in printed and "SyntaxError" in printed and "FAIL" in printed
+
+
+def test_factory_viz_selfcheck_exit_code(tmp_path, monkeypatch, capsys):
+    """`factory viz --selfcheck` is an executable GATE: exit 1 on failure, 0 on pass."""
+    from factory.checks import visual_check
+    from factory.orchestrator import orchestrator
+    monkeypatch.setattr(orchestrator, "Blackboard",
+                        lambda *a, **k: Blackboard(str(tmp_path / "f.db")))   # hermetic store
+    bad = {"ok": False, "path": "p", "scripts": 1, "node_available": False,
+           "js_errors": [], "placeholders": ["{MISSION}"], "missing_sections": []}
+    monkeypatch.setattr(visual_check, "check_dashboard", lambda *a, **k: dict(bad))
+    assert orchestrator.main(["viz", "--selfcheck"]) == 1
+    monkeypatch.setattr(visual_check, "check_dashboard",
+                        lambda *a, **k: dict(bad, ok=True, placeholders=[]))
+    assert orchestrator.main(["viz", "--selfcheck"]) == 0
+    capsys.readouterr()                                              # swallow the report prints
