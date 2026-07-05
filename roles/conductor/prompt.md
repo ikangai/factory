@@ -125,6 +125,11 @@ End with exactly one fenced JSON block — the factory reads it as your shift re
 is the SHIFT outcome: use `"completed"` for a normal shift (whether or not everything
 landed) or `"error"` if you genuinely couldn't operate. Blockers and mission progress go in
 the report/resume_note, NOT in status.
+`resume_note` may be a plain string, or — preferred — an object with any of three OPTIONAL
+keys, which the factory folds into one labeled block for the next shift's resume seam:
+`"verified"` (facts you actually CHECKED this shift — a string or a list of strings),
+`"open"` (unresolved failures, citing task/learning ids), `"next"` (what the next shift
+should pick up first).
 ```json
-{"status": "completed", "report": "<2-4 sentences: what you dispatched, what shipped (by task id), what failed/blocked, mission progress>", "resume_note": "<what the next shift should pick up first>"}
+{"status": "completed", "report": "<2-4 sentences: what you dispatched, what shipped (by task id), what failed/blocked, mission progress>", "resume_note": {"verified": "<facts you checked this shift>", "open": "<unresolved failures, with task/learning ids>", "next": "<what the next shift should pick up first>"}}
 ```

@@ -26,6 +26,30 @@ CONDUCTOR_TOOLS = ("Read", "Bash", "Grep", "Glob", "Task", "Workflow", "Skill") 
 # not shift-level, and would violate the shifts.status CHECK constraint.
 _VALID_SHIFT_STATUS = {"completed", "halted", "timed_out", "budget_exhausted", "error"}
 
+# Task 1.2: the sectioned resume note's (json_key, label) pairs, in render order.
+_RESUME_SECTIONS = (("verified", "VERIFIED"), ("open", "OPEN FAILURES"), ("next", "NEXT"))
+
+
+def _fold_resume_note(note) -> str:
+    """Task 1.2 (P7 structure at the write site): the conductor MAY return resume_note as
+    an object with optional verified/open/next keys — fold it into one labeled block
+    (VERIFIED/OPEN FAILURES/NEXT lines) for the existing shifts.resume_note column. A bare
+    string passes through unchanged (fail-open floor = status quo); the abnormal end paths
+    (transport sentinel above, shift timeout/error, crash-reap) never reach this parse.
+    A dict with no usable sections (or an explicit null) degrades to '' — never a
+    stringified '{}'/'None' in the next shift's {RESUME} seam."""
+    if not isinstance(note, dict):
+        return note if isinstance(note, str) else ("" if note is None else str(note))
+    lines = []
+    for key, label in _RESUME_SECTIONS:
+        v = note.get(key)
+        if isinstance(v, (list, tuple)):                # plural facts → one '; '-joined line
+            v = "; ".join(str(x).strip() for x in v if str(x).strip())
+        v = str(v).strip() if v is not None else ""
+        if v:
+            lines.append(f"{label}: {v}")
+    return "\n".join(lines)
+
 
 def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
@@ -149,5 +173,5 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         status = "completed"                 # (blockers live in the report + mission_status)
     return {"status": status,
             "report": obj.get("report") or reply[:2000],
-            "resume_note": obj.get("resume_note", ""),
+            "resume_note": _fold_resume_note(obj.get("resume_note", "")),
             "tokens_used": tokens}

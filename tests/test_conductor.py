@@ -300,6 +300,85 @@ def test_task_reopen_requires_a_narrowed_detail(tmp_path, capsys):
     assert t["status"] == "blocked" and t["detail"] == "orig"
 
 
+# --------------------------------------------------------------------------- #
+# Task 1.2 — sectioned resume note (P7 structure at the write site): the final
+# JSON's resume_note may be an object with optional verified/open/next keys,
+# folded into one labeled block in the existing shifts.resume_note column.
+# --------------------------------------------------------------------------- #
+def _run_with_reply(tmp_path, monkeypatch, reply: str) -> dict:
+    monkeypatch.setattr(common, "claude_super", lambda prompt, **k: (reply, 1, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        return conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                       token_budget=1, wall_clock_s=1)
+
+
+def test_sectioned_resume_note_folds_into_one_labeled_block(tmp_path, monkeypatch):
+    """A dict resume_note with verified/open/next folds to VERIFIED/OPEN FAILURES/NEXT
+    labeled lines — one string in the existing shifts.resume_note column. List values
+    (plural facts) join with '; '."""
+    out = _run_with_reply(tmp_path, monkeypatch, (
+        '```json\n{"status":"completed","report":"r","resume_note":'
+        '{"verified":["fleet.html renders","task-ab12 merged at 6f5"],'
+        '"open":"task-cd34 still blocked (learning #7)",'
+        '"next":"reopen task-cd34 with the parser slice"}}\n```'))
+    note = out["resume_note"]
+    assert isinstance(note, str)                                 # the column stays a string
+    assert "VERIFIED: fleet.html renders; task-ab12 merged at 6f5" in note
+    assert "OPEN FAILURES: task-cd34 still blocked (learning #7)" in note
+    assert "NEXT: reopen task-cd34 with the parser slice" in note
+    assert note.index("VERIFIED:") < note.index("OPEN FAILURES:") < note.index("NEXT:")
+
+
+def test_sectioned_resume_note_omits_missing_sections(tmp_path, monkeypatch):
+    """The three keys are OPTIONAL — absent/empty sections leave no dangling label."""
+    out = _run_with_reply(tmp_path, monkeypatch, (
+        '```json\n{"status":"completed","report":"r","resume_note":'
+        '{"next":"pick up task-ef56 first","open":""}}\n```'))
+    note = out["resume_note"]
+    assert note == "NEXT: pick up task-ef56 first"
+    assert "VERIFIED:" not in note and "OPEN FAILURES:" not in note
+
+
+def test_bare_string_resume_note_passes_through_unchanged(tmp_path, monkeypatch):
+    """Fail-open floor = status quo: a conductor that ignores the sectioned form and
+    returns a bare string keeps today's behavior byte-for-byte."""
+    out = _run_with_reply(tmp_path, monkeypatch, (
+        '```json\n{"status":"completed","report":"r",'
+        '"resume_note":"t9 still blocked; start there"}\n```'))
+    assert out["resume_note"] == "t9 still blocked; start there"
+
+
+def test_empty_or_null_dict_resume_note_falls_back_to_empty_string(tmp_path, monkeypatch):
+    """A dict with no usable sections (or an explicit null) degrades to '' — same as a
+    missing resume_note today, never a stringified '{}'/'None' in the {RESUME} seam."""
+    out = _run_with_reply(tmp_path, monkeypatch,
+                          '```json\n{"status":"completed","report":"r","resume_note":{}}\n```')
+    assert out["resume_note"] == ""
+    out = _run_with_reply(tmp_path, monkeypatch,
+                          '```json\n{"status":"completed","report":"r","resume_note":null}\n```')
+    assert out["resume_note"] == ""
+
+
+def test_failed_spawn_resume_note_path_is_untouched_by_the_fold(tmp_path, monkeypatch):
+    """The abnormal end path (transport sentinel) returns before the JSON parse — the
+    sectioned-note fold must not alter its plain-string note."""
+    out = _run_with_reply(tmp_path, monkeypatch, "[claude -p unavailable: timeout]")
+    assert out["status"] == "error"
+    assert out["resume_note"].startswith("conductor spawn failed or hit the wall-clock:")
+
+
+def test_prompt_contract_documents_the_sectioned_resume_note(tmp_path, monkeypatch):
+    """The final-JSON contract names the three optional keys so the conductor knows the
+    sectioned form exists (bare string stays legal)."""
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        p = _prompt_with(monkeypatch, s)
+    assert '"verified"' in p and '"open"' in p and '"next"' in p  # the optional keys, quoted
+    assert "resume_note" in p                                     # still the same column/contract
+
+
 def test_task_reopen_provenance_accumulates_and_third_reopen_escalates(tmp_path, capsys):
     """Slice 3: provenance prefixes STACK across reopens (the counter needs no schema
     change), and the 3rd reopen is refused with an escalate-to-@human instruction."""
