@@ -25,6 +25,42 @@ from typing import Callable, Optional
 from ..common import config, killswitch
 from . import code_round
 
+# Task 0.1 (P11): an EMPTY-HANDED worker (no candidate branch) is not always "brief too
+# big" — classify the reply first so a dead transport or a refusal stops masquerading as
+# no_candidate (which triggers auto-decompose spend + a false factory lesson).
+REFUSAL_MARKERS = (
+    "i can't help", "i cannot help", "i can't assist", "i cannot assist",
+    "unable to comply", "i can't comply", "i cannot comply",
+    "i'm unable to", "i am unable to", "i won't be able to",
+)
+_REFUSAL_MAX_LEN = 600      # refusals are short — a long reply is real work, not a block
+_REFUSAL_HEAD = 200         # a marker must appear near the START of the reply
+_REFUSAL_REASON_LEN = 300   # how much refusal text the blocked reason keeps
+# error stages that stay decompose-eligible: a 30-min timeout is the strongest "task too
+# big" evidence in the system; worker_failed includes max-turns exhaustion. A transport
+# failure never attempted the brief and a refusal is not scope evidence — both suppressed.
+_DECOMPOSE_STAGES = ("timeout", "worker_failed")
+
+
+def classify_empty_handed(reply: str) -> Optional[dict]:
+    """Classify a no-branch worker reply into {action:'error', stage, error} — or None
+    for a GENUINE no_candidate (the worker honestly came back empty-handed). Stages:
+    'timeout' (worker killed at the wall), 'worker_failed' (non-zero rc), 'transport'
+    (claude binary unavailable — never attempted), 'refusal' (short reply refusing the
+    brief; its head rides out in `error` so the blocked reason carries the diagnosis)."""
+    r = (reply or "").strip()
+    if r.startswith("[claude -p"):                 # a transport sentinel, not worker prose
+        if "timed out" in r:
+            return {"action": "error", "stage": "timeout", "error": r[:180]}
+        if "rc=" in r:
+            return {"action": "error", "stage": "worker_failed", "error": r[:180]}
+        if r.startswith("[claude -p unavailable:"):
+            return {"action": "error", "stage": "transport", "error": r[:180]}
+    head = r[:_REFUSAL_HEAD].lower().replace("’", "'")
+    if r and len(r) < _REFUSAL_MAX_LEN and any(m in head for m in REFUSAL_MARKERS):
+        return {"action": "error", "stage": "refusal", "error": r[:_REFUSAL_REASON_LEN]}
+    return None
+
 
 def _smoke_grade(repo_dir: str) -> dict:
     """Mechanics-smoke grade — do-no-harm; the target's own test suite (run inside the
@@ -219,21 +255,28 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             print(f"[execute]   {task['id']} → skipped (STOP)", flush=True)
         else:                                         # no_candidate/discarded/auto_reverted/error
             reason = action or "no result"            # CAPTURE WHY — a bare 'error' is undiagnosable
-            if res.get("error"):
-                reason = f"error: {str(res['error'])[:180]}"
-            elif res.get("stage"):
+            if res.get("stage"):
                 reason = f"{reason} ({res['stage']})"
+            if res.get("error"):
+                # a refusal's own words ARE the diagnosis — persist ~300 chars, not 180 (Task 0.1)
+                cut = _REFUSAL_REASON_LEN if res.get("stage") == "refusal" else 180
+                reason = f"{reason}: {str(res['error'])[:cut]}"
             decomposed = 0                            # GSD #4: turn no_candidate into forward progress
-            if action == "no_candidate" and decomposer is not None:
+            # Task 0.1: error(timeout)/error(worker_failed) stay decompose-eligible — both are
+            # "task too big" evidence; transport/refusal never reach the decomposer (pure spend).
+            decompose_ok = action == "no_candidate" or (
+                action == "error" and res.get("stage") in _DECOMPOSE_STAGES)
+            if decompose_ok and decomposer is not None:
                 from ..reporting import scope_check
                 decomposed = scope_check.decompose_no_candidate(
                     store, task, shift_id=shift_id, decomposer=decomposer)
             if decomposed:
+                label = f"{action} ({res['stage']})" if res.get("stage") else action
                 store.set_task_status(
                     task["id"], "blocked",
-                    result=f"no_candidate → decomposed into {decomposed} sub-tasks"[:200],
+                    result=f"{label} → decomposed into {decomposed} sub-tasks"[:200],
                     shift_id=shift_id)
-                print(f"[execute]   {task['id']} → no_candidate, auto-decomposed into "
+                print(f"[execute]   {task['id']} → {label}, auto-decomposed into "
                       f"{decomposed} sub-task(s) — blocked", flush=True)
                 continue                              # decomposition replaces the canned lesson
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
@@ -318,6 +361,9 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         learnings = factory_memory.parse_learnings(dev.get("reply", ""))
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
+            err = classify_empty_handed(dev.get("reply", ""))   # Task 0.1: timeout/rc/transport/
+            if err:                                             # refusal must NOT collapse into
+                return {**err, "branch": branch, "learnings": learnings, **spend}  # no_candidate
             return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # NO branch
         try:
             changed = adapter.changed_paths(dev_clone, base, branch)

@@ -560,3 +560,155 @@ def test_merged_result_carries_developer_spend(monkeypatch, tmp_path):
                                     grade_fn=_good_grade, label="factory/cand-x")
     assert res["action"] == "merged"
     assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0
+
+
+# ============================================================================
+# Task 0.1 (P11): split the empty-handed-worker collapse — a no-branch run is
+# classified by its reply (timeout / worker_failed / transport / refusal) BEFORE
+# collapsing to no_candidate, so infrastructure failures and refusals stop
+# masquerading as "brief too big" evidence.
+# ============================================================================
+
+def _no_branch_result(monkeypatch, tmp_path, reply):
+    """Run develop_and_merge with a worker that produced NO branch and `reply`."""
+    ad = FakeAdapter(changed=["x"])
+    ad._has_branch = False
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": reply,
+                                                "tokens": 7, "cost": 0.001})
+    return develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                     task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+
+
+def test_timeout_sentinel_classifies_error_timeout(monkeypatch, tmp_path):
+    """A worker killed at the 30-min wall is the strongest 'task too big' evidence —
+    it must surface as error(timeout), not a generic no_candidate."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "[claude -p unavailable: Command '['claude', '-p']' timed out after 1800 seconds]")
+    assert res["action"] == "error" and res["stage"] == "timeout"
+    # every new error result carries the learnings/spend keys no_candidate carries
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_rc_sentinel_classifies_error_worker_failed(monkeypatch, tmp_path):
+    """A non-zero rc (incl. max-turns exhaustion) is a worker failure, not scope evidence."""
+    res = _no_branch_result(monkeypatch, tmp_path, "[claude -p super-worker failed: rc=1]")
+    assert res["action"] == "error" and res["stage"] == "worker_failed"
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_unavailable_sentinel_classifies_error_transport(monkeypatch, tmp_path):
+    """A FileNotFoundError-shaped sentinel (no 'timed out') means the brief was NEVER
+    attempted — error(transport), decompose-suppressed downstream."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "[claude -p unavailable: [Errno 2] No such file or directory: 'claude']")
+    assert res["action"] == "error" and res["stage"] == "transport"
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_short_refusal_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """A short reply with a refusal marker near the start + no branch = a refusal —
+    the refusal text rides out in `error` for the blocked reason."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I can't help with modifying this safety-critical code.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+    assert res["error"].startswith("I can't help")
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_long_reply_without_markers_stays_no_candidate(monkeypatch, tmp_path):
+    """A genuinely empty-handed worker (long real-work reply, no branch) is today's path."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I explored the codebase. " + "analysis " * 100)
+    assert res["action"] == "no_candidate"
+
+
+def test_long_reply_with_refusal_words_stays_no_candidate(monkeypatch, tmp_path):
+    """A refusal marker buried in a LONG reply is real work, not a refusal."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            ("detailed analysis " * 40) + " I can't help further here.")
+    assert res["action"] == "no_candidate"
+
+
+def _exec_one(tmp_path, res_dict, *, decomposer=None):
+    """Run one claimed task through execute_claimed_tasks with a fixed worker result."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("task-1", "big brief", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    develop.execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: dict(res_dict),
+                                  decomposer=decomposer)
+    t = s.get_task("task-1")
+    s.close()
+    return t
+
+
+def test_error_timeout_is_decompose_eligible(tmp_path):
+    """Task 0.1: the decompose trigger extends to error(timeout)."""
+    calls = []
+
+    def dec(task):
+        calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}, {"title": "slice two"}]}
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "timeout",
+                             "error": "[claude -p unavailable: ... timed out after 1800 seconds]"},
+                  decomposer=dec)
+    assert calls == ["task-1"]
+    assert t["status"] == "blocked" and "decomposed into 2" in t["result"]
+
+
+def test_error_worker_failed_is_decompose_eligible(tmp_path):
+    """Task 0.1: the decompose trigger extends to error(worker_failed)."""
+    calls = []
+
+    def dec(task):
+        calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}]}
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "worker_failed",
+                             "error": "[claude -p super-worker failed: rc=1]"},
+                  decomposer=dec)
+    assert calls == ["task-1"]
+    assert t["status"] == "blocked" and "decomposed into 1" in t["result"]
+
+
+def test_error_transport_suppresses_decompose(tmp_path):
+    """A dead transport never attempted the brief — decomposing it is pure spend."""
+    def dec(task):
+        raise AssertionError("the decomposer must not run for a transport failure")
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "transport",
+                             "error": "[claude -p unavailable: [Errno 2] No such file: 'claude']"},
+                  decomposer=dec)
+    assert t["status"] == "blocked" and "(transport)" in t["result"]
+
+
+def test_error_refusal_suppresses_decompose_and_persists_the_reason(tmp_path):
+    """A refusal is not scope evidence: decompose suppressed, and the refusal's first
+    ~300 chars land in the close-out result (180 would clip the diagnosis)."""
+    refusal = "I can't help with this brief. " + "z" * 300      # 330 chars
+
+    def dec(task):
+        raise AssertionError("the decomposer must not run for a refusal")
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "refusal", "error": refusal},
+                  decomposer=dec)
+    assert t["status"] == "blocked" and "(refusal)" in t["result"]
+    assert "z" * 270 in t["result"]          # exactly the first 300 chars persisted…
+    assert "z" * 271 not in t["result"]      # …and no more
+
+
+def test_error_without_stage_still_blocks_with_reason(tmp_path):
+    """The pre-existing dispatch-error path (no stage) keeps its shape."""
+    t = _exec_one(tmp_path, {"action": "error", "error": "git worktree add failed"})
+    assert t["status"] == "blocked"
+    assert t["result"].startswith("error:") and "git worktree" in t["result"]

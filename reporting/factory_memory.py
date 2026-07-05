@@ -163,11 +163,24 @@ _DISCARD_BY_STAGE = {
                "acceptance test FIRST, then the code (the gate requires a test).",
 }
 
+# Task 0.1 (P11): an 'error' action's stage disambiguates infrastructure/refusal failures.
+# Neither is scope evidence — the false "brief bundled too much" lesson must not be written.
+_ERROR_BY_STAGE = {
+    "transport": "a worker dispatch failed at the TRANSPORT ([claude -p unavailable]) — the "
+                 "brief was never attempted; check the claude binary/host, do NOT narrow the "
+                 "brief or treat this as scope evidence.",
+    "refusal": "a worker REFUSED a brief outright — reword it to be plainly constructive and "
+               "state the legitimate goal; a refusal is not scope evidence, don't decompose it.",
+}
+
 
 def lesson_for_block(action: str, stage: str = "") -> Optional[str]:
     """The canned, deduped factory-level lesson for a blocked-task action (the factory's
     failure-memory). For a 'discarded' action the `stage` disambiguates the cause (tests vs
-    frozen vs a generic gate). Returns None for non-failure actions (merged/halted)."""
+    frozen vs a generic gate); for an 'error' action a transport/refusal stage gets its own
+    lesson (Task 0.1). Returns None for non-failure actions (merged/halted)."""
     if action == "discarded" and stage in _DISCARD_BY_STAGE:
         return _DISCARD_BY_STAGE[stage]
+    if action == "error" and stage in _ERROR_BY_STAGE:
+        return _ERROR_BY_STAGE[stage]
     return _BLOCK_LESSONS.get(action or "")

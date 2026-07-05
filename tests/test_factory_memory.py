@@ -322,6 +322,52 @@ def test_cmd_learn_add_defaults_to_factory_role(tmp_path):
         assert s.learnings_for_role("factory")[0]["content"] == "a factory-level lesson"
 
 
+# ============================================================================
+# Task 0.1 (P11): stage-aware error lessons — a transport failure or a refusal
+# must stop being recorded as the false "brief bundled too much" lesson.
+# ============================================================================
+
+def test_lesson_for_block_error_transport_is_stage_aware():
+    transport = factory_memory.lesson_for_block("error", "transport")
+    generic = factory_memory.lesson_for_block("error")
+    assert transport and transport != generic and "transport" in transport.lower()
+    assert "bundled too much" not in transport
+
+
+def test_lesson_for_block_error_refusal_is_stage_aware():
+    refusal = factory_memory.lesson_for_block("error", "refusal")
+    generic = factory_memory.lesson_for_block("error")
+    assert refusal and refusal != generic and "refus" in refusal.lower()
+    assert "bundled too much" not in refusal
+
+
+def test_lesson_for_block_error_timeout_falls_back_to_generic():
+    """timeout/worker_failed stay decompose-eligible; their canned fallback (when no
+    decomposer replaced it) is the generic error lesson — NOT the no_candidate one."""
+    generic = factory_memory.lesson_for_block("error")
+    assert factory_memory.lesson_for_block("error", "timeout") == generic
+    assert factory_memory.lesson_for_block("error", "worker_failed") == generic
+
+
+def test_execute_transport_error_records_transport_lesson_not_bundled(tmp_path):
+    """End-to-end close-out: an error(transport) result records the transport lesson,
+    never the false no_candidate 'bundled too much' lesson."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-cccc3333", "x", source="human")
+        s.set_task_status("task-cccc3333", "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "error", "stage": "transport",
+                    "error": "[claude -p unavailable: [Errno 2] No such file: 'claude']"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        lessons = [r["content"] for r in s.learnings_for_role("factory")]
+        assert not any("bundled too much" in c for c in lessons)
+        assert any("transport" in c.lower() for c in lessons)
+
+
 # -- execute: don't record learnings for a STOP-halted run -------------------
 def test_execute_does_not_record_learnings_for_halted(tmp_path):
     from factory.orchestrator import develop as dev
