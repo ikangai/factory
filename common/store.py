@@ -695,6 +695,25 @@ class Blackboard:
         placeholders = ",".join("?" * len(ids))
         self._exec(f"UPDATE learnings SET uses = uses + 1 WHERE id IN ({placeholders})", ids)
 
+    # -- task evidence: per-task failure forensics (Task 0.4, P6 stage 1) ---
+    def add_task_evidence(self, task_id: str, *, shift_id: Optional[int] = None,
+                          action: str = "", stage: str = "", tests_report: str = "",
+                          reply_head: str = "") -> int:
+        """Persist WHY a task failed at close-out — the full tests_report + the worker's
+        reply head, which the ≤200-char tasks.result reason cannot carry. Returns the row
+        id. Passive write, MAIN thread only (single-writer connection); zero LLM."""
+        cur = self._exec(
+            "INSERT INTO task_evidence(task_id, shift_id, action, stage, tests_report, "
+            "reply_head, created_at) VALUES (?,?,?,?,?,?,?)",
+            (task_id, shift_id, action, stage, tests_report, reply_head, now_iso()))
+        return cur.lastrowid
+
+    def task_evidence(self, task_id: str) -> list[dict]:
+        """One task's failure-evidence rows, newest first (id DESC is stable within a
+        tick). Reader for the `factory task evidence` verb + the investigator (Task 4.1)."""
+        return self._all(
+            "SELECT * FROM task_evidence WHERE task_id = ? ORDER BY id DESC", (task_id,))
+
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
         """True if this (issue, commit) pair has already been synced — the guard that

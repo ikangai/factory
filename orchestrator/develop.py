@@ -265,6 +265,14 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 # a refusal's own words ARE the diagnosis — persist ~300 chars, not 180 (Task 0.1)
                 cut = _REFUSAL_REASON_LEN if res.get("stage") == "refusal" else 180
                 reason = f"{reason}: {str(res['error'])[:cut]}"
+            # Task 0.4 (P6 stage 1): persist the failure EVIDENCE — the full tests_report +
+            # the worker's reply head outlive the ≤200-char reason. MAIN thread only, and
+            # BEFORE the auto-decompose `continue` below, or decomposed no_candidates lose
+            # their evidence forever. Passive write, zero LLM, no gate.
+            store.add_task_evidence(task["id"], shift_id=shift_id, action=action or "",
+                                    stage=str(res.get("stage") or ""),
+                                    tests_report=str(res.get("tests_report") or ""),
+                                    reply_head=str(res.get("reply_head") or ""))
             decomposed = 0                            # GSD #4: turn no_candidate into forward progress
             # Task 0.1: error(timeout)/error(worker_failed) stay decompose-eligible — both are
             # "task too big" evidence; transport/refusal never reach the decomposer (pure spend).
@@ -363,18 +371,21 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
         # so it emits learnings in its reply; carry them out for the MAIN thread to record.
         from ..reporting import factory_memory
         learnings = factory_memory.parse_learnings(dev.get("reply", ""))
+        # Task 0.4 (P6 stage 1): the reply head rides out on every post-worker path so the
+        # close-out can persist failure EVIDENCE (task_evidence) — not just a reason string.
+        evidence = {"learnings": learnings, "reply_head": (dev.get("reply") or "")[:2000]}
 
         if not adapter.branch_exists(dev_clone, branch):   # worker crashed / committed nothing →
             err = classify_empty_handed(dev.get("reply", ""))   # Task 0.1: timeout/rc/transport/
             if err:                                             # refusal must NOT collapse into
-                return {**err, "branch": branch, "learnings": learnings, **spend}  # no_candidate
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # NO branch
+                return {**err, "branch": branch, **evidence, **spend}          # no_candidate
+            return {"action": "no_candidate", "branch": branch, **evidence, **spend}  # NO branch
         try:
             changed = adapter.changed_paths(dev_clone, base, branch)
         except subprocess.CalledProcessError:          # 2nd exit-128 site: branch exists but the diff
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}  # unresolvable
+            return {"action": "no_candidate", "branch": branch, **evidence, **spend}  # unresolvable
         if not changed:                                # the worker made no committed change
-            return {"action": "no_candidate", "branch": branch, "learnings": learnings, **spend}
+            return {"action": "no_candidate", "branch": branch, **evidence, **spend}
 
         review_spend = {}
         if reviewer:                                   # Phase 8: config-gated pre-merge review gate
@@ -382,7 +393,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             if verdict is not None and not verdict["approve"]:      # an EXPLICIT reject discards it
                 return {"action": "discarded", "stage": "review",
                         "error": ("review: " + (verdict["reason"] or "rejected"))[:180],
-                        "learnings": learnings, **spend, **review_spend}
+                        **evidence, **spend, **review_spend}
             # approve, OR fail-open (verdict is None on a transport/parse failure) → proceed to merge
 
         # The shared-worktree section mutates main_repo; in REAL mode main_repo is the ONE
@@ -401,7 +412,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch, require_test=rt)
-                res["learnings"] = learnings
+                res.update(evidence)                  # learnings + reply_head (Task 0.4);
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
                 res.update(review_spend)              # the pre-merge reviewer's own spend (Phase 8)
@@ -409,7 +420,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             except Exception as e:  # noqa: BLE001 — a fetch/worktree/grade blow-up AFTER the
                 # worker ran still spent it; carry the spend out so the rail ledgers it (Task 0.2)
                 return {"action": "error", "stage": "merge", "error": str(e)[:180],
-                        "learnings": learnings, **spend, **review_spend}
+                        **evidence, **spend, **review_spend}
             finally:
                 try:
                     adapter.remove_worktree(main_repo, cand_wt)

@@ -382,3 +382,178 @@ def test_execute_does_not_record_learnings_for_halted(tmp_path):
 
         dev.execute_claimed_tasks(s, sh, develop_fn=fake)
         assert s.learnings_for_role("developer") == []
+
+
+# ============================================================================
+# Task 0.4 (P6 stage 1): per-task failure evidence (task_evidence) — the
+# factory must be able to RE-READ why a task failed (the full tests_report +
+# the worker's reply head), not just the ≤200-char blocked reason string.
+# ============================================================================
+
+# -- store: task_evidence CRUD ------------------------------------------------
+def test_add_task_evidence_roundtrip(tmp_path):
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100)
+        s.add_task("task-eeee0001", "t", source="human")
+        eid = s.add_task_evidence("task-eeee0001", shift_id=sh, action="discarded",
+                                  stage="tests", tests_report="FAILED test_x - boom",
+                                  reply_head="I wrote the fix but one test stayed red")
+        assert isinstance(eid, int) and eid > 0
+        rows = s.task_evidence("task-eeee0001")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["task_id"] == "task-eeee0001" and r["shift_id"] == sh
+        assert r["action"] == "discarded" and r["stage"] == "tests"
+        assert r["tests_report"] == "FAILED test_x - boom"
+        assert r["reply_head"].startswith("I wrote the fix")
+        assert r["created_at"]
+
+
+def test_task_evidence_is_task_scoped_and_newest_first(tmp_path):
+    with _store(tmp_path) as s:
+        s.add_task("task-eeee0002", "a", source="human")
+        s.add_task("task-eeee0003", "b", source="human")
+        s.add_task_evidence("task-eeee0002", action="no_candidate", reply_head="first")
+        s.add_task_evidence("task-eeee0002", action="error", stage="timeout",
+                            reply_head="second")
+        s.add_task_evidence("task-eeee0003", action="discarded", stage="tests")
+        rows = s.task_evidence("task-eeee0002")
+        assert [r["reply_head"] for r in rows] == ["second", "first"]   # newest first
+        assert len(s.task_evidence("task-eeee0003")) == 1
+
+
+# -- close-out: one evidence row per blocked task, main thread only -----------
+def test_execute_blocked_task_persists_evidence(tmp_path):
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-dddd4444", "x", source="human")
+        s.set_task_status("task-dddd4444", "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "discarded", "stage": "tests",
+                    "tests_report": "FAILED tests/test_y.py::test_z - assert 1 == 2",
+                    "reply_head": "attempted the change; one assertion stayed red"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        rows = s.task_evidence("task-dddd4444")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["action"] == "discarded" and r["stage"] == "tests" and r["shift_id"] == sh
+        assert "tests/test_y.py::test_z" in r["tests_report"]
+        assert "assertion stayed red" in r["reply_head"]
+
+
+def test_execute_evidence_survives_auto_decompose(tmp_path):
+    """The evidence insert must land BEFORE the auto-decompose `continue`, or a
+    decomposed no_candidate loses its evidence forever."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        tid = "task-dddd5555"
+        s.add_task(tid, "too big", source="human")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "no_candidate", "reply_head": "came back empty-handed"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake,
+                                  decomposer=lambda t: {"subtasks": [{"title": "slice 1"}]})
+        t = s.get_task(tid)
+        assert t["status"] == "blocked" and "decomposed" in t["result"]
+        rows = s.task_evidence(tid)
+        assert len(rows) == 1
+        assert rows[0]["action"] == "no_candidate"
+        assert rows[0]["reply_head"] == "came back empty-handed"
+
+
+def test_execute_error_stage_rides_into_evidence(tmp_path):
+    """Task 0.1's new error stages (timeout/worker_failed/transport/refusal) must be
+    carried onto the evidence row so failures stay diagnosable after the shift."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-dddd6666", "x", source="human")
+        s.set_task_status("task-dddd6666", "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "error", "stage": "refusal",
+                    "error": "I can't help with that",
+                    "reply_head": "I can't help with that brief as written."}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        rows = s.task_evidence("task-dddd6666")
+        assert len(rows) == 1
+        assert rows[0]["action"] == "error" and rows[0]["stage"] == "refusal"
+        assert "can't help" in rows[0]["reply_head"]
+
+
+def test_execute_no_evidence_for_merged_or_halted(tmp_path):
+    """Evidence is FAILURE forensics: a merged task and a STOP-halted run (requeued,
+    not failed) must write no rows."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-dddd7777", "m: ship it", source="human")
+        s.add_task("task-dddd8888", "h: stopped", source="human")
+        for tid in ("task-dddd7777", "task-dddd8888"):
+            s.set_task_status(tid, "in_progress", shift_id=sh)
+
+        def fake(text, **k):     # map by title — parallel workers finish in any order
+            return ({"action": "merged", "merge_sha": "abc123"} if text.startswith("m:")
+                    else {"action": "halted"})
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        assert s.task_evidence("task-dddd7777") == []
+        assert s.task_evidence("task-dddd8888") == []
+
+
+# -- develop_and_merge: reply_head + tests_report ride OUT of the round -------
+class _EvAdapter:
+    """Minimal hermetic adapter for the develop_and_merge evidence-carry tests."""
+    def __init__(self, *, has_branch=True, changed=("src/x.py",), tests_passed=True):
+        self._has_branch, self._changed, self._tests_passed = has_branch, list(changed), tests_passed
+
+    def clone(self, dest):
+        import os
+        os.makedirs(dest, exist_ok=True); return dest
+
+    def default_branch(self, repo): return "main"
+    def test_command(self): return ["pytest", "-q"]
+    def frozen_paths(self): return []
+    def branch_exists(self, repo, branch): return self._has_branch
+    def changed_paths(self, repo, *refs): return list(self._changed)
+    def fetch_candidate(self, repo, clone_dir, branch): return branch
+    def add_worktree(self, repo, dest, branch):
+        import os
+        os.makedirs(dest, exist_ok=True); return dest
+    def remove_worktree(self, repo, dest): pass
+    def run_tests(self, repo, **k): return (self._tests_passed, "1 failed: test_z red")
+
+
+def test_develop_and_merge_carries_reply_head_on_no_candidate(monkeypatch, tmp_path):
+    from factory.orchestrator import develop
+    from factory.roles import common
+    reply = "analysed the brief in depth; " + "x" * 3000   # long honest reply, no branch
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": reply})
+    ad = _EvAdapter(has_branch=False)
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores={"working": 0, "held_out": 0},
+                                    grade_fn=lambda r: {})
+    assert res["action"] == "no_candidate"
+    assert res["reply_head"] == reply[:2000]                # capped at 2000 chars
+
+
+def test_develop_and_merge_carries_reply_head_and_tests_report_on_red_tests(monkeypatch, tmp_path):
+    from factory.orchestrator import develop
+    from factory.roles import common
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did the work"})
+    ad = _EvAdapter(tests_passed=False)
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores={"working": 0, "held_out": 0},
+                                    grade_fn=lambda r: {}, require_test=False)
+    assert res["action"] == "discarded" and res["stage"] == "tests"
+    assert res["tests_report"] == "1 failed: test_z red"    # already rode out of run_code_round
+    assert res["reply_head"] == "did the work"              # now rides alongside it

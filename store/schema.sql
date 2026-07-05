@@ -252,6 +252,23 @@ CREATE TABLE IF NOT EXISTS worker_profiles (
     created_at  TEXT NOT NULL
 );
 
+-- Per-task failure evidence (Task 0.4, P6 stage 1): captured at close-out for every
+-- blocked task so the factory can RE-READ why a task failed — the full tests_report and
+-- the worker's reply head, not just the ≤200-char tasks.result reason. Passive write on
+-- the main thread, zero LLM; consumed by the investigator (Task 4.1). init_db re-runs
+-- this script (IF NOT EXISTS), so existing DBs gain the table without a column migration.
+CREATE TABLE IF NOT EXISTS task_evidence (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL REFERENCES tasks(id),   -- tasks are never DELETEd, so safe
+    shift_id     INTEGER REFERENCES shifts(id),
+    action       TEXT NOT NULL DEFAULT '',   -- no_candidate|discarded|auto_reverted|error|…
+    stage        TEXT NOT NULL DEFAULT '',   -- tests|frozen|timeout|refusal|transport|… ('' = none)
+    tests_report TEXT NOT NULL DEFAULT '',   -- run_code_round's full suite output (was dropped)
+    reply_head   TEXT NOT NULL DEFAULT '',   -- first ≤2000 chars of the worker's reply
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_evidence_task ON task_evidence(task_id);
+
 -- Whitelisted runtime overrides (Phase 6.1, pulled forward — Task 5.2's staffing guard lives
 -- here). config.yaml stays the git-tracked defaults file; the board/CLI write bounded overrides
 -- consumed where cmd_run resolves knobs (store override → config.yaml → hardcoded default).
