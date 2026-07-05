@@ -222,6 +222,49 @@ def test_decompose_judge_workdir_falls_back_when_target_missing(monkeypatch, tmp
     assert calls["workdir"] == str(paths.FACTORY_ROOT)
 
 
+# -- Task 2.4: scope_check_tier routing knob (cheap-grader pattern) -----------
+def _fake_config(monkeypatch, super_worker: dict):
+    """Pin config.load_config to a fake with a models block + the given super_worker,
+    so scope_judge's resolve_model call is deterministic and hermetic (no config.yaml)."""
+    from factory.common import config as fconfig
+    cfg = {"super_worker": super_worker,
+           "models": {"frontier": "", "standard": "claude-sonnet-4-6", "fast": "claude-haiku-4-5"}}
+    monkeypatch.setattr(fconfig, "load_config", lambda: cfg)
+
+
+def test_scope_judge_threads_resolved_model(monkeypatch):
+    """super_worker.scope_check_tier resolves via resolve_model and is threaded to claude_super."""
+    _fake_config(monkeypatch, {"scope_check_tier": "fast"})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"
+    assert calls["model"] == "claude-haiku-4-5"        # 'fast' resolved DOWN and threaded
+
+
+def test_scope_judge_default_tier_is_frontier_empty_model(monkeypatch):
+    """No scope_check_tier → '' = frontier = account default, byte-for-byte today's call."""
+    _fake_config(monkeypatch, {})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    scope_check.scope_judge({"title": "x"})
+    assert calls["model"] == ""                         # frontier default, no down-tier
+
+
+def test_scope_judge_unknown_tier_fails_open_downward_never_up(monkeypatch):
+    """An unresolvable tier fails open DOWNWARD to standard — never silently up to frontier."""
+    _fake_config(monkeypatch, {"scope_check_tier": "typo-tier"})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    scope_check.scope_judge({"title": "x"})
+    assert calls["model"] == "claude-sonnet-4-6"        # standard, not '' (frontier)
+
+
+def test_decompose_judge_ignores_scope_check_tier(monkeypatch):
+    """The knob is scope_judge-only (separate call path); decompose stays at the account default."""
+    _fake_config(monkeypatch, {"scope_check_tier": "fast"})
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls.get("model", "") == ""                 # unaffected by scope_check_tier
+
+
 # -- wiring into execute_claimed_tasks ---------------------------------------
 def test_execute_runs_scope_prefilter_when_judge_given(tmp_path):
     from factory.orchestrator import develop as dev

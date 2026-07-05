@@ -259,7 +259,12 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
             prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("scope_check_max_turns", 6)),
-            timeout=int(sw.get("scope_check_timeout_s", 180)))
+            timeout=int(sw.get("scope_check_timeout_s", 180)),
+            # Task 2.4 cheap-grader knob: '' = today's frontier (byte-for-byte). resolve_model
+            # fails open DOWNWARD to `standard` on an unknown tier — never silently up to frontier.
+            # decompose_judge is a SEPARATE call path and is deliberately NOT threaded (spec: scope
+            # only). config.yaml-only (no store handle here), so it stays out of SETTINGS_SPEC.
+            model=config.resolve_model(sw.get("scope_check_tier") or ""))
         obj = common._parse_obj(reply)
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fail open

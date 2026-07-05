@@ -156,6 +156,15 @@ super_worker:
   # resolve_model fails open DOWNWARD (never up to frontier on a typo). config.yaml-only — it is a
   # routing knob, not a board brake, and the reviewer path reads config directly (no store handle).
   reviewer_tier: ""
+  # The model TIER the pre-dispatch SCOPE judge runs at (Task 2.4 cheap-grader knob — shares the
+  # claude_super --model plumbing). '' = frontier (the account default; scope triage is JUDGMENT,
+  # so frontier is the deliberate default per the models block below). A named tier (standard/fast)
+  # down-tiers it so the judge stops burning frontier tokens per claimed task; resolve_model fails
+  # open DOWNWARD (never up to frontier on a typo). Applies to scope_judge ONLY — decompose_judge is
+  # a separate call path, left at the account default. config.yaml-only (the scope path reads config
+  # directly, no store handle), a routing knob not a board brake — deliberately NOT in SETTINGS_SPEC.
+  # Frontier-vs-fast on the eval-gate goldens is an OPERATOR act; the default stays frontier here.
+  scope_check_tier: ""
 
 # --- model tiers (worker routing, Phase 5) ----------------------------------
 # Worker profiles name a TIER, never a raw model id. '' = the account's default model
