@@ -737,3 +737,131 @@ def test_error_without_stage_still_blocks_with_reason(tmp_path):
     t = _exec_one(tmp_path, {"action": "error", "error": "git worktree add failed"})
     assert t["status"] == "blocked"
     assert t["result"].startswith("error:") and "git worktree" in t["result"]
+
+
+# ============================================================================
+# Task 2.3 (reviewer + scope-check calibration): gate-outcome scoring.
+# Slice 1 — carry the reviewer verdict out (res['review']) + a reviewer-MISS
+# learning when an APPROVED candidate ends auto_reverted.
+# Slice 2 — a no_candidate whose task carries a scope-check-passed spec scores a
+# scope_check calibration learning (the mirror of the merged-side spec-creep feedback).
+# ============================================================================
+
+def test_reviewer_approve_verdict_rides_out(monkeypatch, tmp_path):
+    """Slice 1: an APPROVE verdict rides out on the merged result as res['review']."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": true, "reason": "fits"}', 40, 0.01))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="add x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"
+    assert res["review"] == {"approved": True, "reason": "fits"}
+
+
+def test_reviewer_reject_verdict_rides_out(monkeypatch, tmp_path):
+    """Slice 1: a REJECT verdict rides out on the discarded result as res['review']."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": false, "reason": "off scope"}', 30, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "discarded" and res["stage"] == "review"
+    assert res["review"] == {"approved": False, "reason": "off scope"}
+
+
+def test_fail_open_review_carries_no_verdict(monkeypatch, tmp_path):
+    """Slice 1: a fail-open review (no parseable verdict) carries NO 'review' key — there is
+    no verdict to score, so a reviewer hiccup never fabricates a calibration signal."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p", lambda prompt, **k: ("[claude -p unavailable]", 0, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged" and "review" not in res
+
+
+def test_reviewer_miss_learning_on_approved_auto_revert(tmp_path):
+    """Slice 1: an APPROVED candidate that then auto-reverts is a reviewer MISS — recorded as
+    a scope='reviewer_calibration' factory learning (a counter/ledger note, never a settings key)."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "auto_reverted", "merge_sha": "m", "revert_sha": "r",
+                                "review": {"approved": True, "reason": "lgtm"}}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert s.get_task("task-1")["status"] == "blocked"
+    miss = [r for r in s.learnings_for_role("factory") if r["scope"] == "reviewer_calibration"]
+    assert len(miss) == 1 and "auto-revert" in miss[0]["content"].lower()
+    s.close()
+
+
+def test_no_reviewer_miss_when_no_review_verdict(tmp_path):
+    """Slice 1: an auto_reverted candidate WITHOUT a reviewer verdict (reviewer off / fail-open)
+    records NO reviewer_calibration learning — a miss requires the reviewer to have approved it."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "auto_reverted", "merge_sha": "m", "revert_sha": "r"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert not any(r["scope"] == "reviewer_calibration" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+def test_no_reviewer_miss_when_approved_candidate_merges(tmp_path):
+    """Slice 1: an APPROVED candidate that MERGES cleanly is not a miss — only auto_reverted is."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "merged", "merge_sha": "m",
+                                "review": {"approved": True, "reason": "lgtm"}}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert s.get_task("task-1")["status"] == "done"
+    assert not any(r["scope"] == "reviewer_calibration" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+def test_scope_miss_recorded_on_no_candidate_with_spec(tmp_path):
+    """Slice 2: a no_candidate whose task carries a spec the scope check PASSED (attached) scores
+    a scope='scope_check' calibration learning — the judge under-rejected a brief too big to land."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    scope = lambda t: {"decision": "pass",
+                       "spec": {"target_surface": "llm.py", "acceptance": "a test"}}
+    dev_fn = lambda text, **k: {"action": "no_candidate"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, scope_judge=scope)
+    assert s.get_task("task-1")["status"] == "blocked"
+    miss = [r for r in s.learnings_for_role("factory")
+            if r["scope"] == "scope_check" and "no_candidate" in r["content"]]
+    assert len(miss) == 1
+    s.close()
+
+
+def test_no_scope_miss_on_no_candidate_without_spec(tmp_path):
+    """Slice 2: a no_candidate with NO spec (nothing proves the scope check passed it) records
+    no scope_check calibration learning — only a passed-spec brief scores the miss."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "no_candidate"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert not any(r["scope"] == "scope_check" for r in s.learnings_for_role("factory"))
+    s.close()

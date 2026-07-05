@@ -5,7 +5,7 @@ import subprocess as _sp
 from factory.common.store import Blackboard
 from factory.common import config
 from factory.orchestrator import develop
-from factory.reporting import scope_check, acceptance
+from factory.reporting import scope_check, acceptance, factory_memory
 from factory.roles import common as roles_common
 
 
@@ -122,6 +122,17 @@ def test_reviewer_default_tier_is_frontier_empty_model(monkeypatch, tmp_path):
                         lambda prompt, **k: (seen.update(model=k.get("model")) or ('{"approve": true}', 1, 0.0)))
     develop._review_candidate(root, base, "cand", "task")
     assert seen["model"] == ""                       # '' default = frontier = account default (byte-for-byte)
+
+
+# == Task 2.3 slice 1: a reviewer reject gets its OWN discard lesson =========
+def test_lesson_for_block_review_stage_is_specific():
+    """A reviewer reject (stage='review') must not collapse into the generic 'discarded'
+    lesson — _DISCARD_BY_STAGE gains a 'review' entry so the blocked-task lesson names the
+    reviewer as the cause and points at its reason."""
+    review = factory_memory.lesson_for_block("discarded", "review")
+    generic = factory_memory.lesson_for_block("discarded")
+    assert review and review != generic
+    assert "review" in review.lower()
 
 
 # -- finding 1/6/11: prefilter must NOT clobber a durable authored spec ------

@@ -298,6 +298,31 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                                     stage=str(res.get("stage") or ""),
                                     tests_report=str(res.get("tests_report") or ""),
                                     reply_head=str(res.get("reply_head") or ""))
+            # Task 2.3 slice 2 (scope-check calibration): a no_candidate whose task carries a spec
+            # means the scope check PASSED this brief (it attached/kept the spec) — yet the worker
+            # came back empty-handed, so the judge under-rejected. Mirror of the merged-side spec-
+            # creep feedback, on the failure side. scope='scope_check' learning (a counter/ledger
+            # note, NEVER a settings key). Recorded BEFORE the decompose `continue` so a decomposed
+            # no_candidate still scores the miss.
+            if action == "no_candidate" and task.get("spec"):
+                factory_memory.record_learning(
+                    store, "factory",
+                    "a task the scope check PASSED (spec attached) still returned no_candidate — "
+                    "the scope judge under-rejected; split/reject briefs this broad before a "
+                    "worker is spent.",
+                    scope="scope_check", shift_id=shift_id)
+            # Task 2.3 slice 1 (reviewer calibration): the blind reviewer APPROVED a candidate that
+            # the correctness gate then AUTO-REVERTED — a reviewer MISS. scope='reviewer_calibration'
+            # learning (counter/ledger note, never a settings key), so the reviewer's own calibration
+            # is scorable. Only a reviewer-approved verdict scores — fail-open (no verdict) does not.
+            review = res.get("review")
+            if action == "auto_reverted" and review and review.get("approved"):
+                factory_memory.record_learning(
+                    store, "factory",
+                    "the blind pre-merge reviewer APPROVED a candidate that then AUTO-REVERTED on "
+                    "the correctness gate — a reviewer miss; the review isn't catching regressions "
+                    "the target's own tests catch.",
+                    scope="reviewer_calibration", shift_id=shift_id)
             decomposed = 0                            # GSD #4: turn no_candidate into forward progress
             # Task 0.1: error(timeout)/error(worker_failed) stay decompose-eligible — both are
             # "task too big" evidence; transport/refusal never reach the decomposer (pure spend).
@@ -425,11 +450,16 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             return {"action": "no_candidate", "branch": branch, **evidence, **spend}
 
         review_spend = {}
+        review_verdict = None
         if reviewer:                                   # Phase 8: config-gated pre-merge review gate
             verdict, review_spend = _review_candidate(dev_clone, base, branch, task)
+            if verdict is not None:                    # Task 2.3: carry the verdict out so the rail
+                review_verdict = {"approved": bool(verdict["approve"]),   # can score the reviewer's
+                                  "reason": str(verdict.get("reason", ""))}  # calibration at close-out
             if verdict is not None and not verdict["approve"]:      # an EXPLICIT reject discards it
                 return {"action": "discarded", "stage": "review",
                         "error": ("review: " + (verdict["reason"] or "rejected"))[:180],
+                        "review": review_verdict,
                         **evidence, **spend, **review_spend}
             # approve, OR fail-open (verdict is None on a transport/parse failure) → proceed to merge
 
@@ -453,6 +483,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)
                 res.update(review_spend)              # the pre-merge reviewer's own spend (Phase 8)
+                if review_verdict is not None:        # Task 2.3: the reviewer's verdict rides out
+                    res["review"] = review_verdict    # on the round result (merged/auto_reverted/…)
                 return res
             except Exception as e:  # noqa: BLE001 — a fetch/worktree/grade blow-up AFTER the
                 # worker ran still spent it; carry the spend out so the rail ledgers it (Task 0.2)

@@ -258,6 +258,10 @@ _DISCARD_BY_STAGE = {
               "off frozen files entirely.",
     "no_test": "a candidate was discarded for shipping a source change with NO test — write the "
                "acceptance test FIRST, then the code (the gate requires a test).",
+    # Task 2.3: a reviewer reject is not the generic gate-discard — the blind pre-merge reviewer
+    # judged the change out-of-scope/unsafe; its reason rides in the blocked result. Name it.
+    "review": "a candidate was rejected by the blind pre-merge REVIEWER — read its reason in the "
+              "blocked result and rescope the brief so the change is obviously minimal + in-scope.",
 }
 
 # Task 0.1 (P11): an 'error' action's stage disambiguates infrastructure/refusal failures.
