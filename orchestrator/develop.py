@@ -44,6 +44,12 @@ _REFUSAL_REASON_LEN = 300   # how much refusal text the blocked reason keeps
 # big" evidence in the system; worker_failed includes max-turns exhaustion. A transport
 # failure never attempted the brief and a refusal is not scope evidence — both suppressed.
 _DECOMPOSE_STAGES = ("timeout", "worker_failed")
+# stages where the worker NEVER ran, so no model consulted the memory card (Fix 1.4b):
+# 'transport' = claude binary unavailable; 'chown' = Guest-House clone ownership failed
+# before dispatch. Outcome attribution must skip these — during a transport outage every
+# dispatched task would otherwise bump blocked_after on its surfaced learnings each
+# shift, poisoning the effectiveness ratio for the newest/most-relevant lessons.
+_NO_CONSULT_STAGES = ("transport", "chown")
 
 
 def classify_empty_handed(reply: str) -> Optional[dict]:
@@ -233,9 +239,16 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
         # Task 1.4 consult-telemetry: attribute the task's OUTCOME to the learnings its
         # worker card surfaced — one batched UPDATE per task, MAIN thread only. A halted
-        # run is incomplete (STOP braked it), so it attributes nothing.
+        # run is incomplete (STOP braked it), so it attributes nothing. Fix 1.4b: attribute
+        # ONLY when a model actually consulted the card — skip infrastructural failures
+        # (_NO_CONSULT_STAGES) and the bare stage-less error from work()'s except handler
+        # (a pre-dispatch blow-up). Refusal/timeout/worker_failed DID consume the brief,
+        # so they still attribute.
         card_ids = cards.get(task["id"], ("", []))[1]
-        if card_ids and action != "halted":
+        consulted = (action != "halted"
+                     and res.get("stage") not in _NO_CONSULT_STAGES
+                     and not (action == "error" and not res.get("stage")))
+        if card_ids and consulted:
             store.bump_learning_outcomes(card_ids, merged=(action == "merged"))
         if action != "halted":                        # a STOP-braked run is incomplete — don't
             for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable

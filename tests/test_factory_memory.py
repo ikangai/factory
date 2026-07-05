@@ -1144,6 +1144,74 @@ def test_execute_halted_attributes_no_outcome(tmp_path):
         assert row["merged_after"] == 0 and row["blocked_after"] == 0
 
 
+# -- Fix 1.4b: attribute outcomes ONLY when a model consulted the card ----------
+# An infrastructural failure (transport outage, Guest-House chown, a pre-dispatch
+# blow-up) never ran the worker — no model saw the memory card, so bumping
+# blocked_after would poison the effectiveness ratio for the newest/most-relevant
+# lessons during every outage. Refusal/timeout/worker_failed DID consume the brief.
+def _attribution_run(tmp_path, result):
+    """Dispatch one task through execute_claimed_tasks with a canned worker result;
+    return the surfaced learning row's outcome counters."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "always run the target tests first")
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-ffff0014", "run the target tests", source="human")
+        s.set_task_status("task-ffff0014", "in_progress", shift_id=sh)
+        if callable(result):
+            dev.execute_claimed_tasks(s, sh, develop_fn=result)
+        else:
+            dev.execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: dict(result))
+        return s.get_learning(lid)
+
+
+def test_execute_transport_error_attributes_no_outcome(tmp_path):
+    """error(stage='transport') = claude binary unavailable — the worker never ran."""
+    row = _attribution_run(tmp_path, {"action": "error", "stage": "transport",
+                                      "error": "[claude -p unavailable: No such file]"})
+    assert row["merged_after"] == 0 and row["blocked_after"] == 0
+
+
+def test_execute_predispatch_error_attributes_no_outcome(tmp_path):
+    """work()'s except handler yields a bare {'action':'error'} with NO stage —
+    a pre-dispatch blow-up (e.g. clone failed) never showed the model the card."""
+    def boom(text, **k):
+        raise RuntimeError("clone failed before dispatch")
+    row = _attribution_run(tmp_path, boom)
+    assert row["merged_after"] == 0 and row["blocked_after"] == 0
+
+
+def test_execute_chown_discard_attributes_no_outcome(tmp_path):
+    """discarded(stage='chown') happens BEFORE develop_candidate — same class."""
+    row = _attribution_run(tmp_path, {"action": "discarded", "stage": "chown",
+                                      "error": "sudo chown failed"})
+    assert row["merged_after"] == 0 and row["blocked_after"] == 0
+
+
+def test_execute_refusal_still_bumps_blocked_after(tmp_path):
+    """A refusal consumed the brief — the model read the card and declined."""
+    row = _attribution_run(tmp_path, {"action": "error", "stage": "refusal",
+                                      "error": "I can't help with that"})
+    assert row["merged_after"] == 0 and row["blocked_after"] == 1
+
+
+def test_execute_timeout_still_bumps_blocked_after(tmp_path):
+    row = _attribution_run(tmp_path, {"action": "error", "stage": "timeout",
+                                      "error": "[claude -p timed out after 1800s]"})
+    assert row["merged_after"] == 0 and row["blocked_after"] == 1
+
+
+def test_execute_worker_failed_still_bumps_blocked_after(tmp_path):
+    row = _attribution_run(tmp_path, {"action": "error", "stage": "worker_failed",
+                                      "error": "[claude -p rc=1]"})
+    assert row["merged_after"] == 0 and row["blocked_after"] == 1
+
+
+def test_execute_merged_still_bumps_merged_after(tmp_path):
+    row = _attribution_run(tmp_path, {"action": "merged", "merge_sha": "abc123"})
+    assert row["merged_after"] == 1 and row["blocked_after"] == 0
+
+
 # -- effectiveness ratio: suppressed below the minimum denominator --------------
 def test_effectiveness_none_below_min_denominator(tmp_path):
     row = {"merged_after": 6, "blocked_after": 3}           # n=9 < 10 → noise, suppressed
