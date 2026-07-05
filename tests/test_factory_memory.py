@@ -938,3 +938,236 @@ def test_cli_learn_retire_wired_through_main(tmp_path, monkeypatch, capsys):
     assert "retired" in capsys.readouterr().out
     with Blackboard(db) as s:
         assert s.get_learning(lid)["archived"] == 1
+
+
+# ============================================================================
+# Task 1.4: consult-telemetry + per-task relevant memory card. The worker card
+# is scoped by keyword overlap with the task's own title+detail (an old but
+# on-point lesson resurfaces instead of aging out), and the surfaced ids get
+# outcome attribution (merged_after/blocked_after) at close-out — signal, not
+# proof, so the ratio is SUPPRESSED below a minimum denominator.
+# ============================================================================
+
+# -- store: merged_after/blocked_after columns ---------------------------------
+def test_learning_starts_with_zero_outcome_counters(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "fresh, never attributed")
+        row = s.get_learning(lid)
+        assert row["merged_after"] == 0 and row["blocked_after"] == 0
+
+
+def test_migrate_adds_outcome_columns_to_old_db(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)                       # a pre-Task-1.4 learnings table
+    conn.execute("""CREATE TABLE learnings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL,
+        agent TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'general',
+        content TEXT NOT NULL, shift_id INTEGER,
+        uses INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
+    conn.execute("INSERT INTO learnings(role, content, created_at) VALUES ('factory','pre','t')")
+    conn.commit()
+    conn.close()
+    with Blackboard(db) as s:
+        s.init_db()
+        row = s.learnings_for_role("factory")[0]
+        assert row["merged_after"] == 0 and row["blocked_after"] == 0  # backfilled default
+
+
+def test_bump_learning_outcomes_batched_and_scoped(tmp_path):
+    with _store(tmp_path) as s:
+        a = s.add_learning("developer", "A")
+        b = s.add_learning("developer", "B")
+        c = s.add_learning("developer", "C")
+        s.bump_learning_outcomes([a, b], merged=True)
+        s.bump_learning_outcomes([a], merged=False)
+        assert (s.get_learning(a)["merged_after"], s.get_learning(a)["blocked_after"]) == (1, 1)
+        assert (s.get_learning(b)["merged_after"], s.get_learning(b)["blocked_after"]) == (1, 0)
+        assert (s.get_learning(c)["merged_after"], s.get_learning(c)["blocked_after"]) == (0, 0)
+
+
+def test_bump_learning_outcomes_empty_is_noop(tmp_path):
+    with _store(tmp_path) as s:
+        s.bump_learning_outcomes([], merged=True)           # must not raise
+
+
+# -- module: memory_card_with_ids ----------------------------------------------
+def test_memory_card_is_thin_wrapper_over_with_ids(tmp_path):
+    with _store(tmp_path) as s:
+        s.add_learning("developer", "dev lesson")
+        s.add_learning("factory", "factory lesson")
+        text, ids = factory_memory.memory_card_with_ids(s, "developer")
+        assert factory_memory.memory_card(s, "developer") == text
+        assert "dev lesson" in text and "factory lesson" in text
+
+
+def test_memory_card_with_ids_returns_surfaced_ids(tmp_path):
+    with _store(tmp_path) as s:
+        d = s.add_learning("developer", "dev lesson")
+        f = s.add_learning("factory", "factory lesson")
+        _, ids = factory_memory.memory_card_with_ids(s, "developer")
+        assert sorted(ids) == sorted([d, f])
+
+
+def test_memory_card_with_ids_empty(tmp_path):
+    with _store(tmp_path) as s:
+        assert factory_memory.memory_card_with_ids(s, "developer") == ("", [])
+
+
+def test_memory_card_with_ids_topic_pulls_relevant_old_row(tmp_path):
+    """An OLD lesson sharing keywords with the task's brief must surface via the
+    relevance leg even after it aged out of the newest-N window."""
+    with _store(tmp_path) as s:
+        old = s.add_learning("developer", "the tokenizer retry helper lives in llm.py")
+        for i in range(9):
+            s.add_learning("developer", f"unrelated filler lesson number {i}")
+        no_topic, _ = factory_memory.memory_card_with_ids(s, "developer")
+        assert "tokenizer retry helper" not in no_topic     # aged out of newest-8
+        card, ids = factory_memory.memory_card_with_ids(
+            s, "developer", topic="fix the tokenizer retry logic in llm.py")
+        assert "tokenizer retry helper" in card
+        assert old in ids
+
+
+def test_memory_card_with_ids_topic_keeps_newest_rows(tmp_path):
+    """The newest lessons ride along even with ZERO topic overlap — a fresh lesson
+    matters regardless of the task at hand."""
+    with _store(tmp_path) as s:
+        newest = s.add_learning("developer", "brand new off-topic wisdom")
+        card, ids = factory_memory.memory_card_with_ids(
+            s, "developer", topic="completely disjoint subject matter")
+        assert "brand new off-topic wisdom" in card
+        assert newest in ids
+
+
+def test_memory_card_with_ids_topic_caps_relevant_at_four(tmp_path):
+    """top-4 relevant + newest-4: six equally relevant old rows → only the four
+    newest of them make the relevance leg."""
+    with _store(tmp_path) as s:
+        words = ["one", "two", "three", "four", "five", "six"]
+        for w in words:
+            s.add_learning("developer", f"tokenizer retry variant {w}")
+        for i in range(4):
+            s.add_learning("developer", f"filler lesson {i}")
+        card, ids = factory_memory.memory_card_with_ids(
+            s, "developer", topic="handle the tokenizer retry")
+        assert "variant one" not in card and "variant two" not in card   # the 2 oldest lose
+        for w in words[2:]:
+            assert f"variant {w}" in card
+        assert len(ids) == 8                                # 4 relevant + 4 newest
+
+
+def test_memory_card_with_ids_topic_scopes_factory_rows_too(tmp_path):
+    with _store(tmp_path) as s:
+        old_f = s.add_learning("factory", "graduation diverges when llm.py churns")
+        for i in range(9):
+            s.add_learning("factory", f"factory filler {i}")
+        card, ids = factory_memory.memory_card_with_ids(
+            s, "developer", topic="refactor llm.py graduation flow")
+        assert "graduation diverges" in card
+        assert old_f in ids
+
+
+def test_memory_card_with_ids_bumps_uses(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "count my surfacing")
+        factory_memory.memory_card_with_ids(s, "developer", topic="count surfacing")
+        assert s.get_learning(lid)["uses"] == 1
+
+
+# -- execute: per-task card replaces the shift-wide dev_card --------------------
+def test_execute_builds_per_task_relevant_card(tmp_path):
+    """Each dispatched task gets its OWN card scoped to its title+detail — an old
+    on-point lesson reaches exactly the task it is relevant to."""
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        s.add_learning("developer", "alpha subsystem quirk: tokenizer needs utf8 guard")
+        s.add_learning("developer", "beta subsystem quirk: scheduler drops idle workers")
+        for i in range(4):                                  # age both out of the newest-4 leg
+            s.add_learning("developer", f"filler lesson {i}")
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-aaaa0014", "fix tokenizer", detail="utf8 guard in the alpha subsystem",
+                   source="human")
+        s.add_task("task-bbbb0014", "fix scheduler", detail="idle workers in the beta subsystem",
+                   source="human")
+        s.set_task_status("task-aaaa0014", "in_progress", shift_id=sh)
+        s.set_task_status("task-bbbb0014", "in_progress", shift_id=sh)
+
+        seen = {}
+
+        def fake(text, **k):
+            seen[text.split(":")[0]] = k.get("memory", "")
+            return {"action": "no_candidate"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)
+        assert "tokenizer needs utf8 guard" in seen["fix tokenizer"]
+        assert "scheduler drops idle" not in seen["fix tokenizer"]
+        assert "scheduler drops idle" in seen["fix scheduler"]
+        assert "tokenizer needs utf8 guard" not in seen["fix scheduler"]
+
+
+def test_execute_bumps_merged_after_on_surfaced_ids(tmp_path):
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "always run the target tests first")
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-cccc0014", "run the target tests", source="human")
+        s.set_task_status("task-cccc0014", "in_progress", shift_id=sh)
+        dev.execute_claimed_tasks(
+            s, sh, develop_fn=lambda text, **k: {"action": "merged", "merge_sha": "abc123"})
+        row = s.get_learning(lid)
+        assert row["merged_after"] == 1 and row["blocked_after"] == 0
+
+
+def test_execute_bumps_blocked_after_on_surfaced_ids(tmp_path):
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "always run the target tests first")
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-dddd0014", "run the target tests", source="human")
+        s.set_task_status("task-dddd0014", "in_progress", shift_id=sh)
+        dev.execute_claimed_tasks(
+            s, sh, develop_fn=lambda text, **k: {"action": "no_candidate"})
+        row = s.get_learning(lid)
+        assert row["merged_after"] == 0 and row["blocked_after"] == 1
+
+
+def test_execute_halted_attributes_no_outcome(tmp_path):
+    from factory.orchestrator import develop as dev
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "always run the target tests first")
+        sh = s.start_shift(token_budget=1000)
+        s.add_task("task-eeee0014", "run the target tests", source="human")
+        s.set_task_status("task-eeee0014", "in_progress", shift_id=sh)
+        dev.execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: {"action": "halted"})
+        row = s.get_learning(lid)
+        assert row["merged_after"] == 0 and row["blocked_after"] == 0
+
+
+# -- effectiveness ratio: suppressed below the minimum denominator --------------
+def test_effectiveness_none_below_min_denominator(tmp_path):
+    row = {"merged_after": 6, "blocked_after": 3}           # n=9 < 10 → noise, suppressed
+    assert factory_memory.effectiveness(row) is None
+
+
+def test_effectiveness_ratio_at_min_denominator(tmp_path):
+    row = {"merged_after": 7, "blocked_after": 3}           # n=10 → shown
+    share, n = factory_memory.effectiveness(row)
+    assert n == 10 and abs(share - 0.7) < 1e-9
+
+
+def test_cmd_learn_list_shows_ratio_only_above_min_denominator(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        strong = s.add_learning("developer", "well-attributed lesson")
+        weak = s.add_learning("developer", "barely-attributed lesson")
+        for _ in range(7):
+            s.bump_learning_outcomes([strong], merged=True)
+        for _ in range(3):
+            s.bump_learning_outcomes([strong], merged=False)
+        s.bump_learning_outcomes([weak], merged=True)       # n=1 → suppressed
+        orch.cmd_learn(s, "list", role="developer")
+        out = capsys.readouterr().out
+        strong_line = next(ln for ln in out.splitlines() if "well-attributed" in ln)
+        weak_line = next(ln for ln in out.splitlines() if "barely-attributed" in ln)
+        assert "70%" in strong_line and "10" in strong_line
+        assert "%" not in weak_line

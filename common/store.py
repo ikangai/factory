@@ -108,6 +108,15 @@ class Blackboard:
         if lcols and "stale" not in lcols:
             self.conn.execute(
                 "ALTER TABLE learnings ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+        # consult-telemetry (Task 1.4): each surfaced learning gets the task's OUTCOME
+        # attributed back — the effectiveness signal `learn list` renders (suppressed
+        # below a minimum denominator; a 2-of-3 "ratio" is noise).
+        if lcols and "merged_after" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN merged_after INTEGER NOT NULL DEFAULT 0")
+        if lcols and "blocked_after" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN blocked_after INTEGER NOT NULL DEFAULT 0")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -752,6 +761,19 @@ class Blackboard:
             return
         placeholders = ",".join("?" * len(ids))
         self._exec(f"UPDATE learnings SET uses = uses + 1 WHERE id IN ({placeholders})", ids)
+
+    def bump_learning_outcomes(self, ids: Iterable[int], *, merged: bool) -> None:
+        """Attribute a task's close-out outcome to the learnings surfaced into its worker
+        card (Task 1.4): ONE batched UPDATE bumping merged_after (merged=True) or
+        blocked_after. MAIN thread only (single-writer connection). Signal, not proof —
+        the card is one input among many, so readers suppress the ratio below a minimum
+        denominator (reporting.factory_memory.effectiveness)."""
+        ids = list(ids)
+        if not ids:
+            return
+        col = "merged_after" if merged else "blocked_after"
+        placeholders = ",".join("?" * len(ids))
+        self._exec(f"UPDATE learnings SET {col} = {col} + 1 WHERE id IN ({placeholders})", ids)
 
     # -- task evidence: per-task failure forensics (Task 0.4, P6 stage 1) ---
     def add_task_evidence(self, task_id: str, *, shift_id: Optional[int] = None,

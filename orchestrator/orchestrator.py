@@ -1142,8 +1142,12 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
         for r in rows:
             mark = (" [archived]" if r.get("archived")
                     else " [stale?]" if r.get("stale") else "")
-            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)})"
-                  f"{mark}: {r['content']}")
+            # Consult-telemetry (Task 1.4): the merged-share of tasks whose worker card
+            # surfaced this row — SUPPRESSED below the minimum denominator (noise floor).
+            eff = factory_memory.effectiveness(r)
+            eff_s = f", eff {eff[0]:.0%} of {eff[1]}" if eff else ""
+            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}"
+                  f"{eff_s}){mark}: {r['content']}")
         return rows
     print('[learn] usage: factory learn add --role R --content "…" | '
           'factory learn list [--role R] | factory learn retire <id> | factory learn verify')

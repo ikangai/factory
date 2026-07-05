@@ -91,24 +91,95 @@ def _card_line(r: dict) -> str:
     return f"- {r['content']}{tag}{stale}"
 
 
-def memory_card(store, role: str, *, limit: int = 8, include_factory: bool = True) -> str:
-    """Render a role's recent learnings (+ the shared factory lessons) as a compact
-    markdown block to prepend to its prompt — or "" when there's nothing yet. Bumps
-    `uses` on every surfaced learning; lessons reported >= 3 times are flagged
-    `(recurring xN)` so the reader weighs them accordingly."""
-    rows = store.learnings_for_role(role, limit=limit)
-    factory_rows = (store.learnings_for_role("factory", limit=limit)
-                    if include_factory and role != "factory" else [])
+# -- per-task relevance (Task 1.4): keyword-overlap scoring over a bounded window.
+# No embeddings, no LLM, no gate — _key-normalized token overlap with the task's own
+# title+detail, so an old-but-on-point lesson resurfaces instead of aging out of the
+# newest-N card. One shared keyword is coincidence ("test", "subsystem"); two is topical.
+_TOPIC_WINDOW = 50       # rows scanned per role for relevance
+_TOPIC_TOP = 4           # top relevant rows kept
+_TOPIC_NEWEST = 4        # newest rows always kept — a fresh lesson matters even off-topic
+_MIN_TOKEN_LEN = 3       # scoring ignores 1-2 char tokens ("a", "to", "of", …)
+_MIN_OVERLAP = 2         # shared keywords needed to count as relevant at all
+_STOP_TOKENS = frozenset((
+    "the", "and", "for", "with", "into", "from", "that", "this", "not", "but",
+    "was", "are", "has", "have", "its", "when", "then", "than", "you", "your",
+    "will", "must", "can", "may", "should", "would", "could", "does", "did",
+))
+
+
+def _tokens(text: str) -> set:
+    return {t for t in _key(text).split()
+            if len(t) >= _MIN_TOKEN_LEN and t not in _STOP_TOKENS}
+
+
+def _select_rows(rows: list[dict], topic: str) -> list[dict]:
+    """The per-task view of a newest-first window: the top-`_TOPIC_TOP` rows by keyword
+    overlap with `topic` (ties → newest wins), then the `_TOPIC_NEWEST` newest rows,
+    deduped. Rows sharing fewer than `_MIN_OVERLAP` keywords never enter via relevance —
+    only via the newest leg."""
+    tt = _tokens(topic)
+    scored = [(len(tt & _tokens(r.get("content", ""))), r) for r in rows]
+    relevant = sorted((p for p in scored if p[0] >= _MIN_OVERLAP),
+                      key=lambda p: (-p[0], -p[1]["id"]))
+    picked = [r for _, r in relevant[:_TOPIC_TOP]]
+    seen = {r["id"] for r in picked}
+    picked += [r for r in rows[:_TOPIC_NEWEST] if r["id"] not in seen]
+    return picked
+
+
+def memory_card_with_ids(store, role: str, *, topic: Optional[str] = None,
+                         limit: int = 8, include_factory: bool = True) -> tuple[str, list[int]]:
+    """`memory_card` + the surfaced learning ids, so the caller can attribute the task's
+    eventual OUTCOME back to exactly what the worker was shown (Task 1.4 consult-
+    telemetry: `bump_learning_outcomes` at close-out). With a `topic` (the task's
+    title+detail) the card is PER-TASK: a `_TOPIC_WINDOW`-row window is scored by
+    normalized-keyword overlap and the top-4 relevant + newest-4 surface. No topic →
+    the classic newest-`limit` card. Bumps `uses` on every surfaced learning; lessons
+    reported >= 3 times are flagged `(recurring xN)`."""
+    if topic:
+        rows = _select_rows(store.learnings_for_role(role, limit=_TOPIC_WINDOW), topic)
+        factory_rows = (_select_rows(store.learnings_for_role("factory", limit=_TOPIC_WINDOW),
+                                     topic)
+                        if include_factory and role != "factory" else [])
+    else:
+        rows = store.learnings_for_role(role, limit=limit)
+        factory_rows = (store.learnings_for_role("factory", limit=limit)
+                        if include_factory and role != "factory" else [])
     if not rows and not factory_rows:
-        return ""
+        return "", []
     lines = [f"## What you've learned so far ({role})",
              "Durable lessons from past shifts — apply them; don't relearn them.", ""]
     lines += [_card_line(r) for r in rows]
     if factory_rows:
         lines += ["", "### Factory-wide lessons"]
         lines += [_card_line(r) for r in factory_rows]
-    store.bump_learning_uses([r["id"] for r in rows] + [r["id"] for r in factory_rows])
-    return "\n".join(lines)
+    ids = [r["id"] for r in rows] + [r["id"] for r in factory_rows]
+    store.bump_learning_uses(ids)
+    return "\n".join(lines), ids
+
+
+def memory_card(store, role: str, *, limit: int = 8, include_factory: bool = True) -> str:
+    """Render a role's recent learnings (+ the shared factory lessons) as a compact
+    markdown block to prepend to its prompt — or "" when there's nothing yet. Thin
+    wrapper over memory_card_with_ids for callers that don't attribute outcomes
+    (conductor/researcher prompt builds)."""
+    return memory_card_with_ids(store, role, limit=limit, include_factory=include_factory)[0]
+
+
+# Consult-telemetry display floor (Task 1.4): below this many attributed outcomes the
+# merged/blocked ratio is noise, not signal — `learn list` suppresses it entirely.
+EFFECTIVENESS_MIN_N = 10
+
+
+def effectiveness(row: dict) -> Optional[tuple[float, int]]:
+    """(merged_share, n) for a learning with enough outcome attributions to mean
+    anything, else None — never render a 2-of-3 'ratio'. n = merged_after +
+    blocked_after (tasks whose worker card surfaced this row, by close-out outcome)."""
+    merged = int(row.get("merged_after") or 0)
+    n = merged + int(row.get("blocked_after") or 0)
+    if n < EFFECTIVENESS_MIN_N:
+        return None
+    return merged / n, n
 
 
 _HEADER_RE = re.compile(r"(?i)^#{0,3}\s*learnings?\s*:\s*(.*)$")

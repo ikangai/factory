@@ -204,6 +204,8 @@ CREATE TABLE IF NOT EXISTS learnings (
     hits       INTEGER NOT NULL DEFAULT 1,   -- times reported: each dedup-hit bumps (recurrence signal, Task 0.5)
     archived   INTEGER NOT NULL DEFAULT 0,   -- retired via `factory learn retire` (correction handle, Task 1.3)
     stale      INTEGER NOT NULL DEFAULT 0,   -- `factory learn verify` found a dead file cite (advisory, Task 1.3)
+    merged_after  INTEGER NOT NULL DEFAULT 0, -- tasks MERGED after this surfaced in their worker card (Task 1.4)
+    blocked_after INTEGER NOT NULL DEFAULT 0, -- tasks ended BLOCKED after it surfaced (effectiveness denominator)
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);

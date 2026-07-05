@@ -176,13 +176,19 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             return 0
 
     from ..reporting import factory_memory                  # factory memory: lessons → each worker
-    dev_card = factory_memory.memory_card(store, "developer")
 
-    # Resolve each task's worker profile (Phase 5) ON THE MAIN THREAD — profiles are store reads,
-    # and the workers run in threads that must never touch the single-writer connection. A profile
-    # supplies only a persona overlay + a rail-resolved model tier; capability stays rail-fixed.
+    # Resolve each task's worker profile (Phase 5) AND its memory card (Task 1.4) ON THE MAIN
+    # THREAD — both are store I/O, and the workers run in threads that must never touch the
+    # single-writer connection. The card is PER-TASK: scored by keyword overlap with the task's
+    # own title+detail (replacing the old single shift-wide card, whose whole-shift attribution
+    # would be a confounded near-noise signal), and its surfaced ids get the task's OUTCOME
+    # attributed back at close-out. A profile supplies only a persona overlay + a rail-resolved
+    # model tier; capability stays rail-fixed.
     profiles = {}
+    cards: dict = {}                                 # task id → (card text, surfaced learning ids)
     for t in claimed:
+        topic = (t.get("title") or "") + " " + (t.get("detail") or "")
+        cards[t["id"]] = factory_memory.memory_card_with_ids(store, "developer", topic=topic)
         raw = t.get("profile") or ""
         prof = store.get_profile(raw)                    # '' / 'generalist' → synthetic generalist
         if prof is None:                                 # a NAMED profile that no longer exists:
@@ -212,7 +218,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
               + (f" [{prof['name']}]" if prof["name"] != "generalist" else ""), flush=True)
         try:
             return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
-                             merge_lock=merge_lock, memory=dev_card,
+                             merge_lock=merge_lock, memory=cards[task["id"]][0],
                              profile_overlay=prof["overlay"], model=prof["model"],
                              require_test=require_test, reviewer=reviewer)
         except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
@@ -225,6 +231,12 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     for task, res in results:
         action = res.get("action")
         has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
+        # Task 1.4 consult-telemetry: attribute the task's OUTCOME to the learnings its
+        # worker card surfaced — one batched UPDATE per task, MAIN thread only. A halted
+        # run is incomplete (STOP braked it), so it attributes nothing.
+        card_ids = cards.get(task["id"], ("", []))[1]
+        if card_ids and action != "halted":
+            store.bump_learning_outcomes(card_ids, merged=(action == "merged"))
         if action != "halted":                        # a STOP-braked run is incomplete — don't
             for lesson in res.get("learnings") or []: # attribute its emitted learnings as durable
                 factory_memory.record_learning(store, "developer", lesson, shift_id=shift_id)
