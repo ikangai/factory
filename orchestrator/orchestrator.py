@@ -1160,6 +1160,19 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
     return None
 
 
+def cmd_eval_gates(store: Blackboard, *, gate: str = "scope") -> dict:
+    """`factory eval-gates [--gate scope]` — replay the hand-authored golden briefs
+    (scenarios/gates/<gate>.jsonl) through the LIVE scope judge and print the per-case
+    + aggregate scorecard (roadmap Task 2.1, P12: the improvement layer's own
+    regression check — run it after every prompt/judge edit). SPENDS TOKENS (one
+    judge call per fixture, hard-capped) so it is an explicit OPERATOR act, never
+    wired into any loop: STOP vetoes at entry, every case's spend ledgers under
+    role='gate_eval' — attributed to the RUNNING shift when one exists (folds into
+    the shift/loop token brakes), with a NULL shift_id on standalone runs."""
+    from ..reporting import gate_eval
+    return gate_eval.run_gate_eval(store, gate=gate, shift_id=store.current_shift_id())
+
+
 def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     """`factory graduate [--dry-run]` — the operator's manual handle on the same flow the
     autopilot runs after a shift ships: ff base→factory/auto, push base to origin, and
@@ -1604,6 +1617,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     lrn.add_argument("--scope", default="general", help="free tag, e.g. no_candidate / graduation")
     lrn.add_argument("--agent", default="", help="optional agent handle/identity")
     lrn.add_argument("--limit", type=int, default=20)
+    evg = sub.add_parser("eval-gates")      # golden-case eval of the LLM gates (Task 2.1, P12)
+    evg.add_argument("--gate", choices=["scope"], default="scope",
+                     help="which gate's goldens to replay (decompose/reviewer are follow-ups); "
+                          "SPENDS tokens — one live judge call per fixture")
     iss = sub.add_parser("issue")           # dedup'd issue-filing for the fleet
     iss.add_argument("action", choices=["create"])
     iss.add_argument("--title", required=True)
@@ -1762,6 +1779,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                       content=a.content or (a.rest if a.action == "add" else "") or "",
                       scope=a.scope, agent=a.agent, limit=a.limit,
                       learning_id=None if a.action == "add" else a.rest)
+        elif a.cmd == "eval-gates":
+            rep = cmd_eval_gates(store, gate=a.gate)
+            if not (isinstance(rep, dict) and rep.get("ok_all")):
+                return 1                               # a failing golden (or STOP) is a GATE
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":

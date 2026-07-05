@@ -794,6 +794,27 @@ class Blackboard:
         return self._all(
             "SELECT * FROM task_evidence WHERE task_id = ? ORDER BY id DESC", (task_id,))
 
+    # -- gate-eval outcomes: per-golden-case results (Task 2.1, P12) --------
+    def add_gate_eval_result(self, gate: str, case_id: str, ok: bool,
+                             verdict: str = "") -> int:
+        """Persist one golden case's outcome from `factory eval-gates` — the durable
+        per-case history the flip detector (ok→fail = a gate regression) compares
+        against on the next run. Append-only, MAIN thread only (single-writer)."""
+        cur = self._exec(
+            "INSERT INTO gate_eval_results(gate, case_id, ok, verdict, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (gate, case_id, 1 if ok else 0, verdict, now_iso()))
+        return cur.lastrowid
+
+    def latest_gate_eval_results(self, gate: str) -> list[dict]:
+        """Each case's MOST RECENT outcome for one gate — the previous run's scorecard.
+        MAX(id) per case_id (ids are monotonic), so a case dropped from the fixture
+        file simply stops appearing in new runs but keeps its history."""
+        return self._all(
+            "SELECT * FROM gate_eval_results WHERE id IN ("
+            "SELECT MAX(id) FROM gate_eval_results WHERE gate = ? GROUP BY case_id)",
+            (gate,))
+
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
         """True if this (issue, commit) pair has already been synced — the guard that

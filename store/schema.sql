@@ -274,6 +274,21 @@ CREATE TABLE IF NOT EXISTS task_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_task_evidence_task ON task_evidence(task_id);
 
+-- Golden-case gate-eval outcomes (roadmap Task 2.1, P12): one row per fixture per
+-- `factory eval-gates` run — the durable per-case history that makes a golden FLIPPING
+-- ok→fail vs its previous run detectable (→ a factory learning). Append-only, main
+-- thread, zero LLM (the spend is the judge's, ledgered separately). New TABLE, so
+-- init_db's IF NOT EXISTS re-run is the whole migration — same pattern as task_evidence.
+CREATE TABLE IF NOT EXISTS gate_eval_results (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    gate       TEXT NOT NULL,              -- 'scope' (decompose/reviewer goldens are follow-ups)
+    case_id    TEXT NOT NULL,              -- the fixture's id in scenarios/gates/<gate>.jsonl
+    ok         INTEGER NOT NULL,           -- 1 iff the verdict ∈ the fixture's expected set
+    verdict    TEXT NOT NULL DEFAULT '',   -- what normalize_verdict actually returned
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gate_eval_case ON gate_eval_results(gate, case_id);
+
 -- Whitelisted runtime overrides (Phase 6.1, pulled forward — Task 5.2's staffing guard lives
 -- here). config.yaml stays the git-tracked defaults file; the board/CLI write bounded overrides
 -- consumed where cmd_run resolves knobs (store override → config.yaml → hardcoded default).
