@@ -16,9 +16,27 @@ design: docs/plans/2026-06-27-gsd-spec-driven-integration.md
 """
 from __future__ import annotations
 
+import os
 import uuid
 
 DECISIONS = ("pass", "split", "reject")
+
+
+def _target_root() -> str:
+    """Resolve the TARGET repo's root via the adapter (as develop.py does), so the judges
+    Read/Grep the codebase they are judging — the prompt says "you are looking at the target
+    repo", and until Task 0.3 both judges ran against the factory instead. The judges are
+    Read/Grep/Glob-only, so grounding them in the operator's checkout is safe. Fail-open to
+    FACTORY_ROOT when the adapter/config can't resolve (or the root doesn't exist on disk):
+    a mis-grounded judge beats a dead one."""
+    from ..common import config, paths
+    try:
+        root = os.path.abspath(config.get_adapter().entry()[0])
+        if os.path.isdir(root):
+            return root
+    except Exception:  # noqa: BLE001 — fail open
+        pass
+    return str(paths.FACTORY_ROOT)
 
 
 def _ledger_judge_spend(store, raw, role: str, notes: str, shift_id) -> None:
@@ -205,7 +223,7 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     """Production decomposer: one LLM call over roles/decompose/prompt.md → a raw dict with a
     `subtasks` chain. Returns {} on any failure so decompose_no_candidate falls back."""
     from ..roles import common
-    from ..common import config, paths
+    from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("decompose").replace("{TASK}", text)
@@ -213,7 +231,7 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
-            prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
+            prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("decompose_max_turns", 8)),
             timeout=int(sw.get("decompose_timeout_s", 240)))
@@ -230,7 +248,7 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     """Production judge: one cheap LLM call over roles/scope_check/prompt.md → a raw verdict
     dict (parsed). Returns {} on any failure so prefilter fails open."""
     from ..roles import common
-    from ..common import config, paths
+    from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("scope_check").replace("{TASK}", text)
@@ -238,7 +256,7 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
-            prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
+            prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("scope_check_max_turns", 6)),
             timeout=int(sw.get("scope_check_timeout_s", 180)))

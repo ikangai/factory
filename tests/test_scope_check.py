@@ -149,6 +149,79 @@ def test_decompose_judge_attaches_its_spend(monkeypatch):
     assert obj["_spend"]["seconds"] >= 0          # real duration so timesheets aren't 0-min (#17)
 
 
+# -- Task 0.3: judges grounded in the TARGET repo -----------------------------
+def _capture_super(monkeypatch, reply):
+    """Monkeypatch _load_prompt + claude_super; return the dict claude_super's kwargs
+    land in, so a test can assert which workdir the judge was grounded in."""
+    from factory.roles import common as rcommon
+    calls = {}
+    monkeypatch.setattr(rcommon, "_load_prompt", lambda name: "judge {TASK}")
+
+    def fake_super(prompt, **k):
+        calls.update(k)
+        return (reply, 1, 0.0)
+
+    monkeypatch.setattr(rcommon, "claude_super", fake_super)
+    return calls
+
+
+def _fake_adapter_at(monkeypatch, root: str):
+    from factory.common import config as fconfig
+
+    class FakeAdapter:
+        def entry(self):
+            return (root, root + "/main.py")
+
+    monkeypatch.setattr(fconfig, "get_adapter", lambda cfg=None: FakeAdapter())
+
+
+def test_scope_judge_workdir_is_target_root(monkeypatch, tmp_path):
+    """The scope judge must Read/Grep the TARGET repo it is judging, not the factory."""
+    from factory.common import paths
+    target = tmp_path / "target"
+    target.mkdir()
+    _fake_adapter_at(monkeypatch, str(target))
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"
+    assert calls["workdir"] == str(target)
+    assert calls["workdir"] != str(paths.FACTORY_ROOT)
+
+
+def test_decompose_judge_workdir_is_target_root(monkeypatch, tmp_path):
+    from factory.common import paths
+    target = tmp_path / "target"
+    target.mkdir()
+    _fake_adapter_at(monkeypatch, str(target))
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls["workdir"] == str(target)
+    assert calls["workdir"] != str(paths.FACTORY_ROOT)
+
+
+def test_scope_judge_workdir_falls_back_to_factory_root_on_adapter_error(monkeypatch):
+    """Adapter/config can't resolve → fail-open to FACTORY_ROOT (judge still runs)."""
+    from factory.common import config as fconfig, paths
+
+    def boom(cfg=None):
+        raise RuntimeError("no adapter registered")
+
+    monkeypatch.setattr(fconfig, "get_adapter", boom)
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"                 # the judge itself is unaffected
+    assert calls["workdir"] == str(paths.FACTORY_ROOT)
+
+
+def test_decompose_judge_workdir_falls_back_when_target_missing(monkeypatch, tmp_path):
+    """A configured root that doesn't exist on disk also fails open to FACTORY_ROOT."""
+    from factory.common import paths
+    _fake_adapter_at(monkeypatch, str(tmp_path / "nope"))   # never created
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls["workdir"] == str(paths.FACTORY_ROOT)
+
+
 # -- wiring into execute_claimed_tasks ---------------------------------------
 def test_execute_runs_scope_prefilter_when_judge_given(tmp_path):
     from factory.orchestrator import develop as dev
