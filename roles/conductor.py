@@ -114,10 +114,12 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
         "(empty — mine new work from the target's issues + research)")
     # Task 1.1: the {BLOCKED} seam. The backlog above injects status='open' ONLY, so blocked
     # outcomes never reached the prompt — this guarantees the freshest failures (with the
-    # reason each blocked) are prompt input, newest-first.
+    # reason each blocked) are prompt input, newest-first. Reasons are whitespace-collapsed
+    # before the slice (blocked results can carry multi-line refusal text, Task 0.1) so each
+    # task stays ONE bullet line — matching the reopen provenance path.
     blocked = _bullets(
         store.recent_blocked_tasks(limit=8),
-        lambda t: f"- {t['id']}: {t['title']} — {(t['result'] or '')[:160]}",
+        lambda t: f"- {t['id']}: {t['title']} — {' '.join((t['result'] or '').split())[:160]}",
         "(none blocked — nothing to reopen)")
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
     target = mission.get("target_repo") or config.target_repo_slug()   # robust fallback if unset

@@ -745,6 +745,10 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
             return
         reason = " ".join((t.get("result") or "").split()) or "(no reason recorded)"
         store.set_task_detail(rest, "\n".join([_REOPEN_PREFIX + reason] + prior + [detail]))
+        # The durable spec (target_surface/acceptance) described the OLD brief — left in
+        # place, scope_check would fold the stale spec into the redispatched worker brief,
+        # contradicting the narrowed detail. Clear it; the next scope check re-derives it.
+        store.set_task_spec(rest, None)
         store.set_task_status(rest, "open", result="")   # result is NOT NULL — clear via ''
         print(f"[task] reopened {rest} (reopen {len(prior) + 1} of {_MAX_REOPENS}) — "
               "detail narrowed, status open (1 row)")

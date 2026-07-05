@@ -196,9 +196,15 @@ def test_run_conductor_is_dev_mode_same_user_by_default(tmp_path, monkeypatch):
 def _prompt_with(monkeypatch, s):
     from factory.roles import research_feed
     monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
-    m = s.active_mission() or {"statement": "x", "target_repo": ""}
+    # Fix 1.1c D (hermeticity guard): a mission with no target_repo makes
+    # build_conductor_prompt fall back to config.target_repo_slug(), which reads the LIVE
+    # config.yaml and shells out git against the operator's checkout — refuse loudly.
+    def _no_live_fallback():
+        raise AssertionError("non-hermetic: fell back to config.target_repo_slug()")
+    monkeypatch.setattr(conductor.config, "target_repo_slug", _no_live_fallback)
+    s.set_mission("x", target_repo="o/r")   # pinned, like the pre-existing conductor tests
     cur = s.start_shift(token_budget=1)
-    return conductor.build_conductor_prompt(s, m, shift_id=cur, token_budget=1)
+    return conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
 
 
 def test_blocked_seam_renders_blocked_tasks_newest_first(tmp_path, monkeypatch):
@@ -206,7 +212,6 @@ def test_blocked_seam_renders_blocked_tasks_newest_first(tmp_path, monkeypatch):
     reached the prompt (the false 'top of the backlog' promise). The {BLOCKED} seam renders
     them `- <id>: <title> — <reason>` NEWEST-FIRST by updated_at (not created_at)."""
     with _store(tmp_path) as s:
-        s.set_mission("x")
         for i in (1, 2, 3):
             s.add_task(f"task-b{i}", f"slice {i}", source="research")
         s.set_task_status("task-b3", "blocked", result="reason three")   # blocked order: 3, 1, 2
@@ -219,7 +224,6 @@ def test_blocked_seam_renders_blocked_tasks_newest_first(tmp_path, monkeypatch):
 
 def test_blocked_seam_caps_at_8_and_truncates_the_reason(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
-        s.set_mission("x")
         for i in range(10):
             s.add_task(f"task-c{i:02d}", f"t{i}", source="research")
             s.set_task_status(f"task-c{i:02d}", "blocked", result="r" * 300)
@@ -231,7 +235,6 @@ def test_blocked_seam_caps_at_8_and_truncates_the_reason(tmp_path, monkeypatch):
 
 def test_blocked_seam_empty_fallback_and_no_placeholder_leak(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
-        s.set_mission("x")
         p = _prompt_with(monkeypatch, s)
     assert "{BLOCKED}" not in p                                  # seam always filled
     assert "(none blocked" in p                                  # readable empty fallback
@@ -242,7 +245,6 @@ def test_prompt_names_reopen_and_drops_the_false_backlog_promise(tmp_path, monke
     seam injects open only) and step 2 told the conductor to shell out to `task list`.
     The contract now points at the {BLOCKED} section + the `task reopen` verb."""
     with _store(tmp_path) as s:
-        s.set_mission("x")
         p = _prompt_with(monkeypatch, s)
     assert "task reopen" in p                                    # the redispatch verb
     assert "top of the backlog" not in p                         # the lie is gone
@@ -373,10 +375,57 @@ def test_prompt_contract_documents_the_sectioned_resume_note(tmp_path, monkeypat
     """The final-JSON contract names the three optional keys so the conductor knows the
     sectioned form exists (bare string stays legal)."""
     with _store(tmp_path) as s:
-        s.set_mission("x")
         p = _prompt_with(monkeypatch, s)
     assert '"verified"' in p and '"open"' in p and '"next"' in p  # the optional keys, quoted
     assert "resume_note" in p                                     # still the same column/contract
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1.1c — adversarial-review hardening of the {BLOCKED} seam + reopen
+# (findings A–D on Task 1.1, commit e650f93).
+# --------------------------------------------------------------------------- #
+def test_prompt_reopen_promises_claim_to_dispatch_not_requeue(tmp_path, monkeypatch):
+    """Finding A: reopen only sets status='open', and the post-shift rail executes
+    CLAIMED tasks only — 're-queues it for dispatch' promised an unclaimed reopened
+    task would run (it silently waits a full shift). The contract must say: claim it
+    (step 3) to dispatch it this shift."""
+    with _store(tmp_path) as s:
+        p = _prompt_with(monkeypatch, s)
+    assert "re-queues it for dispatch" not in p                  # the false promise is gone
+    assert "returns it to the open backlog" in p
+    assert "claim it (step 3) to dispatch it this shift" in p
+
+
+def test_task_reopen_clears_the_stale_durable_spec(tmp_path):
+    """Finding B: reopen replaced the detail and cleared the result but left the durable
+    spec_json untouched — with super_worker.scope_check enabled, the stale persisted spec
+    (old target_surface/acceptance) is folded into the redispatched worker brief,
+    contradicting the narrowed detail. Reopen must clear the spec too."""
+    from factory.orchestrator import orchestrator as orch
+    with _store(tmp_path) as s:
+        s.add_task("task-5pec5pec", "t", source="research", detail="orig",
+                   spec={"target_surface": "old/big.py", "acceptance": "tests/test_old.py"})
+        s.set_task_status("task-5pec5pec", "blocked", result="no_candidate: bundled too much")
+        orch.cmd_task(s, "reopen", rest="task-5pec5pec", detail="just the parser slice")
+        t = s.get_task("task-5pec5pec")
+    assert t["status"] == "open"
+    assert t["spec"] == {}                                       # the stale spec is gone
+
+
+def test_blocked_seam_collapses_a_multiline_reason_to_one_bullet_line(tmp_path, monkeypatch):
+    """Finding C: blocked results can carry multi-line text (Task 0.1 persists ~300 chars
+    of refusal WITH newlines); slicing without collapsing bleeds lines into the prompt and
+    breaks the one-bullet-per-task format. Whitespace-collapse before the 160-char slice,
+    matching the reopen provenance path."""
+    with _store(tmp_path) as s:
+        s.add_task("task-m17ilne1", "multi", source="research")
+        s.set_task_status(
+            "task-m17ilne1", "blocked",
+            result="refusal: I cannot assist with that.\n\nThe brief asks me\nto bypass the gates.")
+        p = _prompt_with(monkeypatch, s)
+    line = next(ln for ln in p.splitlines() if ln.startswith("- task-m17ilne1:"))
+    assert line == ("- task-m17ilne1: multi — refusal: I cannot assist with that. "
+                    "The brief asks me to bypass the gates.")
 
 
 def test_task_reopen_provenance_accumulates_and_third_reopen_escalates(tmp_path, capsys):

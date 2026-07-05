@@ -88,8 +88,9 @@ in your planning where they fit the mission):
    (blocked tasks never appear in the open backlog). Build on what shipped (the resume
    note + digests); reopen what's still worth doing with a narrowed brief —
    `./bin/factory task reopen <id> --detail "<narrowed brief>"` replaces the detail and
-   re-queues it for dispatch (after two reopens the factory refuses a third and you must
-   escalate to `@human`); drop what isn't worth redoing.
+   returns it to the open backlog — claim it (step 3) to dispatch it this shift, or it
+   waits a full shift unclaimed (after two reopens the factory refuses a third and you
+   must escalate to `@human`); drop what isn't worth redoing.
 5. **File bugs as issues (dedup'd)** — when you (or a worker's blocked result) surface a real
    BUG you can't fix this shift, file it upstream so a future shift's research picks it up:
    `./bin/factory issue create --title "<short>" --body "<what, where, repro, why it matters>"`.
