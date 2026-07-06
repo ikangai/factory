@@ -273,13 +273,14 @@ autonomy:
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:
   # Toggling AUTO on the board spawns `factory run --loop` with these. real=true lands gated
-  # merges on the REVERSIBLE factory/auto branch (the useful default). prod=false = DEV/
-  # same-user (the conductor + workers run as YOU with Bash + your MCP) — fine while you watch
-  # the board, but it is NOT the Guest-House boundary; set prod=true once the agent user is
-  # provisioned for a truly unattended run. Set real=false to exercise the loop on throwaway
-  # clones (no real merges).
+  # merges on the REVERSIBLE factory/auto branch (the useful default). prod=true runs the
+  # conductor + workers as the isolated Guest-House `agent` user (no access to your $HOME,
+  # credentials, API key, or MCP servers) — the required posture for an UNATTENDED run, since
+  # a prompt-injected brief or a fetched web page could otherwise drive Bash as YOU. Set
+  # prod=false ONLY for attended DEV runs you are actively watching (same-user: workers run as
+  # YOU with Bash + your MCP — NOT a security boundary). real=false → throwaway clones, no merges.
   real: true
-  prod: false
+  prod: true
 
 # --- board ------------------------------------------------------------------
 dashboard:
