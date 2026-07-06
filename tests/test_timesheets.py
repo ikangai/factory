@@ -99,3 +99,51 @@ def test_by_agent_rolls_up_the_whole_ledger_incl_legacy(store):
     assert roll["developer"]["tokens"] == 400 and roll["developer"]["engagements"] == 1
     assert roll["conductor"]["engagements"] == 1
     assert roll["researcher"]["tokens"] == 50          # legacy IS in the all-time rollup
+
+
+# -- clocktime: per-shift WALL-CLOCK duration, the time counterpart of per-shift token spend ------
+
+def test_duration_seconds_is_wall_clock_and_none_on_missing_or_bad():
+    """The canonical clocktime metric: seconds between two store.now_iso() timestamps, None when
+    either is missing/unparseable (a still-running or crashed shift has no ended_at), clamped >= 0."""
+    d = timesheets.duration_seconds
+    assert d("2026-07-06T10:00:00.000000Z", "2026-07-06T10:05:00.000000Z") == 300.0
+    assert d("2026-07-06T10:00:00.000000Z", None) is None       # still running / crashed → no ended_at
+    assert d("2026-07-06T10:00:00.000000Z", "") is None
+    assert d("not-a-timestamp", "2026-07-06T10:05:00.000000Z") is None
+    assert d(None, None) is None
+    # clock skew / reversed order clamps at 0 — the metric is never negative
+    assert d("2026-07-06T10:05:00.000000Z", "2026-07-06T10:00:00.000000Z") == 0.0
+
+
+def test_shift_clock_reports_per_shift_wall_time_newest_first(store):
+    """shift_clock rolls each shift's started_at→ended_at wall-clock, newest-first (mirrors
+    list_shifts). A shift with no ended_at (running/crashed) → seconds None, running True."""
+    a = store.start_shift(token_budget=1)
+    store.end_shift(a, status="completed", tokens_used=100)
+    store._exec("UPDATE shifts SET started_at=?, ended_at=? WHERE id=?",
+                ("2026-07-06T10:00:00.000000Z", "2026-07-06T10:05:00.000000Z", a))
+    b = store.start_shift(token_budget=1)                        # still running: no ended_at
+    store._exec("UPDATE shifts SET started_at=? WHERE id=?",
+                ("2026-07-06T11:00:00.000000Z", b))
+
+    rows = timesheets.shift_clock(store)
+    assert [r["shift"] for r in rows] == [b, a]                  # newest-first
+    running, done = rows[0], rows[1]
+    assert running["running"] is True and running["seconds"] is None
+    assert done["running"] is False and done["seconds"] == 300.0 and done["status"] == "completed"
+
+
+def test_cmd_timesheet_prints_per_shift_clock(store, capsys):
+    """The CLI surfaces per-shift wall-clock time alongside the per-engagement rollup."""
+    from factory.orchestrator.orchestrator import cmd_timesheet
+    a = store.start_shift(token_budget=1)
+    store.add_budget("conductor", 10, 0.0, shift_id=a, seconds=5, notes="shift lead")
+    store.end_shift(a, status="completed", tokens_used=10)
+    store._exec("UPDATE shifts SET started_at=?, ended_at=? WHERE id=?",
+                ("2026-07-06T10:00:00.000000Z", "2026-07-06T10:05:00.000000Z", a))
+
+    cmd_timesheet(store)
+    out = capsys.readouterr().out
+    assert "per-shift clock" in out
+    assert "5m 0s" in out                                        # the shift's wall-clock duration

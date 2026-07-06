@@ -607,6 +607,7 @@ function headerRender(d){
     kpi('🔄 Shifts',k.shifts||0,(d.running_shift?'shift '+d.running_shift+' running':'idle'))+
     kpi('🪙 Tokens',fmtN(k.total_tokens||0),(k.tokens_per_merge?fmtN(k.tokens_per_merge)+'/merge':'—'))+
     kpi('💵 Cost','$'+(k.total_cost_usd||0).toFixed(2),'all-time burn')+
+    kpi('⏱ Time',fmtT(k.exec_seconds||0),(k.avg_shift_seconds?fmtT(k.avg_shift_seconds)+'/shift':'—'))+
     kpi('👷 Workers',(k.workers_live||0),(k.workers_total||0)+' dispatched total')+
     kpi('🔬 Research',(k.research_proposed||0)+'→'+(k.research_shipped||0),
         (k.research_proposed>0?'finding work':'dry'),(k.research_proposed>0?'':'tint-red'));
