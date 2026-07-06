@@ -435,6 +435,11 @@ class Blackboard:
             "ended_at = ? WHERE id = ?",
             (status, report, resume_note, tokens_used, now_iso(), shift_id))
 
+    def get_shift(self, shift_id: int) -> Optional[dict]:
+        """One shift row by id — the rail reads its token_budget on the MAIN THREAD (Task 3.2's
+        retry_budget_ok, brake-honest) without a private-query into another module."""
+        return self._one("SELECT * FROM shifts WHERE id = ?", (shift_id,))
+
     def last_shift(self) -> Optional[dict]:
         return self._one("SELECT * FROM shifts ORDER BY id DESC LIMIT 1")
 

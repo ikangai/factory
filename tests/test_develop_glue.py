@@ -1002,3 +1002,158 @@ def test_acceptance_discard_gets_stage_lesson(tmp_path):
     lessons = [r["content"] for r in s.learnings_for_role("factory") if r["scope"] == "blocked"]
     assert any("acceptance" in c.lower() for c in lessons)
     s.close()
+
+
+# ============================================================================
+# Task 3.2: one informed retry on a gradeable gate-discard (maker→grader→retry).
+#   Gate super_worker.retry_on_discard (default OFF, board-toggleable). Attempt 1
+#   discarded at stage in {tests,no_test,acceptance} (NEVER frozen) → retry EXACTLY
+#   once with the failure evidence appended, worded honestly (a prior INDEPENDENT
+#   attempt, a CLEAN base — the prior code is NOT visible). retry_budget_ok is computed
+#   on the MAIN THREAD (shift spend vs the shift's token_budget); tokens/cost/seconds
+#   sum into the SINGLE ledger write.
+# ============================================================================
+
+def _retry_store(tmp_path, *, budget=1000, on=True, pre_spend=0):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=budget)
+    if on:
+        s.set_setting("super_worker.retry_on_discard", "true")   # board toggle → store override
+    if pre_spend:
+        s.add_budget("conductor", pre_spend, shift_id=sh)        # prior shift spend (pre-dispatch)
+    s.add_task("task-1", "big brief", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_retry_off_by_default_never_retries(tmp_path):
+    """Gate OFF (default): a discarded(tests) result is NOT retried — one dispatch, blocked."""
+    s, sh = _retry_store(tmp_path, on=False)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "tests", "tests_report": "E assert False"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                   # no retry when the gate is off
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_on_discard_retries_once_and_can_merge(tmp_path):
+    """Gate ON + budget headroom: attempt 1 discarded(tests), attempt 2 merges → done; the
+    worker is dispatched EXACTLY twice (the retry is one-shot, never a loop)."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "tests", "tests_report": "E assert 1 == 2"}
+        return {"action": "merged", "merge_sha": "sha2"}
+
+    shipped = develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert shipped == 1 and len(calls) == 2
+    assert s.get_task("task-1")["status"] == "done" and s.get_task("task-1")["result"] == "sha2"
+    s.close()
+
+
+def test_retry_brief_is_honest_about_the_clean_base(tmp_path):
+    """The retry suffix is worded honestly: an INDEPENDENT prior attempt, its stage + evidence,
+    and a CLEAN base (per operator memory — never imply the prior code is visible)."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "acceptance",
+                    "tests_report": "E   assert retry_ran is True"}
+        return {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    retry_brief = calls[1]
+    assert "independent attempt" in retry_brief.lower()
+    assert "stage=acceptance" in retry_brief
+    assert "clean base" in retry_brief.lower()
+    assert "assert retry_ran is True" in retry_brief          # the failure evidence rides along
+    s.close()
+
+
+def test_retry_never_fires_for_frozen(tmp_path):
+    """A frozen-surface discard is a structural safety veto — NEVER retried (a retry can only
+    re-violate it), even with the gate ON."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "frozen", "violations": ["selfmod/gate.py"]}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                     # frozen is never retried
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_suppressed_when_budget_exhausted(tmp_path):
+    """Brake-honest: retry_budget_ok is computed on the MAIN THREAD from the shift's ledgered
+    spend vs its token_budget — once spend has reached budget, no retry (composes with Task 0.2)."""
+    s, sh = _retry_store(tmp_path, budget=100, pre_spend=200)   # already over budget at dispatch
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "tests", "tests_report": "red"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                       # no second attempt over budget
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_sums_spend_into_one_ledger_write(tmp_path):
+    """Both attempts' tokens/cost/seconds sum into the SINGLE developer ledger row for the task."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "tests", "tests_report": "red",
+                    "tokens": 300, "cost": 0.01, "seconds": 2.0}
+        return {"action": "merged", "merge_sha": "s", "tokens": 500, "cost": 0.02, "seconds": 3.0}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    rows = [e for e in s.budget_entries() if e["role_or_run"] == "developer:task-1"]
+    assert len(rows) == 1                                        # ONE ledger write, not two
+    assert rows[0]["tokens"] == 800 and abs(rows[0]["cost"] - 0.03) < 1e-9
+    assert rows[0]["seconds"] == 5.0
+    s.close()
+
+
+def test_retry_no_test_stage_is_retry_eligible(tmp_path):
+    """A no_test discard (source changed, no test shipped) is gradeable → retry-eligible."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "no_test", "why": "changed src, no test"}
+        return {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 2 and s.get_task("task-1")["status"] == "done"
+    s.close()
+
+
+def test_retry_on_discard_is_board_toggleable():
+    """The gate is an operator DIAL (a trial gate, not a brake) → it belongs in SETTINGS_SPEC
+    and ships OFF in config.yaml."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert SETTINGS_SPEC.get("super_worker.retry_on_discard") is bool
+    assert (load_config().get("super_worker") or {}).get("retry_on_discard") is False

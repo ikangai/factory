@@ -50,6 +50,12 @@ _DECOMPOSE_STAGES = ("timeout", "worker_failed")
 # dispatched task would otherwise bump blocked_after on its surfaced learnings each
 # shift, poisoning the effectiveness ratio for the newest/most-relevant lessons.
 _NO_CONSULT_STAGES = ("transport", "chown")
+# Task 3.2: stages where a candidate FAILED a gradeable done-condition — a red suite (tests),
+# a missing-test discard (no_test), or a red spec-named acceptance test (acceptance, Task 3.1).
+# These carry actionable failure evidence, so ONE informed retry is worth it. NEVER 'frozen'
+# (a structural safety veto a retry can only re-violate), never review/gate/merge/transport
+# (not a gradeable code outcome the worker can act on).
+_RETRY_STAGES = ("tests", "no_test", "acceptance")
 
 
 def classify_empty_handed(reply: str) -> Optional[dict]:
@@ -224,6 +230,18 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     print(f"[execute] dispatching {len(claimed)} task(s) — up to {workers} super-worker(s) "
           f"in parallel (clone + developer TDD + the target's tests; a few minutes)…", flush=True)
 
+    # Task 3.2 (minimal maker→grader→retry loop): resolve the retry gate AND compute the budget
+    # headroom ON THE MAIN THREAD — the workers run in threads that must never touch the single-
+    # writer store. retry_budget_ok is brake-honest: a retry is suppressed once the shift's
+    # LEDGERED spend has reached its token_budget (composes with Task 0.2's per-shift brake; a
+    # token_budget of 0 = unlimited, matching that brake's convention). Computed once, pre-dispatch.
+    retry_on = bool(config.resolve_setting(store, "super_worker.retry_on_discard", False)[0])
+    retry_budget_ok = False
+    if retry_on:
+        _budget = int((store.get_shift(shift_id) or {}).get("token_budget") or 0)
+        _spent = int(store.shift_spend(shift_id)["tokens"])
+        retry_budget_ok = _budget == 0 or _spent < _budget
+
     def work(task):
         if killswitch.is_halted():                   # STOP tripped before this one started
             return task, {"action": "halted"}
@@ -240,14 +258,38 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         prof = profiles[task["id"]]
         print(f"[execute] ▶ {task['id']}: {task['title']}"
               + (f" [{prof['name']}]" if prof["name"] != "generalist" else ""), flush=True)
-        try:
-            return task, run(text, as_user=as_user, claude_bin=claude_bin, real=real,
-                             merge_lock=merge_lock, memory=cards[task["id"]][0],
-                             profile_overlay=prof["overlay"], model=prof["model"],
-                             require_test=require_test, reviewer=reviewer,
-                             acceptance_ref=acc_ref)
-        except Exception as e:                        # noqa: BLE001 — contain a dispatch blow-up
-            return task, {"action": "error", "error": str(e)}
+
+        def _dispatch(brief):
+            try:
+                return run(brief, as_user=as_user, claude_bin=claude_bin, real=real,
+                           merge_lock=merge_lock, memory=cards[task["id"]][0],
+                           profile_overlay=prof["overlay"], model=prof["model"],
+                           require_test=require_test, reviewer=reviewer,
+                           acceptance_ref=acc_ref)
+            except Exception as e:                    # noqa: BLE001 — contain a dispatch blow-up
+                return {"action": "error", "error": str(e)}
+
+        res = _dispatch(text)
+        # Task 3.2: ONE informed retry on a gradeable gate-discard. Gate ON + budget headroom
+        # (both resolved on the MAIN THREAD above) + STOP still clear + a retry-eligible stage
+        # (tests / no_test / acceptance; NEVER frozen). The retry runs a fresh INDEPENDENT
+        # attempt off the PRISTINE base (develop_and_merge re-clones) — so the suffix is worded
+        # honestly: the prior code is NOT visible, only its failure evidence (operator memory).
+        # develop_and_merge's own STOP re-checks (entry + pre-merge) still fire inside _dispatch.
+        if (retry_on and retry_budget_ok and not killswitch.is_halted()
+                and res.get("action") == "discarded" and res.get("stage") in _RETRY_STAGES):
+            evidence = str(res.get("tests_report") or res.get("why") or res.get("error") or "")[:2000]
+            suffix = (
+                f"\n\nRETRY CONTEXT — a previous INDEPENDENT attempt at this task was discarded at "
+                f"stage={res['stage']}; its failure evidence follows — you start from a clean base "
+                f"(you cannot see the prior attempt's code, only this evidence). Make the failing "
+                f"done-condition pass this time:\n{evidence}")
+            res2 = _dispatch(text + suffix)
+            for key in ("tokens", "cost", "seconds"):   # sum spend across BOTH attempts into the
+                res2[key] = (res.get(key) or 0) + (res2.get(key) or 0)   # SINGLE close-out ledger write
+            res2["attempts"] = 2
+            return task, res2
+        return task, res
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         results = [f.result() for f in [ex.submit(work, t) for t in claimed]]

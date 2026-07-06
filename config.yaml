@@ -142,6 +142,15 @@ super_worker:
   # A prose acceptance with no runnable ref → nothing runs (fail-open). Default OFF; board-
   # toggleable (in SETTINGS_SPEC — it is a gate the operator trials, not a brake).
   acceptance_exec: false
+  # Task 3.2 (Phase 3): one INFORMED retry on a gradeable gate-discard (minimal maker→grader→
+  # retry loop). When true, a candidate discarded at stage tests / no_test / acceptance (NEVER
+  # 'frozen' — a structural safety veto a retry can only re-violate) gets EXACTLY ONE more
+  # independent attempt, with the failure evidence appended and worded honestly (the retry clones
+  # the PRISTINE base — the prior attempt's code is NOT visible, only its evidence). Budget-honest:
+  # the retry is suppressed once the shift's ledgered spend has reached its token_budget (composes
+  # with the per-shift brake, Task 0.2). Spend from both attempts sums into one ledger row. Default
+  # OFF; board-toggleable (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
+  retry_on_discard: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits
