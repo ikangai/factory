@@ -1333,6 +1333,7 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
     start = now()
     spent = 0
     n = 0
+    hit_ceiling = False              # a per-process SAFETY ceiling (not benign convergence) was hit
     ceilings = f"max_shifts={max_shifts}"
     if loop_token_budget:
         ceilings += f", tokens≤{loop_token_budget:,}"
@@ -1346,6 +1347,7 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
             break
         if loop_deadline_s and (now() - start) >= loop_deadline_s:
             print(f"[loop] wall-clock deadline ({loop_deadline_s}s) reached — stopping after {n} shift(s).")
+            hit_ceiling = True
             break
         res = run_fn(store, mission=mission, token_budget=token_budget, wall_clock_s=wall_clock_s,
                      prod=prod, real=real, plateau_k=plateau_k)
@@ -1358,6 +1360,7 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
         if loop_token_budget and spent >= loop_token_budget:
             print(f"[loop] token budget exhausted ({spent:,}/{loop_token_budget:,}) — "
                   f"stopping after {n} shift(s).")
+            hit_ceiling = True
             break
         if modemod.read_mode() != modemod.AUTO:
             print(f"[loop] SHIFT mode — paused after shift {res.get('shift_id')}. "
@@ -1366,6 +1369,11 @@ def cmd_run_loop(store: Blackboard, *, mission: Optional[str] = None, token_budg
         print(f"[loop] AUTO — continuing to the next shift (#{n + 1})…")
     else:
         print(f"[loop] reached max_shifts={max_shifts} — stopping (safety cap).")
+        hit_ceiling = True
+    if hit_ceiling:                      # a deliberate ceiling-stop must NOT look like a crash to
+        modemod.set_mode(modemod.SHIFT)  # restart_if_auto — flip AUTO→SHIFT so its not_auto veto
+        print("[loop] safety ceiling reached — autonomy paused (mode→SHIFT). "   # stops the respawn
+              "Clear the cause / raise the ceiling, then `factory mode auto` to resume.")
     from . import autopilot
     autopilot.clear_pid_if_mine()       # this runner's pid file must not outlive it (phantom guard)
     return n
