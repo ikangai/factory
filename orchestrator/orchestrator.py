@@ -1050,6 +1050,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         require_test = _k("require_test", False)         # GSD spec-bound acceptance gate (threaded)
         reviewer = _k("reviewer", False)                 # Phase 8: config-gated pre-merge review gate
         acceptance_exec = _k("acceptance_exec", False)   # Task 3.1: run the spec's named acceptance test
+        investigate = _k("investigate_blocked", False)   # Task 4.1: post-shift investigator (P6 2-3)
         scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
@@ -1061,7 +1062,8 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
-            require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec)
+            require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
+            investigate_blocked=investigate)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)

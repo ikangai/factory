@@ -155,7 +155,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           decomposer: Optional[Callable] = None,
                           require_test: Optional[bool] = None,
                           reviewer: bool = False,
-                          acceptance_exec: bool = False) -> int:
+                          acceptance_exec: bool = False,
+                          investigate_blocked: bool = False) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -420,6 +421,16 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             if fl:
                 factory_memory.record_learning(store, "factory", fl, scope="blocked",
                                                shift_id=shift_id)
+
+    # Task 4.1 (P6 stages 2-3): AFTER close-out (evidence now persisted), a config-gated
+    # post-shift investigator distills a case-specific lesson for up to 3 blocked-this-shift
+    # tasks. All spend is STOP-vetoed FIRST, standard-tier, capped and ledgered inside the
+    # function. Wrapped fail-open so an investigator blow-up never crashes the shift close-out.
+    if investigate_blocked:
+        try:
+            factory_memory.investigate_blocked(store, shift_id)
+        except Exception as e:  # noqa: BLE001 — advisory memory refinement; never fatal to close-out
+            print(f"[execute] investigator skipped (non-fatal): {e}", flush=True)
     return shipped
 
 

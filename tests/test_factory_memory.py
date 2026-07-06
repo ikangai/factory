@@ -1318,3 +1318,274 @@ def test_verify_url_only_learning_never_flagged_stale(tmp_path):
         report = factory_memory.verify_learnings(s, roots={"developer": str(target)})
         assert all(e["id"] != lid for e in report)
         assert s.get_learning(lid)["stale"] == 0
+
+
+# ============================================================================
+# Task 4.1 (P6 stages 2-3): post-shift investigator for blocked tasks. After
+# close-out, up to 3 blocked-this-shift tasks WITH a task_evidence row, scoped
+# to discarded(tests) and error stages only, get ONE isolated claude_p at
+# STANDARD tier → {cause, lesson, followup?}; the lesson is recorded
+# scope='investigated', spend ledgered notes='investigate' WITH shift_id,
+# killswitch checked FIRST, fail-open to the canned lesson. NO task spawned.
+# ============================================================================
+
+def _blocked_with_evidence(s, sh, tid, *, action, stage, title=None, spec=None,
+                           tests_report="r", reply_head="h"):
+    """Helper: a task blocked THIS shift carrying one task_evidence row (the
+    investigator's precondition — a blocked task with recoverable evidence)."""
+    s.add_task(tid, title or tid, source="human", spec=spec)
+    s.set_task_status(tid, "blocked", result="blocked reason", shift_id=sh)
+    s.add_task_evidence(tid, shift_id=sh, action=action, stage=stage,
+                        tests_report=tests_report, reply_head=reply_head)
+
+
+def test_investigate_blocked_records_investigated_lesson_at_standard_tier(tmp_path):
+    """The happy path: a discarded(tests) blocked task → a case-specific investigated
+    lesson recorded scope='investigated' at the STANDARD tier (NOT frontier — P10)."""
+    from factory.common import config
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-inv00001", action="discarded", stage="tests",
+                               tests_report="FAILED tests/test_a.py::test_b - assert 1 == 2",
+                               reply_head="wrote the fix but one assertion stayed red")
+        seen = {}
+
+        def fake(prompt, *, model="", **k):
+            seen["model"] = model
+            seen["prompt"] = prompt
+            return ('{"cause":"asserted the wrong constant","lesson":"pin the fixture seed '
+                    'before asserting the derived value"}', 12, 0.002)
+
+        out = factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        assert seen["model"] == config.resolve_model("standard") != ""    # standard, not frontier
+        assert "FAILED tests/test_a.py::test_b" in seen["prompt"]          # evidence reached it
+        rows = [r for r in s.learnings_for_role("factory") if r["scope"] == "investigated"]
+        assert rows and "pin the fixture seed" in rows[0]["content"]
+        assert len(out) == 1 and out[0]["task_id"] == "task-inv00001"
+
+
+def test_investigate_blocked_ledgers_spend_with_shift_id(tmp_path):
+    """Spend is ledgered notes='investigate' WITH the shift_id, so it folds into the
+    loop token brake (shift_spend)."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-invled01", action="error", stage="timeout")
+
+        def fake(prompt, **k):
+            return ('{"cause":"c","lesson":"a specific investigated timeout lesson"}', 42, 0.005)
+
+        factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        rows = [r for r in s.ledger_rows(shift_id=sh) if r["notes"] == "investigate"]
+        assert rows and rows[0]["tokens"] == 42
+        assert s.shift_spend(sh)["tokens"] == 42
+
+
+def test_investigate_blocked_stop_vetoes_all_spend(tmp_path, monkeypatch):
+    """killswitch.is_halted() is checked FIRST — STOP vetoes even read-only
+    investigation spend: no claude call, no ledger row, empty report."""
+    from factory.common import killswitch
+    monkeypatch.setattr(killswitch, "is_halted", lambda: True)
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-invstop1", action="discarded", stage="tests")
+        called = {"n": 0}
+
+        def fake(prompt, **k):
+            called["n"] += 1
+            return ('{"lesson":"x"}', 1, 0.0)
+
+        out = factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        assert out == [] and called["n"] == 0
+        assert s.shift_spend(sh)["tokens"] == 0
+
+
+def test_investigate_blocked_scope_is_tests_discard_and_errors_only(tmp_path):
+    """Scope: discarded(tests) and error(*) only. Skip no_candidate (auto-decompose
+    already gave a second opinion) and discarded(frozen/no_test/acceptance) (canned
+    lessons already state the cause)."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        cases = [
+            ("task-inv-a", "discarded", "tests", True),
+            ("task-inv-b", "error", "timeout", True),
+            ("task-inv-c", "error", "merge", True),
+            ("task-inv-d", "no_candidate", "", False),
+            ("task-inv-e", "discarded", "frozen", False),
+            ("task-inv-f", "discarded", "no_test", False),
+            ("task-inv-g", "discarded", "acceptance", False),
+        ]
+        for tid, action, stage, _ in cases:
+            _blocked_with_evidence(s, sh, tid, action=action, stage=stage)
+        prompts = []
+
+        def fake(prompt, **k):
+            prompts.append(prompt)
+            return ('{"cause":"c","lesson":"L"}', 1, 0.0)
+
+        factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        seen = {tid for tid, _, _, _ in cases if any(tid in p for p in prompts)}
+        assert seen == {tid for tid, _, _, ok in cases if ok}
+
+
+def test_investigate_blocked_caps_at_three(tmp_path):
+    """At most 3 blocked tasks investigated per shift (cost cap)."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        for i in range(5):
+            _blocked_with_evidence(s, sh, f"task-invc{i:04d}", action="discarded", stage="tests")
+        calls = {"n": 0}
+
+        def fake(prompt, **k):
+            calls["n"] += 1
+            return ('{"cause":"c","lesson":"lesson %d"}' % calls["n"], 1, 0.0)
+
+        factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        assert calls["n"] == 3
+
+
+def test_investigate_blocked_skips_tasks_without_evidence(tmp_path):
+    """A blocked task with NO task_evidence row is not investigatable (nothing to
+    read); it is skipped, no spend."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        s.add_task("task-invnoev1", "no evidence", source="human")
+        s.set_task_status("task-invnoev1", "blocked", result="x", shift_id=sh)
+        called = {"n": 0}
+
+        def fake(prompt, **k):
+            called["n"] += 1
+            return ('{"lesson":"x"}', 1, 0.0)
+
+        assert factory_memory.investigate_blocked(s, sh, claude_fn=fake) == []
+        assert called["n"] == 0
+
+
+def test_investigate_blocked_only_this_shift(tmp_path):
+    """Only tasks blocked in THIS shift are investigated — a prior shift's blocked
+    task with evidence is ignored."""
+    with _store(tmp_path) as s:
+        sh_prev = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh_prev, "task-invprev1", action="discarded", stage="tests")
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-invnow01", action="discarded", stage="tests")
+        prompts = []
+
+        def fake(prompt, **k):
+            prompts.append(prompt)
+            return ('{"cause":"c","lesson":"L"}', 1, 0.0)
+
+        factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        assert any("task-invnow01" in p for p in prompts)
+        assert not any("task-invprev1" in p for p in prompts)
+
+
+def test_investigate_blocked_fails_open_to_canned_lesson(tmp_path):
+    """A transport/parse failure fails open to the canned lesson_for_block — the
+    close-out failure-memory floor still lands, recorded scope='investigated'."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-invfo001", action="discarded", stage="tests")
+
+        def fake(prompt, **k):
+            return ("[claude -p unavailable: boom]", 0, 0.0)     # transport sentinel, unparseable
+
+        factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        canned = factory_memory.lesson_for_block("discarded", "tests")
+        rows = [r for r in s.learnings_for_role("factory") if r["scope"] == "investigated"]
+        assert rows and rows[0]["content"] == canned
+
+
+def test_investigate_blocked_stores_followup_without_spawning_task(tmp_path):
+    """A returned followup_title/followup_detail is STORED onto the investigated lesson
+    — NOT spawned as a task (that is an explicit follow-up, not built now)."""
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        _blocked_with_evidence(s, sh, "task-invfu001", action="discarded", stage="tests",
+                               title="big multi-surface task")
+        n_before = len(s.list_tasks())
+
+        def fake(prompt, **k):
+            return ('{"cause":"too broad","lesson":"split the parser change from the CLI change",'
+                    '"followup_title":"add just the parser helper",'
+                    '"followup_detail":"create parse_ref() with one focused test"}', 5, 0.0)
+
+        out = factory_memory.investigate_blocked(s, sh, claude_fn=fake)
+        assert len(s.list_tasks()) == n_before                    # no task spawned
+        rows = [r for r in s.learnings_for_role("factory") if r["scope"] == "investigated"]
+        assert rows and "add just the parser helper" in rows[0]["content"]
+        assert out[0]["followup_title"] == "add just the parser helper"
+        assert out[0]["followup_detail"] == "create parse_ref() with one focused test"
+
+
+def test_investigate_blocked_gate_off_by_default_and_board_toggleable():
+    """The gate is an operator trial DIAL (not a brake) → in SETTINGS_SPEC and OFF in
+    config.yaml."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert SETTINGS_SPEC.get("super_worker.investigate_blocked") is bool
+    assert (load_config().get("super_worker") or {}).get("investigate_blocked") is False
+
+
+def test_investigator_prompt_has_required_placeholders():
+    import os
+    from factory.common import paths
+    p = os.path.join(paths.ROLES_DIR, "investigator", "prompt.md")
+    with open(p, encoding="utf-8") as fh:
+        txt = fh.read()
+    for ph in ("{TITLE}", "{DETAIL}", "{SPEC}", "{ACTION}", "{STAGE}",
+               "{TESTS_REPORT}", "{REPLY_HEAD}"):
+        assert ph in txt, f"investigator prompt missing {ph}"
+
+
+def test_execute_investigates_blocked_when_gate_on(tmp_path, monkeypatch):
+    """End-to-end: execute_claimed_tasks with investigate_blocked=True runs the
+    post-close-out investigator over a discarded(tests) task via the real claude_p seam."""
+    from factory.orchestrator import develop as dev
+    from factory.roles import common as roles_common
+    calls = {"n": 0}
+
+    def fake_claude_p(prompt, **k):
+        calls["n"] += 1
+        return ('{"cause":"c","lesson":"a very specific investigated lesson about seed X"}', 10, 0.001)
+
+    monkeypatch.setattr(roles_common, "claude_p", fake_claude_p)
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        tid = "task-invexe01"
+        s.add_task(tid, "flaky task", source="human")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "discarded", "stage": "tests",
+                    "tests_report": "FAILED tests/test_a.py::test_b",
+                    "reply_head": "one assertion stayed red"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake, investigate_blocked=True)
+        assert calls["n"] == 1
+        assert any(r["scope"] == "investigated" and "seed X" in r["content"]
+                   for r in s.learnings_for_role("factory"))
+
+
+def test_execute_no_investigation_when_gate_off(tmp_path, monkeypatch):
+    """Default OFF — a blocked task closes out with only its canned lesson; the
+    investigator's claude_p is never touched."""
+    from factory.orchestrator import develop as dev
+    from factory.roles import common as roles_common
+    called = {"n": 0}
+
+    def fake_claude_p(prompt, **k):
+        called["n"] += 1
+        return ('{"lesson":"x"}', 1, 0.0)
+
+    monkeypatch.setattr(roles_common, "claude_p", fake_claude_p)
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=100000)
+        tid = "task-invoff01"
+        s.add_task(tid, "t", source="human")
+        s.set_task_status(tid, "in_progress", shift_id=sh)
+
+        def fake(text, **k):
+            return {"action": "discarded", "stage": "tests", "tests_report": "r",
+                    "reply_head": "h"}
+
+        dev.execute_claimed_tasks(s, sh, develop_fn=fake)     # investigate_blocked defaults OFF
+        assert called["n"] == 0

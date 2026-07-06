@@ -11,10 +11,11 @@ Design: docs/plans/2026-06-27-factory-memory-design.md
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 ROLES = ("conductor", "developer", "researcher", "factory")
 
@@ -290,6 +291,113 @@ def lesson_for_block(action: str, stage: str = "") -> Optional[str]:
     if action == "error" and stage in _ERROR_BY_STAGE:
         return _ERROR_BY_STAGE[stage]
     return _BLOCK_LESSONS.get(action or "")
+
+
+# -- P6 stages 2-3: post-shift investigator (Task 4.1) -----------------------
+# The canned lesson_for_block is generic ("discarded at the test gate"). For a small,
+# capped set of this-shift failures that carry recoverable EVIDENCE, spend ONE isolated
+# claude_p to distill a case-SPECIFIC lesson (P6 stage 2 investigate → stage 3 the
+# durable, per-case learning). All new LLM spend: gated OFF, capped, ledgered under the
+# shift, STOP-vetoed FIRST, standard-tier (the P10 promise — judgment, but NOT frontier),
+# and fail-open to the canned lesson so it never crashes the shift close-out.
+INVESTIGATE_MAX = 3   # at most N blocked tasks investigated per shift (cost cap)
+
+
+def _investigatable(action: str, stage: str) -> bool:
+    """The investigator's scope: a red-suite discard OR a genuine dispatch error only.
+    NOT a no_candidate (auto-decompose already gave a second opinion), NOT discarded at
+    frozen/no_test/acceptance/review (their canned lessons already state the cause
+    precisely) — investigating those would be pure spend for no new signal."""
+    if action == "discarded" and stage == "tests":
+        return True
+    return action == "error"
+
+
+def investigate_blocked(store, shift_id: int, *, claude_fn: Optional[Callable] = None,
+                        max_tasks: int = INVESTIGATE_MAX) -> list[dict]:
+    """P6 stages 2-3 (Task 4.1): after close-out, investigate up to `max_tasks`
+    blocked-THIS-shift tasks that carry a task_evidence row in the investigator's scope
+    (discarded/tests or error/*). ONE isolated `claude_p` at STANDARD tier reads
+    title+detail+spec+evidence → {cause, lesson, followup_title?, followup_detail?}; the
+    lesson is recorded scope='investigated' (NOT 'verified' — this is analysis, not a
+    passing check) and the spend ledgered notes='investigate' WITH shift_id so it folds
+    into the loop token brake.
+
+    Brakes (every one a MUST): `killswitch.is_halted()` is checked FIRST — STOP vetoes even
+    read-only investigation spend; the model runs at STANDARD tier via `resolve_model`
+    (never the reserved frontier — the P10 promise); a transport/parse failure FAILS OPEN
+    to the canned `lesson_for_block`, never crashing the shift.
+
+    The follow-up title/detail, when the model returns them, are STORED onto the
+    investigated lesson content only — spawning the narrowed task via `add_subtasks` is a
+    named follow-up, deliberately NOT built here. Returns one report dict per investigated
+    task ({task_id, cause, lesson, followup_title, followup_detail, learning_id})."""
+    from ..common import config, killswitch
+    if killswitch.is_halted():                     # STOP vetoes even read-only investigation spend
+        return []
+    if claude_fn is None:                          # deferred import → tests monkeypatch common.claude_p
+        from ..roles.common import claude_p as claude_fn
+    from ..roles.common import _first_json_object, _load_prompt
+
+    model = config.resolve_model("standard")       # STANDARD tier — never frontier (the P10 promise)
+    template = _load_prompt("investigator")
+
+    blocked = [t for t in store.list_tasks(status="blocked")
+               if t.get("shift_id") == shift_id]   # ONLY this shift's failures
+    reports: list[dict] = []
+    for t in blocked:
+        if len(reports) >= max_tasks:              # cost cap: at most `max_tasks` per shift
+            break
+        ev = next((e for e in store.task_evidence(t["id"])   # THIS shift's evidence row
+                   if e.get("shift_id") == shift_id), None)
+        if ev is None:                             # no recoverable evidence → nothing to investigate
+            continue
+        action, stage = ev.get("action") or "", ev.get("stage") or ""
+        if not _investigatable(action, stage):
+            continue
+
+        spec = t.get("spec") or {}
+        prompt = (template
+                  .replace("{TITLE}", t.get("title") or "")
+                  .replace("{DETAIL}", t.get("detail") or "")
+                  .replace("{SPEC}", json.dumps(spec, indent=2, default=str) if spec
+                           else "(none declared)")
+                  .replace("{ACTION}", action)
+                  .replace("{STAGE}", stage)
+                  .replace("{TESTS_REPORT}", (ev.get("tests_report") or "")[:4000])
+                  .replace("{REPLY_HEAD}", (ev.get("reply_head") or "")[:2000]))
+        text, tok, cost = claude_fn(prompt, model=model)
+        store.add_budget("investigator", int(tok or 0), float(cost or 0.0),
+                         notes="investigate", shift_id=shift_id)   # folds into the loop brake
+
+        obj = None
+        raw = _first_json_object(text or "")
+        if raw:
+            try:
+                obj = json.loads(raw)
+            except (ValueError, TypeError):
+                obj = None
+        cause = lesson = followup_title = followup_detail = ""
+        if isinstance(obj, dict):
+            cause = str(obj.get("cause") or "").strip()
+            lesson = str(obj.get("lesson") or "").strip()
+            followup_title = str(obj.get("followup_title") or "").strip()
+            followup_detail = str(obj.get("followup_detail") or "").strip()
+        if not lesson:                             # FAIL-OPEN: the canned failure-memory floor
+            lesson = lesson_for_block(action, stage) or ""
+
+        content = lesson
+        if followup_title:                         # STORE the follow-up on the lesson; do NOT spawn a task
+            fu = f"narrowed follow-up: {followup_title}"
+            if followup_detail:
+                fu += f" — {followup_detail}"
+            content = f"{content}\n({fu})"[:1000]
+        rec = record_learning(store, "factory", content, scope="investigated",
+                              shift_id=shift_id) if content else None
+        reports.append({"task_id": t["id"], "cause": cause, "lesson": lesson,
+                        "followup_title": followup_title, "followup_detail": followup_detail,
+                        "learning_id": rec[0] if rec else None})
+    return reports
 
 
 # -- learnings hygiene: deterministic staleness verify (Task 1.3) -------------

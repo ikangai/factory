@@ -42,6 +42,7 @@ SETTINGS_SPEC = {
     "super_worker.acceptance_exec": bool,   # Task 3.1 (spec's named acceptance test — a board gate)
     "super_worker.retry_on_discard": bool,  # Task 3.2 (one informed retry on a gradeable gate-discard)
     "super_worker.milestone_verify": bool,  # Task 3.3 (independent milestone-delivery grader)
+    "super_worker.investigate_blocked": bool,  # Task 4.1 (post-shift investigator for blocked tasks)
 }
 
 

@@ -161,6 +161,18 @@ super_worker:
   # no detail column, so it is NEVER stored). Default OFF; board-toggleable (a gate the operator
   # trials, not a brake).
   milestone_verify: false
+  # Task 4.1 (Phase 4): post-shift INVESTIGATOR for blocked tasks (P6 stages 2-3). When true, AFTER
+  # close-out up to 3 blocked-this-shift tasks that carry a task_evidence row — scoped to
+  # discarded(tests) and error stages only (no_candidate is skipped: auto-decompose already gave a
+  # second opinion; frozen/no_test are skipped: their canned lessons already state the cause) — get
+  # ONE isolated claude_p at STANDARD tier over title+detail+spec+evidence -> {cause, lesson,
+  # followup?}. The lesson is recorded scope='investigated' (analysis, not a verified check); spend
+  # is ledgered notes='investigate' WITH the shift_id (folds into the loop token brake). STOP vetoes
+  # even this read-only spend (checked FIRST); a transport/parse failure fails open to the canned
+  # lesson (never crashes the close-out). A returned followup_title/detail is STORED on the lesson —
+  # spawning the narrowed task is a separate follow-up, NOT done here. Default OFF; board-toggleable
+  # (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
+  investigate_blocked: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits
