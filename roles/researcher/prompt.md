@@ -65,3 +65,10 @@ briefs:
    that transfer to that loop. Discard model-training or benchmark-only results.
 4. **Honesty.** If a paper's relevance is thin, drop it. A short list of strong,
    grounded briefs beats a long list of stretches.
+5. **A secondary source is a citation INDEX, not a citation.** A survey, review,
+   roundup, or blog that only *summarises* other work is not groundable — cite the
+   PRIMARY paper/repo it points to (and only when that primary itself appears in
+   PAPERS/REPOSITORIES above), never the summary. Mine it for the one transferable
+   technique, then discard its vision/roadmap and productivity-headline prose
+   (levels-of-autonomy taxonomies, "N% overhead reduction", minutes-to-build toy-app
+   demos) — none of that is shell-transferable per rule 3.
