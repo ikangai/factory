@@ -10,6 +10,38 @@ rollup 'all-time (incl. legacy)' wherever it renders so the two views don't look
 """
 from __future__ import annotations
 
+from datetime import datetime
+
+_ISO = "%Y-%m-%dT%H:%M:%S.%fZ"   # common.store.now_iso() format
+
+
+def duration_seconds(started_at, ended_at):
+    """The canonical CLOCKTIME metric — wall-clock seconds between two store.now_iso() timestamps.
+    Returns None when either is missing/unparseable (a still-running or crashed shift has no
+    ended_at); clamped at 0 so a clock skew never yields a negative. This is the time counterpart
+    of per-shift token spend, derived from the started_at/ended_at the shifts table already records.
+    Metric only — no brake (a shift is never killed on wall-clock)."""
+    try:
+        a = datetime.strptime(started_at or "", _ISO)
+        b = datetime.strptime(ended_at or "", _ISO)
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, (b - a).total_seconds())
+
+
+def shift_clock(store, limit: int = 50) -> list[dict]:
+    """Per-shift wall-clock duration (started_at → ended_at), newest first (mirrors list_shifts) —
+    the time counterpart of per-shift token spend. Each row: {shift, status, started_at, ended_at,
+    seconds, running}. seconds is None for a shift with no ended_at (still running or crashed),
+    flagged running=True. Pure read over the shifts table; metric only, no brake."""
+    out = []
+    for s in store.list_shifts(limit=limit):
+        secs = duration_seconds(s.get("started_at"), s.get("ended_at"))
+        out.append({"shift": s["id"], "status": s["status"],
+                    "started_at": s.get("started_at"), "ended_at": s.get("ended_at"),
+                    "seconds": secs, "running": secs is None})
+    return out
+
 
 def timesheet(store, limit: int = 200, shift_id: int | None = None) -> list[dict]:
     """Shift-attributed engagements, newest first. developer:<task> rows carry the task title.

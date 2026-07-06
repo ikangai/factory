@@ -174,6 +174,22 @@ def test_fleet_json_has_ceo_kpis_built_ledger_and_momentum(tmp_path, monkeypatch
         assert j["research"]["working"] is True
 
 
+def test_fleet_json_exposes_shift_clock_time_kpis(tmp_path, monkeypatch):
+    """Clocktime metric (in addition to tokens per shift): wall-clock exec/avg-shift seconds
+    surface as KPIs and each shift row carries its own `seconds` — all from started_at/ended_at."""
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        s.set_mission("m", target_repo="r")
+        a = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.end_shift(a, status="completed", tokens_used=100)
+        s._exec("UPDATE shifts SET started_at=?, ended_at=? WHERE id=?",
+                ("2026-07-06T10:00:00.000000Z", "2026-07-06T10:05:00.000000Z", a))
+        j = fleet_viz.fleet_json(s)
+    assert j["kpi"]["exec_seconds"] == 300                       # total wall-clock across shifts
+    assert j["kpi"]["avg_shift_seconds"] == 300                  # per-shift average
+    assert {sh["id"]: sh["seconds"] for sh in j["shifts"]}[a] == 300   # per-shift clocktime
+
+
 def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
     """The dashboard's one write action: POST /api/mode toggles AUTO/SHIFT; bad value → 400."""
     import json

@@ -770,6 +770,14 @@ def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int 
     for a in timesheets.by_agent(store):
         print(f"  {a['role']:<16} {a['engagements']:>4} eng  {int(a['tokens']):>10,} tok  "
               f"${float(a['cost']):>8.2f}  {(a['seconds'] or 0) / 60:>7.1f} min")
+    # Per-shift WALL-CLOCK (started → ended) — the time counterpart of the per-shift token spend.
+    print("\nper-shift clock (wall-time started → ended):")
+    for c in timesheets.shift_clock(store, limit=limit):
+        if shift is not None and c["shift"] != shift:
+            continue
+        secs = c["seconds"]
+        clk = f"{int(secs) // 60}m {int(secs) % 60}s" if secs is not None else "running"
+        print(f"  S{c['shift']:<5} {c['status']:<16} {(c['started_at'] or '')[:19]:<20} {clk:>10}")
 
 
 def cmd_worker(store: Blackboard, action: str, *, rest: Optional[list] = None,

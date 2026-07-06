@@ -15,7 +15,6 @@ from __future__ import annotations
 import html
 import os
 import subprocess
-from datetime import datetime
 from typing import Optional
 
 from ..common import killswitch as _killswitch
@@ -83,17 +82,11 @@ def _upstream_issues() -> dict:
     return data
 
 
-def _parse_iso(ts: str):
-    try:
-        return datetime.strptime(ts or "", "%Y-%m-%dT%H:%M:%S.%fZ")
-    except (ValueError, TypeError):
-        return None
-
-
 def _shift_seconds(sh: dict):
-    """Wall-clock seconds a shift took (ended − started), or None while it's still running."""
-    a, b = _parse_iso(sh.get("started_at", "")), _parse_iso(sh.get("ended_at") or "")
-    return max(0.0, (b - a).total_seconds()) if (a and b) else None
+    """Wall-clock seconds a shift took (ended − started), or None while it's still running.
+    Delegates to timesheets.duration_seconds so per-shift clocktime has a SINGLE definition."""
+    from . import timesheets
+    return timesheets.duration_seconds(sh.get("started_at"), sh.get("ended_at"))
 
 _SHIFT_COLOR = {"running": "#3b82f6", "completed": "#22c55e", "timed_out": "#f59e0b",
                 "budget_exhausted": "#f59e0b", "halted": "#a855f7", "error": "#ef4444"}
