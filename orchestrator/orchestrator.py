@@ -1498,6 +1498,19 @@ def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
     return added
 
 
+def cmd_research_convert(store: Blackboard) -> list:
+    """Human-triggered: promote vetted staged research briefs (research/staging/*.yaml,
+    status=='staged' + grounded) into the backlog as source='research' tasks, then flip
+    each converted yaml's status to 'converted'. No auto call site — the operator runs this
+    after vetting the staged briefs (auto-refill wiring is a named follow-up)."""
+    from ..roles import research_feed
+    added = research_feed.convert_briefs(store)
+    print(f"[research-convert] converted {len(added)} staged brief(s) to backlog task(s):")
+    for a in added:
+        print(f"  + {a['id']}: {a['title']}")
+    return added
+
+
 # --- the 09:00 daily update -------------------------------------------------
 # "Larger" daily run (operator choice): several rounds + a generous-but-bounded
 # token ceiling so the unattended run makes real headway without runaway spend.
@@ -1630,6 +1643,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     rch.add_argument("--query", default=None)
     rch.add_argument("--max-papers", type=int, default=8)
     rch.add_argument("--max-repos", type=int, default=6)
+    rch_sub = rch.add_subparsers(dest="research_action")   # optional nested action
+    rch_sub.add_parser("convert")   # human-triggered: staged briefs → backlog tasks (Task 5.4)
     sub.add_parser("staging")
     sp = sub.add_parser("show-scenario"); sp.add_argument("id")
     yp = sub.add_parser("synth-check"); yp.add_argument("id")
@@ -1798,8 +1813,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "mine":
             cmd_mine(store, a.limit)
         elif a.cmd == "research":
-            cmd_research(store, query=a.query, max_papers=a.max_papers,
-                         max_repos=a.max_repos)
+            if getattr(a, "research_action", None) == "convert":
+                cmd_research_convert(store)
+            else:
+                cmd_research(store, query=a.query, max_papers=a.max_papers,
+                             max_repos=a.max_repos)
         elif a.cmd == "staging":
             cmd_staging()
         elif a.cmd == "show-scenario":
