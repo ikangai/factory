@@ -760,6 +760,10 @@ def research_cli_agents(store: Blackboard, query: Optional[str] = None,
         return []
 
     prompt = _load_prompt("researcher")
+    from ..reporting import factory_memory                  # durable researcher lessons → context
+    mem = factory_memory.memory_card(store, "researcher")   # same {MEMORY} seam research_feed reads
+    if mem:
+        prompt += "\n\n" + mem + "\n"
     if papers:
         prompt += ("\n\n## PAPERS (arXiv)\n\n"
                    + "\n\n".join(p.brief() for p in papers) + "\n")
