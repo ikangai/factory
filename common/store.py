@@ -519,6 +519,18 @@ class Blackboard:
             "FROM tasks WHERE milestone_id = ?", (milestone_id,))
         return {"done": int(r["done"] or 0), "total": int(r["total"] or 0)}
 
+    def milestone_open_task_ids(self, milestone_id: int) -> list[str]:
+        """Task 3.3: the ids of a milestone's linked tasks that are NOT yet resolved. RESOLVED =
+        `done` OR `dropped` — BOTH are terminal, so a 'dropped' (a legal RESOLVED task status)
+        never makes delivery unreachable; everything else (open/claimed/in_progress/blocked) is
+        in-flight. The milestone-delivery grader refuses a premature 'delivered' while this list is
+        non-empty and derives the render-time '(unverified)' label from it. Ordered by created_at
+        for a stable, exact-id refusal message."""
+        rows = self._all(
+            "SELECT id FROM tasks WHERE milestone_id = ? "
+            "AND status NOT IN ('done','dropped') ORDER BY created_at", (milestone_id,))
+        return [r["id"] for r in rows]
+
     def milestone_effort(self, milestone_id: int) -> dict:
         """Estimated vs actual tokens for a milestone's linked tasks: est = SUM(tasks.est_tokens);
         actual = SUM(ledger tokens for those tasks' developer engagements). The estimate-vs-reality

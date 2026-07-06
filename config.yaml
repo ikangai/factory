@@ -151,6 +151,16 @@ super_worker:
   # with the per-shift brake, Task 0.2). Spend from both attempts sums into one ledger row. Default
   # OFF; board-toggleable (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
   retry_on_discard: false
+  # Task 3.3 (Phase 3): independent milestone-DELIVERY grader (objective done-condition, P2). When
+  # true, `plan status <milestone> delivered` is REFUSED while any linked task is still unresolved
+  # (open/claimed/in_progress/blocked — 'done' and 'dropped' are BOTH resolved, so a dropped task
+  # never makes delivery unreachable) OR while the milestone has NO linked tasks (total==0 is
+  # UNVERIFIABLE, not trivially complete); the refusal names the blocking task ids. A milestone that
+  # still READS 'delivered' but no longer verifies renders as 'delivered (unverified)' in the
+  # conductor's {PLAN} seam — a render-time label ONLY (milestones.status is CHECK-constrained with
+  # no detail column, so it is NEVER stored). Default OFF; board-toggleable (a gate the operator
+  # trials, not a brake).
+  milestone_verify: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits

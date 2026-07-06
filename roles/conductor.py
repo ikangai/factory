@@ -90,10 +90,19 @@ def _plan_bullets(store) -> str:
     header = _evm_header(store)
     if header:
         lines.append(header)
+    verify_on = bool(config.resolve_setting(store, "super_worker.milestone_verify", False)[0])
     for m in ms:
         p = store.milestone_progress(m["id"])
         e = store.milestone_effort(m["id"])
-        line = (f"- M{m['id']} [{m['status']}] {m['title']} — {p['done']}/{p['total']} tasks, "
+        # Task 3.3 (c): DERIVE '(unverified)' at render time for a milestone that reads
+        # 'delivered' but no longer verifies (no linked tasks, or one still unresolved). The
+        # milestones.status CHECK has no such value and no detail column, so this label is NEVER
+        # stored — it is a truthful render only, and only when the grader gate is engaged.
+        status = m["status"]
+        if verify_on and status == "delivered" and (
+                p["total"] == 0 or store.milestone_open_task_ids(m["id"])):
+            status = "delivered (unverified)"
+        line = (f"- M{m['id']} [{status}] {m['title']} — {p['done']}/{p['total']} tasks, "
                 f"budget {m['budget_tokens']:,} tok, "
                 f"est {e['est_tokens']:,} vs actual {e['actual_tokens']:,} tok")
         if m.get("deliverable"):

@@ -913,6 +913,23 @@ def cmd_plan(store: Blackboard, action: str, *, rest: Optional[list] = None,
         if mid is None or store.get_milestone(mid) is None:  # don't print a false success on a
             print(f"[plan] no milestone matches '{rest[0]}' — see `plan list` (0 rows)")  # missing id
             return
+        # Task 3.3: independent milestone-delivery grader (gated OFF). ONLY the 'delivered'
+        # transition is guarded: refuse while any linked task is still unresolved (open/claimed/
+        # in_progress/blocked — 'done' and 'dropped' are BOTH resolved, so a dropped task can never
+        # make delivery unreachable), and refuse an UNVERIFIABLE delivery (total==0 is not trivially
+        # complete). The exact-id refusal names the blocking task ids; the '(unverified)' side is a
+        # render-time label only (roles/conductor.py:_plan_bullets — never stored).
+        if rest[1] == "delivered" and config.resolve_setting(
+                store, "super_worker.milestone_verify", False)[0]:
+            if store.milestone_progress(mid)["total"] == 0:
+                print(f"[plan] milestone M{mid} has NO linked tasks — delivery is UNVERIFIABLE; "
+                      f"link its tasks with `plan link` first (0 rows)")
+                return
+            open_ids = store.milestone_open_task_ids(mid)
+            if open_ids:
+                print(f"[plan] milestone M{mid} not delivered — {len(open_ids)} linked task(s) "
+                      f"still open: {', '.join(open_ids)} (resolve or drop them first) (0 rows)")
+                return
         store.set_milestone_status(mid, rest[1])
         print(f"[plan] milestone M{mid} → {rest[1]} (1 row)")
     elif action == "link":
