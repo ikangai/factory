@@ -1271,8 +1271,27 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         return graduate_fn(root=root, base=base, repo=repo, store=store,
                            stop_check=stop_check or killswitch.is_halted)
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
-        print(f"[run] graduate+sync skipped (non-fatal error): {e}")
-        return {"action": "error", "error": str(e)}
+        err = str(e)
+        print(f"[run] graduate+sync skipped (non-fatal error): {err}")
+        _maybe_file_graduation_failure(store, err)
+        return {"action": "error", "error": err}
+
+
+def _maybe_file_graduation_failure(store: Blackboard, error: str) -> None:
+    """Task 5.1: when the unattended graduation/issue-sync path fails, turn the swallowed
+    error into a deduped, conductor-only backlog task + a factory learning instead of
+    letting it vanish into a log print. Gated OFF by default (autonomy.failure_tasks) — a
+    passive store write (no LLM, no spend), so no STOP/mode gate is needed: the caller only
+    reaches this path when a shift actually shipped in REAL mode, which STOP already blocks
+    upstream. Never raises — it runs inside the loop-protecting except handler."""
+    try:
+        auton = config.load_config().get("autonomy", {}) or {}
+        if not auton.get("failure_tasks", False):
+            return
+        from ..reporting import factory_memory
+        factory_memory.record_graduation_failure(store, error=error)
+    except Exception as ex:  # noqa: BLE001 — diagnostics must never crash the loop
+        print(f"[run] failure-task filing skipped (non-fatal): {ex}")
 
 
 def _should_idle(store: Blackboard, plateau_k: int) -> bool:

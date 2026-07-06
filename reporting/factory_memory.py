@@ -80,6 +80,53 @@ def record_learning(store, role: str, content: str, *, agent: str = "",
     return store.add_learning(role, content, agent=agent, scope=scope, shift_id=shift_id), True
 
 
+# -- unattended-failure event trigger (Task 5.1, P6 stage 1 for the AUTO path) --
+# The REAL-mode post-shift graduation/issue-sync step fail-swallows any error so it can
+# never kill the loop — which also means an infra failure vanishes into a log print and
+# the next conductor never sees it. When gated ON (autonomy.failure_tasks), turn that
+# swallowed error into a DEDUPED, conductor-only backlog task + a durable factory learning.
+GRADUATION_SOURCE_REF = "graduation"     # the dedup marker stamped on the backlog task
+_GRADUATION_TITLE = "unattended graduation/issue-sync failed — escalate to @human"
+# The rail dispatches tasks to DEVELOPER workers that edit the TARGET repo; a broken
+# graduation/push is FACTORY infrastructure the rail cannot fix. So the detail is an
+# explicit conductor-only instruction (never a developer brief) — mirror the operator
+# memory that the rail cannot fix factory infrastructure.
+_GRADUATION_DETAIL = (
+    "CONDUCTOR-ONLY — do NOT claim this for a developer worker: the rail cannot fix "
+    "factory infrastructure (graduation ff/push, issue-sync). Escalate to @human via "
+    "agora with the error below, then mark this task done/blocked.\n\n"
+    "Graduation/issue-sync failed during an unattended shift:\n{error}"
+)
+
+
+def record_graduation_failure(store, *, error: str) -> dict:
+    """Task 5.1: turn a swallowed graduation/issue-sync failure into a deduped backlog task
+    + a durable factory learning. The task is filed with source='worker' (the tasks.source
+    CHECK has NO 'factory' value) and stamped source_ref='graduation'; it is DEDUPED against
+    OPEN *and* BLOCKED tasks on that marker (a scope-rejected prior failure task stays 'open',
+    a handled one may be 'blocked' — open-only dedup would re-spam either way). Resolved
+    (done/dropped) failure tasks do NOT block a fresh one, so a new outage is still surfaced.
+    The learning is recorded EVERY call (its own dedup bumps `hits` → recurrence count) even
+    when the task deduped. Never raises — the caller runs inside the loop-protecting handler.
+    Returns {task_id, deduped, learning}."""
+    err = (error or "").strip() or "(no error text)"
+    open_blocked = store.list_tasks(status="open") + store.list_tasks(status="blocked")
+    deduped = any(t.get("source_ref") == GRADUATION_SOURCE_REF for t in open_blocked)
+    task_id = None
+    if not deduped:
+        import uuid
+        task_id = f"task-{uuid.uuid4().hex[:8]}"
+        store.add_task(task_id, _GRADUATION_TITLE, source="worker",
+                       source_ref=GRADUATION_SOURCE_REF,
+                       detail=_GRADUATION_DETAIL.format(error=err))
+    rec = record_learning(
+        store, "factory",
+        f"unattended graduation/issue-sync failure (escalate to @human): {err}",
+        scope="graduation")
+    return {"task_id": task_id, "deduped": deduped,
+            "learning": (rec[0] if rec else None)}
+
+
 # A lesson reported this many times (hits) is flagged in the card — recurrence is the
 # cheapest severity signal the factory has (Task 0.5).
 _RECURRING_MIN_HITS = 3

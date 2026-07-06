@@ -253,6 +253,11 @@ autonomy:
   # A BRAKE, not autonomy: defaults true and is deliberately config.yaml-only — never in
   # SETTINGS_SPEC, so it cannot be flipped off from the board.
   enforce_shift_budget: true
+  # Task 5.1 — unattended-failure event trigger. When true, a swallowed REAL-mode
+  # graduation/issue-sync error becomes a DEDUPED, conductor-only backlog task (escalate
+  # to @human — the rail cannot fix factory infrastructure) + a factory learning, instead
+  # of vanishing into a log print. New autonomous behavior → defaults OFF.
+  failure_tasks: false
 
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:
