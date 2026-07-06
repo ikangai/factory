@@ -29,7 +29,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    champion_scores: dict, grade_fn: Callable[[str], dict],
                    changed_paths=None, diff_text: str = None,
                    label: str = "candidate", regression_tol: float = 0.0,
-                   require_test: bool = False) -> dict:
+                   require_test: bool = False, acceptance_ref: str = None) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -65,6 +65,21 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         return {"action": "discarded", "stage": "tests", "failed": ["tests_passed"],
                 "tests_report": report}
 
+    # 2.5 spec-named acceptance test (Task 3.1, P2): the spec's OWN named acceptance test, run in
+    #     the candidate AFTER the suite gate. A RED run discards (stage 'acceptance') — the change
+    #     didn't satisfy its declared done-condition. A MISSING test (the worker didn't create the
+    #     contracted ref) is a telemetry-first SKIP (correction b): acceptance_skipped rides out so
+    #     the rail counts it — we do NOT discard-on-missing yet (that flip waits until the prompt
+    #     contract is live and the skip rate is known). Gated: only runs when acceptance_ref is set.
+    extra = {}
+    if acceptance_ref:
+        status, acc_report = adapter.run_named_test(cand_repo, acceptance_ref)
+        if status == "failed":
+            return {"action": "discarded", "stage": "acceptance",
+                    "tests_report": acc_report, "acceptance_ref": acceptance_ref}
+        if status == "missing":
+            extra = {"acceptance_skipped": acceptance_ref}
+
     # 3. scenario eval → deltas vs the champion → the auto-merge gate.
     cand = grade_fn(cand_repo)
     working_delta = cand["working"] - champion_scores["working"]
@@ -78,19 +93,19 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         divergence_alarm=cand.get("divergence_alarm", True),
         safety_flag=cand.get("safety_flag", True), regression_tol=regression_tol)
     if not verdict["eligible"]:
-        return {"action": "discarded", "stage": "gate", "failed": verdict["failed"]}
+        return {"action": "discarded", "stage": "gate", "failed": verdict["failed"], **extra}
 
     # 4. AUTO-MERGE (full-auto: no human gate) — one revertible commit.
     #    Re-check the brake right before the (irreversible-ish) merge: a STOP dropped
     #    while grading must not result in a merge.
     if killswitch.is_halted():
-        return {"action": "halted", "stage": "pre_merge"}
+        return {"action": "halted", "stage": "pre_merge", **extra}
     before = {"working": champion_scores["working"],
               "held_out": champion_scores.get("held_out", 0.0), "tests_passed": True}
     try:
         merge_sha = adapter.merge_branch(main_repo, branch, message=f"factory: {label}")
     except Exception as e:  # merge conflict / git failure → clean discard (adapter aborted)
-        return {"action": "discarded", "stage": "merge", "error": str(e)}
+        return {"action": "discarded", "stage": "merge", "error": str(e), **extra}
 
     # 5. re-baseline the NEW champion + self-heal. ANY failure here (a regression OR a
     #    grading crash) auto-reverts — never leave an ungraded merge in the repo.
@@ -108,7 +123,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
             revert_sha = adapter.revert_commit(main_repo, merge_sha)
         except Exception as e:  # revert itself failed — can't self-heal; surface loudly
             return {"action": "revert_failed", "stage": "revert",
-                    "merge_sha": merge_sha, "error": str(e), "why": reg["why"]}
+                    "merge_sha": merge_sha, "error": str(e), "why": reg["why"], **extra}
         return {"action": "auto_reverted", "merge_sha": merge_sha,
-                "revert_sha": revert_sha, "why": reg["why"]}
-    return {"action": "merged", "merge_sha": merge_sha, "scores": after_scores}
+                "revert_sha": revert_sha, "why": reg["why"], **extra}
+    return {"action": "merged", "merge_sha": merge_sha, "scores": after_scores, **extra}

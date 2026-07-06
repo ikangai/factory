@@ -96,6 +96,75 @@ def test_cmd_autopilot_status_finds_runner_via_file_or_scan(monkeypatch):
     assert orchestrator.cmd_autopilot("status") == {"running": False, "pid": None}
 
 
+def test_restart_if_auto_respects_brakes_and_debounce(monkeypatch):
+    """The AUTO watchdog (Task 5.3): restart a dead runner ONLY when AUTO ∧ ¬halted ∧ dead ∧
+    debounce-elapsed. STOP wins over everything (checked FIRST); mode=shift and a live runner
+    veto; the debounce stops a crash-looping runner from thrashing. No real process launched —
+    start_runner is monkeypatched."""
+    calls = []
+    monkeypatch.setattr(autopilot, "start_runner",
+                        lambda **k: calls.append(k) or {"started": True, "pid": 1})
+    monkeypatch.setattr(autopilot, "runner_alive", lambda: None)          # runner is dead
+    monkeypatch.setattr(autopilot.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(autopilot.mode, "is_auto", lambda: True)
+    monkeypatch.setattr(autopilot, "_last_restart_ts", 0.0)
+
+    # STOP wins over EVERYTHING — the brake is checked FIRST, before mode/liveness
+    monkeypatch.setattr(autopilot.killswitch, "is_halted", lambda: True)
+    r = autopilot.restart_if_auto(now=1000.0)
+    assert r["restarted"] is False and r["reason"] == "halted" and not calls
+
+    # mode=shift vetoes (human-in-the-loop)
+    monkeypatch.setattr(autopilot.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(autopilot.mode, "is_auto", lambda: False)
+    r = autopilot.restart_if_auto(now=1000.0)
+    assert r["restarted"] is False and r["reason"] == "not_auto" and not calls
+
+    # a still-alive runner → nothing to heal
+    monkeypatch.setattr(autopilot.mode, "is_auto", lambda: True)
+    monkeypatch.setattr(autopilot, "runner_alive", lambda: 4242)
+    r = autopilot.restart_if_auto(now=1000.0)
+    assert r["restarted"] is False and r["reason"] == "alive" and not calls
+
+    # AUTO ∧ ¬halted ∧ dead ∧ debounce-elapsed → EXACTLY one restart
+    monkeypatch.setattr(autopilot, "runner_alive", lambda: None)
+    r = autopilot.restart_if_auto(now=1000.0)
+    assert r["restarted"] is True and len(calls) == 1
+
+    # a second poll INSIDE the debounce window → NO thrash
+    r = autopilot.restart_if_auto(now=1010.0, debounce_sec=300.0)
+    assert r["restarted"] is False and r["reason"] == "debounced" and len(calls) == 1
+
+    # once the window elapses → heals again
+    r = autopilot.restart_if_auto(now=1400.0, debounce_sec=300.0)
+    assert r["restarted"] is True and len(calls) == 2
+
+
+def test_fleet_state_poll_drives_the_watchdog(monkeypatch):
+    """The dashboard's ~2s /api/fleet poll drives the self-heal: fleet_state() calls
+    restart_if_auto(). Hermetic — the watchdog and store are stubbed, nothing spawns."""
+    import types as _types
+    from factory.dashboard import fleet_server
+
+    seen = []
+    monkeypatch.setattr(autopilot, "restart_if_auto", lambda: seen.append(True))
+    monkeypatch.setattr(fleet_server, "fleet_viz",
+                        _types.SimpleNamespace(fleet_json=lambda s: {"ok": True}))
+
+    class _Store:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def init_db(self):
+            pass
+
+    monkeypatch.setattr(fleet_server, "Blackboard", lambda: _Store())
+    assert fleet_server.fleet_state() == {"ok": True} and seen == [True]
+
+
 def test_clear_pid_if_mine_only_removes_own(tmp_path, monkeypatch):
     pid_file = tmp_path / ".autopilot.pid"
     monkeypatch.setattr(autopilot, "pid_path", lambda: str(pid_file))

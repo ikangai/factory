@@ -256,6 +256,135 @@ def test_run_shift_requeues_unclosed_work_even_on_clean_completion(tmp_path, mon
         assert s.get_task("t1")["status"] == "open"     # rescued, not stranded in_progress
 
 
+# --- Task 0.2: the per-shift token budget is a REAL brake, not a decorative column --------
+
+def _spender(spend, resume_note="planned t1; blocked on t9"):
+    """A conductor that ledgers `spend` tokens against its shift, then plans normally."""
+    def cond(store, *, shift_id, mission, token_budget, wall_clock_s):
+        store.add_budget("conductor", spend, shift_id=shift_id)
+        return {"status": "completed", "resume_note": resume_note}
+    return cond
+
+
+def test_run_shift_budget_exhausted_skips_executor(tmp_path, monkeypatch):
+    """spent ≥ token_budget after the conductor → the executor NEVER dispatches, the shift
+    ends 'budget_exhausted', and the budget note is APPENDED to the conductor's own resume
+    note (never replacing it — the next shift's {RESUME} seam needs both)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        ran = {"exec": False}
+
+        def executor(store, *, shift_id):
+            ran["exec"] = True
+            return 1
+
+        res = shiftmod.run_shift(s, token_budget=1000, conductor=_spender(1500),
+                                 executor=executor)
+        sh = s.last_shift()
+    assert ran["exec"] is False                          # brake fired BEFORE dispatch
+    assert res["action"] == "budget_exhausted" and res["shipped"] == 0
+    assert sh["status"] == "budget_exhausted"
+    assert sh["resume_note"].startswith("planned t1; blocked on t9")   # conductor's note kept
+    assert "budget exhausted" in sh["resume_note"]                     # …with the brake note appended
+    assert "1500" in sh["resume_note"] and "1000" in sh["resume_note"]
+
+
+def test_run_shift_budget_trips_on_exact_equality_and_notes_alone(tmp_path, monkeypatch):
+    """spent == token_budget trips (>=); a conductor with no resume note gets the budget
+    note standing alone (no stray separator)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        res = shiftmod.run_shift(s, token_budget=500, conductor=_spender(500, resume_note=""),
+                                 executor=lambda store, *, shift_id: 1)
+        sh = s.last_shift()
+    assert res["action"] == "budget_exhausted" and sh["status"] == "budget_exhausted"
+    assert sh["resume_note"].startswith("budget exhausted")
+
+
+def test_run_shift_budget_exhausted_requeues_claimed_tasks(tmp_path, monkeypatch):
+    """The existing post-shift requeue still runs on the budget path — claimed work goes
+    back to the backlog instead of stranding in_progress."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        s.add_task("t1", "x", source="issue")
+
+        def claims_and_overspends(store, *, shift_id, mission, token_budget, wall_clock_s):
+            store.set_task_status("t1", "in_progress", shift_id=shift_id)
+            store.add_budget("conductor", 2000, shift_id=shift_id)
+            return {"status": "completed", "resume_note": "claimed t1"}
+
+        res = shiftmod.run_shift(s, token_budget=1000, conductor=claims_and_overspends,
+                                 executor=lambda store, *, shift_id: 1)
+        assert res["action"] == "budget_exhausted"
+        assert s.get_task("t1")["status"] == "open"      # requeued, not stranded
+
+
+def test_run_shift_budget_zero_means_unlimited(tmp_path, monkeypatch):
+    """token_budget == 0 is the 'unlimited' convention (matches loop_token_budget) — the
+    brake never trips, the executor runs, no budget note is appended."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": True}})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        ran = {"exec": False}
+
+        def executor(store, *, shift_id):
+            ran["exec"] = True
+            return 2
+
+        res = shiftmod.run_shift(s, token_budget=0, conductor=_spender(5000), executor=executor)
+        sh = s.last_shift()
+    assert ran["exec"] is True and res["action"] == "completed" and res["shipped"] == 2
+    assert "budget exhausted" not in sh["resume_note"]
+
+
+def test_run_shift_budget_enforcement_defaults_on_when_knob_absent(tmp_path, monkeypatch):
+    """autonomy.enforce_shift_budget missing from config → the brake is STILL on (a brake
+    defaults engaged)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config", lambda: {})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        res = shiftmod.run_shift(s, token_budget=100, conductor=_spender(200),
+                                 executor=lambda store, *, shift_id: 1)
+    assert res["action"] == "budget_exhausted" and res["shipped"] == 0
+
+
+def test_run_shift_budget_enforcement_can_be_disabled_in_config(tmp_path, monkeypatch):
+    """autonomy.enforce_shift_budget: false → today's behavior (executor runs regardless)."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(shiftmod.config, "load_config",
+                        lambda: {"autonomy": {"enforce_shift_budget": False}})
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        ran = {"exec": False}
+
+        def executor(store, *, shift_id):
+            ran["exec"] = True
+            return 1
+
+        res = shiftmod.run_shift(s, token_budget=100, conductor=_spender(200), executor=executor)
+    assert ran["exec"] is True and res["action"] == "completed"
+
+
+def test_enforce_shift_budget_is_config_only_and_defaults_true():
+    """The knob is a BRAKE: shipped true in config.yaml and deliberately NOT board-toggleable
+    (never in SETTINGS_SPEC — the operator-dial whitelist)."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert "autonomy.enforce_shift_budget" not in SETTINGS_SPEC
+    assert (load_config().get("autonomy") or {}).get("enforce_shift_budget") is True
+
+
 def test_run_shift_post_completion_halt_overrides(tmp_path, monkeypatch):
     """STOP appearing DURING the shift → the post-check downgrades 'completed' to 'halted'."""
     state = {"halted": False}

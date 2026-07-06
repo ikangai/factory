@@ -112,6 +112,53 @@ class TargetAdapter(abc.ABC):
         report = ((p.stdout or "") + (p.stderr or "")).strip()
         return (p.returncode == 0, report[-4000:])
 
+    def run_named_test(self, cwd: str, ref: str, *, timeout: int = 300) -> tuple[str, str]:
+        """Run ONE named test `ref` (a pytest node id like tests/test_x.py::test_y) in `cwd`
+        (a candidate checkout) — the spec's own acceptance test (Task 3.1). Sibling of run_tests
+        but scoped to a single ref instead of the whole suite. Returns (status, report-tail):
+          'passed'  — the ref ran and passed (green);
+          'failed'  — the ref ran and FAILED (red) → the caller discards (stage 'acceptance');
+          'missing' — the ref collected NO test (pytest exit 5) or the path/node-id is absent
+                      (exit 4) — the worker never created it → a telemetry-first SKIP, NOT a
+                      discard. A missing command / timeout / crash also maps to 'missing'
+                      (fail-open: never discard a candidate on an infrastructure hiccup).
+        Builds the pytest argv from `test_command()` by swapping the suite target (a bare
+        `tests`/`tests/` arg) for the single ref, so only the named test runs (never the whole
+        suite alongside it); with no swappable arg it appends the ref. Never crashes.
+
+        Defense-in-depth (Task 3.1): a '..' path segment in `ref` is REFUSED without spawning
+        pytest — pytest resolves a file-path arg by filesystem traversal (not confined to
+        rootdir), so 'tests/../../x.py' would import/execute a module outside `cwd`'s tests/
+        (with enough '..', outside `cwd` itself). extract_test_ref already rejects these, but
+        this seam is public, so it guards independently. A refused ref maps to fail-open
+        'missing' (a telemetry skip, never a discard)."""
+        path = (ref or "").split("::", 1)[0].replace("\\", "/")
+        if ".." in path.split("/"):
+            return ("missing", f"refused unsafe ref (path traversal): {ref!r}")
+        cmd = self.test_command()
+        if not cmd:
+            return ("missing", "no test_command configured for this target")
+        named, swapped = [], False
+        for a in cmd:
+            if a.rstrip("/") == "tests":               # the suite path arg → run only the ref
+                named.append(ref); swapped = True
+            else:
+                named.append(a)
+        if not swapped:                                # no suite arg to swap → best-effort append
+            named.append(ref)
+        try:
+            p = subprocess.run(named, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return ("missing", f"named-test run failed: {e}")
+        report = ((p.stdout or "") + (p.stderr or "")).strip()[-4000:]
+        if p.returncode == 0:
+            return ("passed", report)
+        if p.returncode in (4, 5):                     # 4 = not-found path/node-id, 5 = none collected
+            return ("missing", report)
+        if p.returncode == 1:                          # 1 = the test ran and FAILED (red)
+            return ("failed", report)
+        return ("missing", report)                     # 2/3/other (interrupt/internal) → skip, fail-open
+
     def clone(self, dest: str) -> str:
         """A SELF-CONTAINED git clone of the target into `dest` (its own `.git`, so it
         works when owned by a different OS user — the Guest-House boundary). Returns

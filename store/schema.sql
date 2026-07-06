@@ -201,6 +201,12 @@ CREATE TABLE IF NOT EXISTS learnings (
     content    TEXT NOT NULL,
     shift_id   INTEGER,
     uses       INTEGER NOT NULL DEFAULT 0,   -- times surfaced into a prompt (relevance signal)
+    hits       INTEGER NOT NULL DEFAULT 1,   -- times reported: each dedup-hit bumps (recurrence signal, Task 0.5)
+    archived   INTEGER NOT NULL DEFAULT 0,   -- retired via `factory learn retire` (correction handle, Task 1.3)
+    stale      INTEGER NOT NULL DEFAULT 0,   -- `factory learn verify` found a dead file cite (advisory, Task 1.3)
+    pinned     INTEGER NOT NULL DEFAULT 0,   -- renders FIRST + never ages out of the card, capped ~6/role (`learn distill`, Task 4.2)
+    merged_after  INTEGER NOT NULL DEFAULT 0, -- tasks MERGED after this surfaced in their worker card (Task 1.4)
+    blocked_after INTEGER NOT NULL DEFAULT 0, -- tasks ended BLOCKED after it surfaced (effectiveness denominator)
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_learnings_role ON learnings(role);
@@ -251,6 +257,38 @@ CREATE TABLE IF NOT EXISTS worker_profiles (
     created_by  TEXT NOT NULL DEFAULT 'operator',
     created_at  TEXT NOT NULL
 );
+
+-- Per-task failure evidence (Task 0.4, P6 stage 1): captured at close-out for every
+-- blocked task so the factory can RE-READ why a task failed — the full tests_report and
+-- the worker's reply head, not just the ≤200-char tasks.result reason. Passive write on
+-- the main thread, zero LLM; consumed by the investigator (Task 4.1). init_db re-runs
+-- this script (IF NOT EXISTS), so existing DBs gain the table without a column migration.
+CREATE TABLE IF NOT EXISTS task_evidence (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL REFERENCES tasks(id),   -- tasks are never DELETEd, so safe
+    shift_id     INTEGER REFERENCES shifts(id),
+    action       TEXT NOT NULL DEFAULT '',   -- no_candidate|discarded|auto_reverted|error|…
+    stage        TEXT NOT NULL DEFAULT '',   -- tests|frozen|timeout|refusal|transport|… ('' = none)
+    tests_report TEXT NOT NULL DEFAULT '',   -- run_code_round's full suite output (was dropped)
+    reply_head   TEXT NOT NULL DEFAULT '',   -- first ≤2000 chars of the worker's reply
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_evidence_task ON task_evidence(task_id);
+
+-- Golden-case gate-eval outcomes (roadmap Task 2.1, P12): one row per fixture per
+-- `factory eval-gates` run — the durable per-case history that makes a golden FLIPPING
+-- ok→fail vs its previous run detectable (→ a factory learning). Append-only, main
+-- thread, zero LLM (the spend is the judge's, ledgered separately). New TABLE, so
+-- init_db's IF NOT EXISTS re-run is the whole migration — same pattern as task_evidence.
+CREATE TABLE IF NOT EXISTS gate_eval_results (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    gate       TEXT NOT NULL,              -- 'scope' (decompose/reviewer goldens are follow-ups)
+    case_id    TEXT NOT NULL,              -- the fixture's id in scenarios/gates/<gate>.jsonl
+    ok         INTEGER NOT NULL,           -- 1 iff the verdict ∈ the fixture's expected set
+    verdict    TEXT NOT NULL DEFAULT '',   -- what normalize_verdict actually returned
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gate_eval_case ON gate_eval_results(gate, case_id);
 
 -- Whitelisted runtime overrides (Phase 6.1, pulled forward — Task 5.2's staffing guard lives
 -- here). config.yaml stays the git-tracked defaults file; the board/CLI write bounded overrides

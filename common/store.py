@@ -96,6 +96,32 @@ class Blackboard:
             self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN seconds REAL NOT NULL DEFAULT 0")
         if bcols and "profile" not in bcols:
             self.conn.execute("ALTER TABLE budget_ledger ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
+        # learnings gained a recurrence counter (Task 0.5): each dedup-hit bumps it instead
+        # of silently discarding the report — the frequency signal.
+        lcols = {r[1] for r in self.conn.execute("PRAGMA table_info(learnings)").fetchall()}
+        if lcols and "hits" not in lcols:
+            self.conn.execute("ALTER TABLE learnings ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
+        # learnings hygiene (Task 1.3): retire flag + deterministic-staleness flag.
+        if lcols and "archived" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        if lcols and "stale" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+        # distill + pinned card ranking (Task 4.2): a pinned lesson renders FIRST and never
+        # ages out of the memory_card (capped ~6/role); `factory learn distill --apply` sets it.
+        if lcols and "pinned" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        # consult-telemetry (Task 1.4): each surfaced learning gets the task's OUTCOME
+        # attributed back — the effectiveness signal `learn list` renders (suppressed
+        # below a minimum denominator; a 2-of-3 "ratio" is noise).
+        if lcols and "merged_after" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN merged_after INTEGER NOT NULL DEFAULT 0")
+        if lcols and "blocked_after" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN blocked_after INTEGER NOT NULL DEFAULT 0")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -376,6 +402,20 @@ class Blackboard:
             rows = self._all("SELECT * FROM tasks ORDER BY created_at")
         return [self._with_spec(r) for r in rows]
 
+    def recent_blocked_tasks(self, limit: int = 8) -> list[dict]:
+        """The last N blocked tasks NEWEST-FIRST by updated_at (Task 1.1's {BLOCKED} seam).
+        Dedicated query: list_tasks orders by created_at ASC, which buries the freshest
+        failures — exactly the rows the conductor must react to first."""
+        rows = self._all("SELECT * FROM tasks WHERE status = 'blocked' "
+                         "ORDER BY updated_at DESC LIMIT ?", (int(limit),))
+        return [self._with_spec(r) for r in rows]
+
+    def set_task_detail(self, id: str, detail: str) -> None:
+        """Replace a task's brief (the `task reopen` verb narrows a blocked task's detail;
+        callers own exact-id discipline — this is a plain UPDATE)."""
+        self._exec("UPDATE tasks SET detail = ?, updated_at = ? WHERE id = ?",
+                   (detail, now_iso(), id))
+
     def set_task_status(self, id: str, status: str, *, result: Optional[str] = None,
                         shift_id: Optional[int] = None) -> None:
         sets, params = ["status = ?", "updated_at = ?"], [status, now_iso()]
@@ -399,6 +439,11 @@ class Blackboard:
             "UPDATE shifts SET status = ?, report = ?, resume_note = ?, tokens_used = ?, "
             "ended_at = ? WHERE id = ?",
             (status, report, resume_note, tokens_used, now_iso(), shift_id))
+
+    def get_shift(self, shift_id: int) -> Optional[dict]:
+        """One shift row by id — the rail reads its token_budget on the MAIN THREAD (Task 3.2's
+        retry_budget_ok, brake-honest) without a private-query into another module."""
+        return self._one("SELECT * FROM shifts WHERE id = ?", (shift_id,))
 
     def last_shift(self) -> Optional[dict]:
         return self._one("SELECT * FROM shifts ORDER BY id DESC LIMIT 1")
@@ -478,6 +523,18 @@ class Blackboard:
             "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
             "FROM tasks WHERE milestone_id = ?", (milestone_id,))
         return {"done": int(r["done"] or 0), "total": int(r["total"] or 0)}
+
+    def milestone_open_task_ids(self, milestone_id: int) -> list[str]:
+        """Task 3.3: the ids of a milestone's linked tasks that are NOT yet resolved. RESOLVED =
+        `done` OR `dropped` — BOTH are terminal, so a 'dropped' (a legal RESOLVED task status)
+        never makes delivery unreachable; everything else (open/claimed/in_progress/blocked) is
+        in-flight. The milestone-delivery grader refuses a premature 'delivered' while this list is
+        non-empty and derives the render-time '(unverified)' label from it. Ordered by created_at
+        for a stable, exact-id refusal message."""
+        rows = self._all(
+            "SELECT id FROM tasks WHERE milestone_id = ? "
+            "AND status NOT IN ('done','dropped') ORDER BY created_at", (milestone_id,))
+        return [r["id"] for r in rows]
 
     def milestone_effort(self, milestone_id: int) -> dict:
         """Estimated vs actual tokens for a milestone's linked tasks: est = SUM(tasks.est_tokens);
@@ -670,15 +727,61 @@ class Blackboard:
         """Append a learning for `role`. Returns its id. CRUD only — dedup/format live
         in reporting.factory_memory."""
         cur = self._exec(
-            "INSERT INTO learnings(role, agent, scope, content, shift_id, uses, "
-            "created_at) VALUES (?,?,?,?,?,0,?)",
+            "INSERT INTO learnings(role, agent, scope, content, shift_id, uses, hits, "
+            "created_at) VALUES (?,?,?,?,?,0,1,?)",
             (role, agent, scope, content, shift_id, now_iso()))
         return cur.lastrowid
 
-    def learnings_for_role(self, role: str, limit: int = 10) -> list[dict]:
-        """A role's learnings, newest first (id DESC is stable even within one tick)."""
+    def get_learning(self, learning_id: int) -> Optional[dict]:
+        """One learning by exact integer id, or None — the id is the PRIMARY KEY, so
+        there is no partial-match ambiguity here."""
+        return self._one("SELECT * FROM learnings WHERE id = ?", (learning_id,))
+
+    def bump_learning_hits(self, learning_id: int) -> None:
+        """Increment ONE learning's recurrence counter — called when a fresh report
+        dedups onto it (Task 0.5: count the recurrence instead of destroying it)."""
+        self._exec("UPDATE learnings SET hits = hits + 1 WHERE id = ?", (learning_id,))
+
+    def archive_learning(self, learning_id: int) -> None:
+        """Retire a learning (`factory learn retire`, Task 1.3): archived=1 hides it from
+        prompts (learnings_for_role default view) — the row itself is kept as history AND
+        stays visible to record_learning's dedup window so a re-report of the same lesson
+        dedups onto it (hidden, hits-bumped) instead of resurrecting it as a live row.
+        Callers refuse unknown ids via get_learning FIRST (exact-id discipline)."""
+        self._exec("UPDATE learnings SET archived = 1 WHERE id = ?", (learning_id,))
+
+    def set_learning_stale(self, learning_id: int, stale: bool) -> None:
+        """Flag / clear the deterministic-staleness bit (`factory learn verify`, Task 1.3).
+        Advisory only: a stale row still surfaces, with a card suffix warning the reader."""
+        self._exec("UPDATE learnings SET stale = ? WHERE id = ?",
+                   (1 if stale else 0, learning_id))
+
+    def pin_learning(self, learning_id: int) -> None:
+        """Pin a learning (`factory learn distill --apply`, Task 4.2): pinned=1 makes it
+        render FIRST in the role's memory_card and never age out of the newest-N window.
+        Callers refuse unknown ids via get_learning FIRST (exact-id discipline)."""
+        self._exec("UPDATE learnings SET pinned = 1 WHERE id = ?", (learning_id,))
+
+    def pinned_for_role(self, role: str, limit: int = 6) -> list[dict]:
+        """A role's LIVE pinned learnings, newest first — the pinned leg of memory_card
+        (Task 4.2). archived=0 so a pinned-then-retired row never resurfaces; `limit` caps
+        the leg (~6/role) so unbounded pins can't regrow the card the phase shrinks."""
         return self._all(
-            "SELECT * FROM learnings WHERE role = ? ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM learnings WHERE role = ? AND pinned = 1 AND archived = 0 "
+            "ORDER BY id DESC LIMIT ?", (role, limit))
+
+    def learnings_for_role(self, role: str, limit: int = 10, *,
+                           include_archived: bool = False) -> list[dict]:
+        """A role's LIVE (non-retired) learnings, newest first (id DESC is stable even
+        within one tick). Retired rows (archived=1) never surface by default — prompts
+        read this seam as-is (Task 1.3). include_archived=True is the DEDUP window's
+        view (record_learning): a retired lesson must keep absorbing re-reports (bump
+        hits, stay hidden) instead of resurrecting as a fresh live row — the factory
+        auto-records templated lessons on recurring failures, so the exact lesson an
+        operator retired WILL be reported again verbatim."""
+        where = "role = ?" if include_archived else "role = ? AND archived = 0"
+        return self._all(
+            f"SELECT * FROM learnings WHERE {where} ORDER BY id DESC LIMIT ?",
             (role, limit))
 
     def all_learnings(self, limit: int = 50) -> list[dict]:
@@ -694,6 +797,59 @@ class Blackboard:
             return
         placeholders = ",".join("?" * len(ids))
         self._exec(f"UPDATE learnings SET uses = uses + 1 WHERE id IN ({placeholders})", ids)
+
+    def bump_learning_outcomes(self, ids: Iterable[int], *, merged: bool) -> None:
+        """Attribute a task's close-out outcome to the learnings surfaced into its worker
+        card (Task 1.4): ONE batched UPDATE bumping merged_after (merged=True) or
+        blocked_after. MAIN thread only (single-writer connection). Signal, not proof —
+        the card is one input among many, so readers suppress the ratio below a minimum
+        denominator (reporting.factory_memory.effectiveness)."""
+        ids = list(ids)
+        if not ids:
+            return
+        col = "merged_after" if merged else "blocked_after"
+        placeholders = ",".join("?" * len(ids))
+        self._exec(f"UPDATE learnings SET {col} = {col} + 1 WHERE id IN ({placeholders})", ids)
+
+    # -- task evidence: per-task failure forensics (Task 0.4, P6 stage 1) ---
+    def add_task_evidence(self, task_id: str, *, shift_id: Optional[int] = None,
+                          action: str = "", stage: str = "", tests_report: str = "",
+                          reply_head: str = "") -> int:
+        """Persist WHY a task failed at close-out — the full tests_report + the worker's
+        reply head, which the ≤200-char tasks.result reason cannot carry. Returns the row
+        id. Passive write, MAIN thread only (single-writer connection); zero LLM."""
+        cur = self._exec(
+            "INSERT INTO task_evidence(task_id, shift_id, action, stage, tests_report, "
+            "reply_head, created_at) VALUES (?,?,?,?,?,?,?)",
+            (task_id, shift_id, action, stage, tests_report, reply_head, now_iso()))
+        return cur.lastrowid
+
+    def task_evidence(self, task_id: str) -> list[dict]:
+        """One task's failure-evidence rows, newest first (id DESC is stable within a
+        tick). Reader for the `factory task evidence` verb + the investigator (Task 4.1)."""
+        return self._all(
+            "SELECT * FROM task_evidence WHERE task_id = ? ORDER BY id DESC", (task_id,))
+
+    # -- gate-eval outcomes: per-golden-case results (Task 2.1, P12) --------
+    def add_gate_eval_result(self, gate: str, case_id: str, ok: bool,
+                             verdict: str = "") -> int:
+        """Persist one golden case's outcome from `factory eval-gates` — the durable
+        per-case history the flip detector (ok→fail = a gate regression) compares
+        against on the next run. Append-only, MAIN thread only (single-writer)."""
+        cur = self._exec(
+            "INSERT INTO gate_eval_results(gate, case_id, ok, verdict, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (gate, case_id, 1 if ok else 0, verdict, now_iso()))
+        return cur.lastrowid
+
+    def latest_gate_eval_results(self, gate: str) -> list[dict]:
+        """Each case's MOST RECENT outcome for one gate — the previous run's scorecard.
+        MAX(id) per case_id (ids are monotonic), so a case dropped from the fixture
+        file simply stops appearing in new runs but keeps its history."""
+        return self._all(
+            "SELECT * FROM gate_eval_results WHERE id IN ("
+            "SELECT MAX(id) FROM gate_eval_results WHERE gate = ? GROUP BY case_id)",
+            (gate,))
 
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:

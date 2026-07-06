@@ -12,9 +12,10 @@ from __future__ import annotations
 import fcntl
 import os
 import subprocess
+import time
 from typing import Optional
 
-from ..common import config, paths
+from ..common import config, killswitch, mode, paths
 
 
 def pid_path() -> str:
@@ -153,3 +154,38 @@ def status() -> dict:
     """Autopilot status for the dashboard: running + pid (None when idle)."""
     pid = runner_alive()
     return {"running": pid is not None, "pid": pid}
+
+
+_RESTART_DEBOUNCE_SEC = 300.0    # at most one self-heal / 5 min — a crash-looping runner can't thrash
+_last_restart_ts = 0.0           # MODULE-LEVEL monotonic clock of the last restart ATTEMPT (0 = never)
+
+
+def restart_if_auto(*, now: Optional[float] = None,
+                    debounce_sec: Optional[float] = None, spawn_fn=None) -> dict:
+    """Brake-respecting self-heal for AUTO: if the mode is AUTO and no runner is alive, restart it
+    — so a crashed runner doesn't stay down until a human re-toggles (today start_runner's only
+    call site is the mode-toggle POST). Meant to be called from the dashboard's ~2s poll.
+
+    Vetoed, in strict order:
+      1. killswitch.is_halted()  — STOP wins over EVERYTHING, checked FIRST (safety before autonomy)
+      2. not mode.is_auto()      — SHIFT (or unset) → human-in-the-loop, no auto-respawn
+      3. runner_alive()          — a live runner needs no healing
+      4. debounce window         — a module-level monotonic stamp caps restarts so a crash-looping
+                                   runner can't thrash the box
+
+    `now`/`debounce_sec` are injectable for deterministic tests; `spawn_fn` threads to start_runner
+    so tests never launch a real process. Returns {'restarted': bool, 'reason': str[, 'start': …]}."""
+    global _last_restart_ts
+    if killswitch.is_halted():                      # STOP wins over EVERYTHING — first gate
+        return {"restarted": False, "reason": "halted"}
+    if not mode.is_auto():                          # SHIFT / unset → human-in-the-loop veto
+        return {"restarted": False, "reason": "not_auto"}
+    if runner_alive() is not None:                  # already up → nothing to heal
+        return {"restarted": False, "reason": "alive"}
+    now = time.monotonic() if now is None else now
+    window = _RESTART_DEBOUNCE_SEC if debounce_sec is None else debounce_sec
+    if _last_restart_ts and (now - _last_restart_ts) < window:
+        return {"restarted": False, "reason": "debounced"}
+    _last_restart_ts = now                          # stamp the ATTEMPT (thrash guard) before spawning
+    res = start_runner(spawn_fn=spawn_fn)           # start_runner self-guards against a double-spawn
+    return {"restarted": True, "reason": "started", "start": res}

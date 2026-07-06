@@ -10,6 +10,8 @@ import sqlite3
 import pytest
 
 from factory.common.store import Blackboard
+from factory.orchestrator import orchestrator
+from factory.roles import conductor
 
 
 def _store(tmp_path):
@@ -218,3 +220,106 @@ def test_mission_status_timeline(tmp_path):
         assert latest["metrics"]["research_dry_streak"] == 3       # metrics round-trip
         s.record_mission_status(shift_id=sh, status="reached", rationale="mission met")
         assert s.latest_mission_status()["status"] == "reached"    # the terminal state
+
+
+# -- Task 3.3: independent milestone-delivery grader -------------------------
+def _milestone_with_tasks(s, task_states):
+    """Create a milestone, link one task per state, return (mid, ordered task ids)."""
+    if s.active_mission() is None:
+        s.set_mission("deliver reliably")
+    mid = s.add_milestone("M1: recovery", mission_id=s.active_mission()["id"])
+    ids = []
+    for i, st in enumerate(task_states):
+        tid = f"task-mv{i:02d}0000"
+        s.add_task(tid, f"slice {i}", source="research")
+        s.set_task_milestone(tid, mid)
+        if st != "open":
+            s.set_task_status(tid, st)
+        ids.append(tid)
+    return mid, ids
+
+
+def test_milestone_verify_off_is_the_status_quo_floor(tmp_path, capsys):
+    """Gate default OFF: `plan status <mid> delivered` behaves exactly as today even with an
+    open linked task, and _plan_bullets renders a bare '[delivered]' (no derived label)."""
+    with _store(tmp_path) as s:
+        mid, _ = _milestone_with_tasks(s, ["open"])
+        capsys.readouterr()
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        out = capsys.readouterr().out
+        assert "1 row" in out
+        assert s.get_milestone(mid)["status"] == "delivered"
+        assert "(unverified)" not in conductor._plan_bullets(s)   # gate OFF ⇒ no label
+
+
+def test_milestone_verify_refuses_delivered_while_tasks_open(tmp_path, capsys):
+    """Gate ON: a milestone with unresolved linked tasks (open/in_progress/blocked) cannot be
+    marked delivered; the refusal NAMES the blocking task ids (exact-id discipline) and leaves
+    the milestone un-delivered. A 'done' sibling is NOT named."""
+    with _store(tmp_path) as s:
+        mid, ids = _milestone_with_tasks(s, ["open", "in_progress", "blocked", "done"])
+        s.set_setting("super_worker.milestone_verify", "true")
+        capsys.readouterr()
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        out = capsys.readouterr().out
+        assert "0 rows" in out
+        for tid in ids[:3]:                       # the three unresolved ids are named…
+            assert tid in out
+        assert ids[3] not in out                  # …the resolved 'done' one is not
+        assert s.get_milestone(mid)["status"] != "delivered"   # unchanged
+
+
+def test_milestone_verify_treats_dropped_as_resolved(tmp_path, capsys):
+    """Correction (a): 'dropped' is a legal RESOLVED task status — a milestone whose linked tasks
+    are all done-or-dropped IS deliverable (counting 'dropped' against done==total would make
+    delivery permanently unreachable)."""
+    with _store(tmp_path) as s:
+        mid, _ = _milestone_with_tasks(s, ["done", "dropped"])
+        s.set_setting("super_worker.milestone_verify", "true")
+        capsys.readouterr()
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_milestone(mid)["status"] == "delivered"
+
+
+def test_milestone_verify_refuses_empty_milestone_as_unverifiable(tmp_path, capsys):
+    """Correction (a): total==0 is UNVERIFIABLE, not trivially complete — a milestone with no
+    linked tasks cannot be delivered under the grader."""
+    with _store(tmp_path) as s:
+        s.set_mission("x")
+        mid = s.add_milestone("M-empty", mission_id=s.active_mission()["id"])
+        s.set_setting("super_worker.milestone_verify", "true")
+        capsys.readouterr()
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "delivered"])
+        out = capsys.readouterr().out
+        assert "0 rows" in out and "UNVERIFIABLE" in out
+        assert s.get_milestone(mid)["status"] != "delivered"
+
+
+def test_milestone_verify_non_delivered_status_is_ungated(tmp_path, capsys):
+    """The grader guards ONLY the 'delivered' transition — moving a milestone to active/dropped is
+    never refused, even with open linked tasks and the gate ON."""
+    with _store(tmp_path) as s:
+        mid, _ = _milestone_with_tasks(s, ["open"])
+        s.set_setting("super_worker.milestone_verify", "true")
+        capsys.readouterr()
+        orchestrator.cmd_plan(s, "status", rest=[str(mid), "active"])
+        assert "1 row" in capsys.readouterr().out
+        assert s.get_milestone(mid)["status"] == "active"
+
+
+def test_plan_bullets_derives_delivered_unverified_label(tmp_path):
+    """Correction (c): a milestone that READS 'delivered' but no longer verifies (an open linked
+    task) renders 'delivered (unverified)' — a render-time label ONLY (never stored: the
+    milestones.status CHECK has no such value and no detail column). Resolving the task clears it;
+    a fully-resolved delivery renders a bare '[delivered]'."""
+    with _store(tmp_path) as s:
+        mid, _ = _milestone_with_tasks(s, ["open"])
+        s.set_setting("super_worker.milestone_verify", "true")
+        s.set_milestone_status(mid, "delivered")              # forced past the guard (gate flipped on later)
+        assert "delivered (unverified)" in conductor._plan_bullets(s)
+        assert s.get_milestone(mid)["status"] == "delivered"  # the STORED status is the bare CHECK-legal value
+        for t in s.list_tasks(status="open"):                 # resolve the linked work…
+            s.set_task_status(t["id"], "done")
+        bullets = conductor._plan_bullets(s)
+        assert "delivered (unverified)" not in bullets and "[delivered]" in bullets   # …label clears

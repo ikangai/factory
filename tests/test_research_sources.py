@@ -61,6 +61,12 @@ def test_research_cli_agents_derives_focus_from_mission(tmp_path, monkeypatch):
         def add_budget(self, *a, **k):
             pass
 
+        def learnings_for_role(self, *a, **k):
+            return []
+
+        def pinned_for_role(self, *a, **k):
+            return []
+
     # query=None → focus must be derived from MISSION.md
     out = common.research_cli_agents(_Store(), query=None, mission_file=mp)
     assert out == []  # no material → nothing staged, but focus was used:
@@ -107,6 +113,12 @@ briefs:
         def add_budget(self, *a, **k):
             pass
 
+        def learnings_for_role(self, *a, **k):
+            return []
+
+        def pinned_for_role(self, *a, **k):
+            return []
+
     written = common.research_cli_agents(_Store(), query="x", max_papers=1, max_repos=1)
     assert len(written) == 3
     briefs = [yaml.safe_load(open(p)) for p in written]
@@ -139,6 +151,12 @@ briefs:
     class _Store:
         def add_budget(self, *a, **k):
             pass
+
+        def learnings_for_role(self, *a, **k):
+            return []
+
+        def pinned_for_role(self, *a, **k):
+            return []
 
     written = common.research_cli_agents(_Store(), query="x", max_papers=0, max_repos=1)
     assert len(written) == 1
@@ -216,6 +234,12 @@ def test_material_feeds_high_priority_section(tmp_path, monkeypatch):
         def add_budget(self, *a, **k):
             pass
 
+        def learnings_for_role(self, *a, **k):
+            return []
+
+        def pinned_for_role(self, *a, **k):
+            return []
+
     written = common.research_cli_agents(_Store(), query="x", max_papers=0, max_repos=0,
                                          mission_file=mp)
     assert "MATERIAL THE HUMAN ASKED YOU TO READ" in seen["prompt"]
@@ -238,6 +262,12 @@ def test_both_sources_fail_degrades_to_empty(monkeypatch):
     class _Store:
         def add_budget(self, *a, **k):
             pass
+
+        def learnings_for_role(self, *a, **k):
+            return []
+
+        def pinned_for_role(self, *a, **k):
+            return []
 
     # No mission_file, both sources raise → empty, never crashes the loop.
     assert common.research_cli_agents(_Store(), query="x") == []

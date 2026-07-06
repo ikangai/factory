@@ -133,6 +133,46 @@ super_worker:
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
   # Test-only / docs-only / empty diffs pass. Enabled 2026-06-30 (operator).
   require_test: true
+  # Task 3.1 (Phase 3): spec-named acceptance EXECUTION gate (objective done-condition, P2). When
+  # true, the spec's OWN named acceptance test — a tests/<path>.py[::name] ref extracted from
+  # spec.acceptance — is RUN in the candidate AFTER the suite gate: a RED run discards the
+  # candidate (stage 'acceptance'); a MISSING test (the worker didn't create the contracted ref)
+  # is a telemetry-first SKIP (counted as a scope='acceptance' factory learning, NOT yet
+  # discarded — that flip waits until the prompt contract is live and the skip rate is known).
+  # A prose acceptance with no runnable ref → nothing runs (fail-open). Default OFF; board-
+  # toggleable (in SETTINGS_SPEC — it is a gate the operator trials, not a brake).
+  acceptance_exec: false
+  # Task 3.2 (Phase 3): one INFORMED retry on a gradeable gate-discard (minimal maker→grader→
+  # retry loop). When true, a candidate discarded at stage tests / no_test / acceptance (NEVER
+  # 'frozen' — a structural safety veto a retry can only re-violate) gets EXACTLY ONE more
+  # independent attempt, with the failure evidence appended and worded honestly (the retry clones
+  # the PRISTINE base — the prior attempt's code is NOT visible, only its evidence). Budget-honest:
+  # the retry is suppressed once the shift's ledgered spend has reached its token_budget (composes
+  # with the per-shift brake, Task 0.2). Spend from both attempts sums into one ledger row. Default
+  # OFF; board-toggleable (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
+  retry_on_discard: false
+  # Task 3.3 (Phase 3): independent milestone-DELIVERY grader (objective done-condition, P2). When
+  # true, `plan status <milestone> delivered` is REFUSED while any linked task is still unresolved
+  # (open/claimed/in_progress/blocked — 'done' and 'dropped' are BOTH resolved, so a dropped task
+  # never makes delivery unreachable) OR while the milestone has NO linked tasks (total==0 is
+  # UNVERIFIABLE, not trivially complete); the refusal names the blocking task ids. A milestone that
+  # still READS 'delivered' but no longer verifies renders as 'delivered (unverified)' in the
+  # conductor's {PLAN} seam — a render-time label ONLY (milestones.status is CHECK-constrained with
+  # no detail column, so it is NEVER stored). Default OFF; board-toggleable (a gate the operator
+  # trials, not a brake).
+  milestone_verify: false
+  # Task 4.1 (Phase 4): post-shift INVESTIGATOR for blocked tasks (P6 stages 2-3). When true, AFTER
+  # close-out up to 3 blocked-this-shift tasks that carry a task_evidence row — scoped to
+  # discarded(tests) and error stages only (no_candidate is skipped: auto-decompose already gave a
+  # second opinion; frozen/no_test are skipped: their canned lessons already state the cause) — get
+  # ONE isolated claude_p at STANDARD tier over title+detail+spec+evidence -> {cause, lesson,
+  # followup?}. The lesson is recorded scope='investigated' (analysis, not a verified check); spend
+  # is ledgered notes='investigate' WITH the shift_id (folds into the loop token brake). STOP vetoes
+  # even this read-only spend (checked FIRST); a transport/parse failure fails open to the canned
+  # lesson (never crashes the close-out). A returned followup_title/detail is STORED on the lesson —
+  # spawning the narrowed task is a separate follow-up, NOT done here. Default OFF; board-toggleable
+  # (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
+  investigate_blocked: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits
@@ -140,6 +180,17 @@ super_worker:
   auto_decompose: true
   decompose_max_turns: 8
   decompose_timeout_s: 240
+  # Task 5.2 (Phase 5): bounded same-shift SECOND WAVE (loop-until-dry, 2 waves MAX). 1 = today
+  # (a no_candidate is decomposed and its sub-tasks wait for the next shift). 2 = after close-out,
+  # if any no_candidate DECOMPOSED this shift, the rail CLAIMS the new sub-task ids and runs ONE
+  # more identical pass with the decomposer OFF (a HARD recursion stop — never a wave 3). Fires
+  # only when every brake clears: STOP disengaged, headroom under max_tasks_per_shift, shift spend
+  # < token_budget (composes with the per-shift brake, Task 0.2), AND an EXPLICIT TIME GUARD —
+  # elapsed + waves×1800s must fit the loop-deadline share (the executor has no wall-clock; the
+  # loop deadline is checked only between shifts, so wave 2 reserves its own headroom or fails
+  # CLOSED). Wave-2 sub-tasks inherit the parent's milestone_id (EVM/timesheet attribution). Default
+  # 1; board-toggleable (in SETTINGS_SPEC). Trial with a LOW max_tasks — do NOT flip to 2 broadly.
+  dispatch_waves: 1
   # Cap on ACTIVE worker capability profiles (Phase 5) — `worker add` beyond this fails with
   # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
   # it (it's the fail-open default and can't be retired).
@@ -150,6 +201,21 @@ super_worker:
   # on a transport/parse failure (never blocks a merge on a reviewer hiccup). Default OFF — the
   # developer's own TDD is the primary gate; this adds an independent eye when the operator opts in.
   reviewer: false
+  # The model TIER the pre-merge reviewer runs at (Task 2.2 routing knob — shares the claude_p
+  # --model plumbing). '' = frontier (the account default; review is JUDGMENT, so frontier is the
+  # deliberate default per the models block below). A named tier (standard/fast) down-tiers it;
+  # resolve_model fails open DOWNWARD (never up to frontier on a typo). config.yaml-only — it is a
+  # routing knob, not a board brake, and the reviewer path reads config directly (no store handle).
+  reviewer_tier: ""
+  # The model TIER the pre-dispatch SCOPE judge runs at (Task 2.4 cheap-grader knob — shares the
+  # claude_super --model plumbing). '' = frontier (the account default; scope triage is JUDGMENT,
+  # so frontier is the deliberate default per the models block below). A named tier (standard/fast)
+  # down-tiers it so the judge stops burning frontier tokens per claimed task; resolve_model fails
+  # open DOWNWARD (never up to frontier on a typo). Applies to scope_judge ONLY — decompose_judge is
+  # a separate call path, left at the account default. config.yaml-only (the scope path reads config
+  # directly, no store handle), a routing knob not a board brake — deliberately NOT in SETTINGS_SPEC.
+  # Frontier-vs-fast on the eval-gate goldens is an OPERATOR act; the default stays frontier here.
+  scope_check_tier: ""
 
 # --- model tiers (worker routing, Phase 5) ----------------------------------
 # Worker profiles name a TIER, never a raw model id. '' = the account's default model
@@ -188,10 +254,21 @@ autonomy:
   # still stops early on no-improvement / research-exhausted. Promotion is NEVER
   # automatic — candidates only ever reach 'awaiting_gate' for the human.
   daily_max_rounds: 8
-  daily_token_budget: 500000        # PER-SHIFT token guideline
+  daily_token_budget: 500000        # PER-SHIFT token budget (enforced — see enforce_shift_budget)
   # the continuous `run --loop` / autopilot ceilings (HARD brakes for unattended AUTO):
   loop_token_budget: 5000000        # stop after ~5M cumulative output tokens across shifts (0 = unlimited)
   loop_deadline_s: 14400            # …or after 4h wall-clock, whichever first (+ max_shifts=50)
+  # HARD per-shift brake (Task 0.2): once a shift's LEDGERED spend reaches its token_budget,
+  # the rail skips the executor, requeues the claimed work and ends the shift
+  # 'budget_exhausted' (a shift token_budget of 0 = unlimited, matching loop_token_budget).
+  # A BRAKE, not autonomy: defaults true and is deliberately config.yaml-only — never in
+  # SETTINGS_SPEC, so it cannot be flipped off from the board.
+  enforce_shift_budget: true
+  # Task 5.1 — unattended-failure event trigger. When true, a swallowed REAL-mode
+  # graduation/issue-sync error becomes a DEDUPED, conductor-only backlog task (escalate
+  # to @human — the rail cannot fix factory infrastructure) + a factory learning, instead
+  # of vanishing into a log print. New autonomous behavior → defaults OFF.
+  failure_tasks: false
 
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:

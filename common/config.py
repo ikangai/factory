@@ -39,6 +39,11 @@ SETTINGS_SPEC = {
     "super_worker.require_test": bool,
     "super_worker.auto_decompose": bool,
     "super_worker.reviewer": bool,          # Phase 8 (config-gated reviewer role)
+    "super_worker.acceptance_exec": bool,   # Task 3.1 (spec's named acceptance test — a board gate)
+    "super_worker.retry_on_discard": bool,  # Task 3.2 (one informed retry on a gradeable gate-discard)
+    "super_worker.milestone_verify": bool,  # Task 3.3 (independent milestone-delivery grader)
+    "super_worker.investigate_blocked": bool,  # Task 4.1 (post-shift investigator for blocked tasks)
+    "super_worker.dispatch_waves": int,     # Task 5.2 (bounded same-shift second wave: 1=today, 2=one more)
 }
 
 

@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from ..common import mode as modemod
 from ..common.store import Blackboard
+from ..orchestrator import autopilot
 from ..reporting import fleet_viz
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -25,6 +26,7 @@ MAX_MISSION_CHARS = 2000
 
 
 def fleet_state() -> dict:
+    autopilot.restart_if_auto()   # brake-respecting self-heal: revive a crashed runner in AUTO (Task 5.3)
     with Blackboard() as store:
         store.init_db()   # idempotent — a pre-init board shows empty, not a 500
         return fleet_viz.fleet_json(store)

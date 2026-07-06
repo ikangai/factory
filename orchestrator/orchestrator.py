@@ -688,14 +688,21 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
             shutil.rmtree(work, ignore_errors=True)   # throwaway clone never touches the real target
 
 
+# Task 1.1: the reopen provenance marker. Prepended (one line per reopen — they STACK) to the
+# narrowed brief, so the reopen count needs no schema change: count these lines in detail.
+_REOPEN_PREFIX = "previously blocked: "
+_MAX_REOPENS = 2                       # a 3rd reopen is refused → escalate to @human
+
+
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
              source: str = "human", result: str = "", status: Optional[str] = None,
              detail: str = "") -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
     `task add "<title>" [--detail "<spec/brief>"]`, `task claim <id>`,
-    `task done <id> [--result <sha>]`, `task block <id> [--result why]`. claim/done STAMP the
-    running shift, so the loop can tell what a shift shipped (the basis for mission-progress).
-    `--detail` carries the bounded brief/spec to the developer (it used to be dropped)."""
+    `task done <id> [--result <sha>]`, `task block <id> [--result why]`,
+    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1).
+    claim/done STAMP the running shift, so the loop can tell what a shift shipped (the basis
+    for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
             print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
@@ -713,6 +720,38 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
     elif action == "block":
         store.set_task_status(rest, "blocked", result=result)
         print(f"[task] blocked {rest}")
+    elif action == "reopen":
+        # The blocked → narrowed-brief → redispatch loop, without hand-editing tasks.detail.
+        # Exact-id discipline (mirrors cmd_plan's _need_task): a partial/unknown id refuses
+        # loudly — the silent-0-row-success bug class documented on `task claim`.
+        t = store.get_task(rest)
+        if t is None:
+            print(f"[task] no task matches id '{rest}' exactly — pass the full task-<hash> (0 rows)")
+            return
+        if t["status"] != "blocked":
+            print(f"[task] {rest} is not blocked (status={t['status']}) — "
+                  "reopen narrows BLOCKED tasks only (0 rows)")
+            return
+        if not detail:
+            print("[task] reopen requires --detail with the NARROWED brief — redispatching "
+                  "the same brief re-runs the same failure (0 rows)")
+            return
+        # Provenance lines stack newest-first; counting them IS the reopen counter (no schema).
+        prior = [ln for ln in (t.get("detail") or "").splitlines()
+                 if ln.startswith(_REOPEN_PREFIX)]
+        if len(prior) >= _MAX_REOPENS:
+            print(f"[task] {rest} was already reopened {_MAX_REOPENS}x and blocked again — "
+                  "refusing a 3rd reopen; escalate to @human via agora (0 rows)")
+            return
+        reason = " ".join((t.get("result") or "").split()) or "(no reason recorded)"
+        store.set_task_detail(rest, "\n".join([_REOPEN_PREFIX + reason] + prior + [detail]))
+        # The durable spec (target_surface/acceptance) described the OLD brief — left in
+        # place, scope_check would fold the stale spec into the redispatched worker brief,
+        # contradicting the narrowed detail. Clear it; the next scope check re-derives it.
+        store.set_task_spec(rest, None)
+        store.set_task_status(rest, "open", result="")   # result is NOT NULL — clear via ''
+        print(f"[task] reopened {rest} (reopen {len(prior) + 1} of {_MAX_REOPENS}) — "
+              "detail narrowed, status open (1 row)")
 
 
 def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int = 200) -> None:
@@ -874,6 +913,23 @@ def cmd_plan(store: Blackboard, action: str, *, rest: Optional[list] = None,
         if mid is None or store.get_milestone(mid) is None:  # don't print a false success on a
             print(f"[plan] no milestone matches '{rest[0]}' — see `plan list` (0 rows)")  # missing id
             return
+        # Task 3.3: independent milestone-delivery grader (gated OFF). ONLY the 'delivered'
+        # transition is guarded: refuse while any linked task is still unresolved (open/claimed/
+        # in_progress/blocked — 'done' and 'dropped' are BOTH resolved, so a dropped task can never
+        # make delivery unreachable), and refuse an UNVERIFIABLE delivery (total==0 is not trivially
+        # complete). The exact-id refusal names the blocking task ids; the '(unverified)' side is a
+        # render-time label only (roles/conductor.py:_plan_bullets — never stored).
+        if rest[1] == "delivered" and config.resolve_setting(
+                store, "super_worker.milestone_verify", False)[0]:
+            if store.milestone_progress(mid)["total"] == 0:
+                print(f"[plan] milestone M{mid} has NO linked tasks — delivery is UNVERIFIABLE; "
+                      f"link its tasks with `plan link` first (0 rows)")
+                return
+            open_ids = store.milestone_open_task_ids(mid)
+            if open_ids:
+                print(f"[plan] milestone M{mid} not delivered — {len(open_ids)} linked task(s) "
+                      f"still open: {', '.join(open_ids)} (resolve or drop them first) (0 rows)")
+                return
         store.set_milestone_status(mid, rest[1])
         print(f"[plan] milestone M{mid} → {rest[1]} (1 row)")
     elif action == "link":
@@ -993,6 +1049,8 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         max_parallel = _k("max_parallel", 3)            # …run that many super-workers at once
         require_test = _k("require_test", False)         # GSD spec-bound acceptance gate (threaded)
         reviewer = _k("reviewer", False)                 # Phase 8: config-gated pre-merge review gate
+        acceptance_exec = _k("acceptance_exec", False)   # Task 3.1: run the spec's named acceptance test
+        investigate = _k("investigate_blocked", False)   # Task 4.1: post-shift investigator (P6 2-3)
         scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
@@ -1004,7 +1062,8 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
-            require_test=require_test, reviewer=reviewer)
+            require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
+            investigate_blocked=investigate)
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
@@ -1046,32 +1105,118 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
 
 
 def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, content: str = "",
-              scope: str = "general", agent: str = "", limit: int = 20):
-    """`factory learn add [--role R] --content "…"` / `factory learn list [--role R]` — the
-    factory's memory CLI. Agents (the conductor + super-workers via Bash) record durable
-    learnings here; the orchestrator injects them back into each role's prompt via
+              scope: str = "general", agent: str = "", limit: int = 20,
+              learning_id: Optional[str] = None, apply: bool = False):
+    """`factory learn add [--role R] "…"` (or --content "…") / `factory learn list
+    [--role R]` / `factory learn retire <id>` / `factory learn verify` — the factory's
+    memory CLI. The CLI positional is action-routed by main(): add's TEXT arrives here
+    as `content`, retire's id as `learning_id` (Fix 1.3b).
+    Agents (the conductor + super-workers via Bash) record durable learnings here; the
+    orchestrator injects them back into each role's prompt via
     reporting.factory_memory.memory_card. Adds are dedup'd. `add` defaults to the `factory`
-    role; `list` with no role shows EVERY role's learnings. (design:
-    docs/plans/2026-06-27-factory-memory-design.md)"""
+    role; `list` with no role shows EVERY role's learnings. `retire` is the operator's
+    correction handle (archived=1, hidden from every prompt — exact integer id, unknown ids
+    refuse loudly); `verify` is the zero-token staleness check (flags dead file cites,
+    advisory only). (design: docs/plans/2026-06-27-factory-memory-design.md; Task 1.3)"""
     from ..reporting import factory_memory
+    if action == "retire":
+        # Exact-id discipline (mirrors cmd_plan's _need_task): the id is the integer
+        # PRIMARY KEY — anything that isn't one, or doesn't exist, refuses explicitly.
+        # A silent 0-row "success" is the documented `task claim` bug class.
+        try:
+            lid = int(learning_id)                        # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            print(f"[learn] retire needs an integer learning id, got {learning_id!r} — "
+                  "see `factory learn list` (0 rows)")
+            return None
+        row = store.get_learning(lid)
+        if row is None:
+            print(f"[learn] no learning matches id {lid} exactly — "
+                  "see `factory learn list` (0 rows)")
+            return None
+        store.archive_learning(lid)
+        print(f"[learn] retired #{lid} [{row['role']}]: {row['content']} (1 row)")
+        return lid
+    if action == "verify":
+        report = factory_memory.verify_learnings(store)
+        stale = [e for e in report if e["stale"]]
+        for e in stale:
+            print(f"[learn] #{e['id']} [{e['role']}] may be stale — dead cite(s): "
+                  + ", ".join(e["stale_cites"]))
+        print(f"[learn] verified {len(report)} cite-carrying learning(s): "
+              f"{len(stale)} stale, {len(report) - len(stale)} ok "
+              "(advisory — nothing deleted or archived)")
+        return report
     if action == "add":
         role = role or "factory"                          # add defaults to the cross-cutting role
-        lid = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
+        rec = factory_memory.record_learning(store, role, content, agent=agent, scope=scope,
                                              shift_id=store.current_shift_id())
-        if lid is None:
-            print(f"[learn] not recorded (empty or duplicate): {content!r}")
-        else:
+        if rec is None:
+            print(f"[learn] not recorded (empty): {content!r}")
+            return None
+        lid, created = rec
+        if created:
             print(f"[learn] recorded #{lid} for {role}: {content}")
+        else:                                             # dedup-hit → recurrence counted (Task 0.5)
+            hits = (store.get_learning(lid) or {}).get("hits", 1)
+            print(f"[learn] reinforced #{lid} (x{hits}) for {role}: {content}")
         return lid
     if action == "list":
         rows = store.learnings_for_role(role, limit=limit) if role else store.all_learnings(limit)
         if not rows:
             print(f"[learn] no learnings for {role or 'any role'} yet.")
         for r in rows:
-            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}): {r['content']}")
+            mark = (" [archived]" if r.get("archived")
+                    else " [stale?]" if r.get("stale") else "")
+            # Consult-telemetry (Task 1.4): the merged-share of tasks whose worker card
+            # surfaced this row — SUPPRESSED below the minimum denominator (noise floor).
+            eff = factory_memory.effectiveness(r)
+            eff_s = f", eff {eff[0]:.0%} of {eff[1]}" if eff else ""
+            print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}"
+                  f"{eff_s}){mark}: {r['content']}")
         return rows
-    print('[learn] usage: factory learn add --role R --content "…" | factory learn list [--role R]')
+    if action == "distill":
+        # `factory learn distill --role R [--apply]` (Task 4.2, P6 stage 4): consolidate a
+        # role's overlapping lessons into <=5 pinned rules. Dry-run by DEFAULT (proposals
+        # only); --apply is a HUMAN act that inserts scope='distilled', pinned=1 and archives
+        # the sources. SPENDS one standard-tier claude_p; STOP vetoes at entry, spend ledgers
+        # notes='distill'. Fail-open: a bad reply proposes nothing.
+        if not role:
+            print("[learn] distill needs --role R (conductor | developer | researcher | factory)")
+            return None
+        rep = factory_memory.distill_learnings(store, role, apply=apply)
+        proposed = rep.get("proposed") or []
+        if not proposed:
+            print(f"[learn] distill {role}: nothing to consolidate ({rep.get('reason') or 'no rules'})")
+            return rep
+        verb = "APPLIED" if rep.get("applied") else "propose"
+        for p in proposed:
+            src = ", ".join(f"#{s}" for s in p["sources"]) or "(no sources cited)"
+            print(f"[learn] {verb}: {p['rule']}  <- {src}")
+        if rep.get("applied"):
+            print(f"[learn] distilled {len(rep.get('distilled_ids') or [])} pinned rule(s) for "
+                  f"{role}; cited sources archived")
+        else:
+            print(f"[learn] dry-run — re-run `factory learn distill --role {role} --apply` to "
+                  "insert the rules (pinned, scope='distilled') and archive the sources")
+        return rep
+    print('[learn] usage: factory learn add [--role R] "…" | '
+          'factory learn list [--role R] | factory learn retire <id> | factory learn verify | '
+          'factory learn distill --role R [--apply]')
     return None
+
+
+def cmd_eval_gates(store: Blackboard, *, gate: str = "scope") -> dict:
+    """`factory eval-gates [--gate scope]` — replay the hand-authored golden briefs
+    (scenarios/gates/<gate>.jsonl) through the LIVE scope judge and print the per-case
+    + aggregate scorecard (roadmap Task 2.1, P12: the improvement layer's own
+    regression check — run it after every prompt/judge edit). SPENDS TOKENS (one
+    judge call per fixture, hard-capped) so it is an explicit OPERATOR act, never
+    wired into any loop: STOP vetoes at entry, every case's spend ledgers under
+    role='gate_eval' — attributed to the RUNNING shift when one exists (folds into
+    the shift/loop token brakes), with a NULL shift_id on standalone runs."""
+    from ..reporting import gate_eval
+    return gate_eval.run_gate_eval(store, gate=gate, shift_id=store.current_shift_id())
 
 
 def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
@@ -1126,8 +1271,27 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         return graduate_fn(root=root, base=base, repo=repo, store=store,
                            stop_check=stop_check or killswitch.is_halted)
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
-        print(f"[run] graduate+sync skipped (non-fatal error): {e}")
-        return {"action": "error", "error": str(e)}
+        err = str(e)
+        print(f"[run] graduate+sync skipped (non-fatal error): {err}")
+        _maybe_file_graduation_failure(store, err)
+        return {"action": "error", "error": err}
+
+
+def _maybe_file_graduation_failure(store: Blackboard, error: str) -> None:
+    """Task 5.1: when the unattended graduation/issue-sync path fails, turn the swallowed
+    error into a deduped, conductor-only backlog task + a factory learning instead of
+    letting it vanish into a log print. Gated OFF by default (autonomy.failure_tasks) — a
+    passive store write (no LLM, no spend), so no STOP/mode gate is needed: the caller only
+    reaches this path when a shift actually shipped in REAL mode, which STOP already blocks
+    upstream. Never raises — it runs inside the loop-protecting except handler."""
+    try:
+        auton = config.load_config().get("autonomy", {}) or {}
+        if not auton.get("failure_tasks", False):
+            return
+        from ..reporting import factory_memory
+        factory_memory.record_graduation_failure(store, error=error)
+    except Exception as ex:  # noqa: BLE001 — diagnostics must never crash the loop
+        print(f"[run] failure-task filing skipped (non-fatal): {ex}")
 
 
 def _should_idle(store: Blackboard, plateau_k: int) -> bool:
@@ -1290,11 +1454,18 @@ def cmd_issue(action: str, *, title: Optional[str] = None, body: str = "",
 
 
 def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
-            port: int = 8788):
+            port: int = 8788, selfcheck: bool = False):
     """The fleet visualization of the (super) worker instances + activities. `--serve`:
     a LIVE 'mission control' — an animated conductor-loop that shows the active phase, the
     live workers, and the mission's progress, auto-updating while a run is in flight.
+    `--selfcheck`: the deterministic dashboard gate (roadmap Task 0.6) — node --check the
+    inline JS + raw-{PLACEHOLDER}/section scans, no browser, no server, zero tokens.
     Default: write + open a one-shot HTML snapshot (logs/fleet.html)."""
+    if selfcheck:
+        from ..checks import visual_check
+        report = visual_check.check_dashboard()
+        print(visual_check.format_report(report))
+        return report
     if serve:
         from ..dashboard import fleet_server
         return fleet_server.serve(port=port, open_browser=open_browser)
@@ -1322,6 +1493,19 @@ def cmd_research_feed(store: Blackboard, *, prod: bool = False) -> list:
     claude_bin = (sw.get("claude_bin") or "claude") if prod else "claude"   # agent's claude only in prod
     added = research_feed.propose_directions(store, as_user=as_user, claude_bin=claude_bin)
     print(f"[research-feed] proposed {len(added)} new direction(s):")
+    for a in added:
+        print(f"  + {a['id']}: {a['title']}")
+    return added
+
+
+def cmd_research_convert(store: Blackboard) -> list:
+    """Human-triggered: promote vetted staged research briefs (research/staging/*.yaml,
+    status=='staged' + grounded) into the backlog as source='research' tasks, then flip
+    each converted yaml's status to 'converted'. No auto call site — the operator runs this
+    after vetting the staged briefs (auto-refill wiring is a named follow-up)."""
+    from ..roles import research_feed
+    added = research_feed.convert_briefs(store)
+    print(f"[research-convert] converted {len(added)} staged brief(s) to backlog task(s):")
     for a in added:
         print(f"  + {a['id']}: {a['title']}")
     return added
@@ -1459,6 +1643,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     rch.add_argument("--query", default=None)
     rch.add_argument("--max-papers", type=int, default=8)
     rch.add_argument("--max-repos", type=int, default=6)
+    rch_sub = rch.add_subparsers(dest="research_action")   # optional nested action
+    rch_sub.add_parser("convert")   # human-triggered: staged briefs → backlog tasks (Task 5.4)
     sub.add_parser("staging")
     sp = sub.add_parser("show-scenario"); sp.add_argument("id")
     yp = sub.add_parser("synth-check"); yp.add_argument("id")
@@ -1500,14 +1686,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
-    lrn.add_argument("action", choices=["add", "list"])
+    lrn.add_argument("action", choices=["add", "list", "retire", "verify", "distill"])
+    lrn.add_argument("rest", nargs="?", default=None,
+                     help="the learning text (add — same as --content) or the integer "
+                          "learning id (retire — exact id, see `learn list`)")
     lrn.add_argument("--role", default=None,
                      help="conductor | developer | researcher | factory "
-                          "(add defaults to factory; list with no role shows ALL roles)")
+                          "(add defaults to factory; list with no role shows ALL roles; "
+                          "distill REQUIRES one)")
     lrn.add_argument("--content", default="", help="the learning to record (for add)")
     lrn.add_argument("--scope", default="general", help="free tag, e.g. no_candidate / graduation")
     lrn.add_argument("--agent", default="", help="optional agent handle/identity")
     lrn.add_argument("--limit", type=int, default=20)
+    lrn.add_argument("--apply", action="store_true",
+                     help="distill: actually INSERT the consolidated rules (pinned, "
+                          "scope='distilled') and archive the sources — default is DRY-RUN")
+    evg = sub.add_parser("eval-gates")      # golden-case eval of the LLM gates (Task 2.1, P12)
+    evg.add_argument("--gate", choices=["scope"], default="scope",
+                     help="which gate's goldens to replay (decompose/reviewer are follow-ups); "
+                          "SPENDS tokens — one live judge call per fixture")
     iss = sub.add_parser("issue")           # dedup'd issue-filing for the fleet
     iss.add_argument("action", choices=["create"])
     iss.add_argument("--title", required=True)
@@ -1517,10 +1714,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
     viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
     viz.add_argument("--no-open", action="store_true", help="don't open the browser")
+    viz.add_argument("--selfcheck", action="store_true",
+                     help="deterministic dashboard gate: node --check the inline JS + "
+                          "placeholder/section scans; exit 1 on failure (no browser/server)")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
-    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block"])
-    tsk.add_argument("rest", nargs="?", help='title (add) or task id (claim/done/block)')
-    tsk.add_argument("--detail", default="", help="bounded brief/spec for `task add` (target surface + acceptance)")
+    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen"])
+    tsk.add_argument("rest", nargs="?", help='title (add) or FULL task id (claim/done/block/reopen)')
+    tsk.add_argument("--detail", default="",
+                     help="bounded brief/spec for `task add` (target surface + acceptance); "
+                          "the NARROWED brief for `task reopen` (required there)")
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")
@@ -1611,8 +1813,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "mine":
             cmd_mine(store, a.limit)
         elif a.cmd == "research":
-            cmd_research(store, query=a.query, max_papers=a.max_papers,
-                         max_repos=a.max_repos)
+            if getattr(a, "research_action", None) == "convert":
+                cmd_research_convert(store)
+            else:
+                cmd_research(store, query=a.query, max_papers=a.max_papers,
+                             max_repos=a.max_repos)
         elif a.cmd == "staging":
             cmd_staging()
         elif a.cmd == "show-scenario":
@@ -1634,7 +1839,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "research-feed":
             cmd_research_feed(store, prod=a.prod)
         elif a.cmd == "viz":
-            cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port)
+            out = cmd_viz(store, open_browser=not a.no_open, serve=a.serve, port=a.port,
+                          selfcheck=a.selfcheck)
+            if a.selfcheck and not (isinstance(out, dict) and out.get("ok")):
+                return 1                                   # the selfcheck is a GATE
         elif a.cmd == "run":
             if a.loop:
                 cmd_run_loop(store, mission=a.mission, token_budget=a.budget,
@@ -1650,8 +1858,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "graduate":
             cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
-            cmd_learn(store, a.action, role=a.role, content=a.content, scope=a.scope,
-                      agent=a.agent, limit=a.limit)
+            # The learn positional is action-routed (the task-CLI pattern): the learning
+            # TEXT for `add` (--content also works), the integer id for `retire`. Binding
+            # add's text to the id slot silently DROPPED the lesson — the documented
+            # task-add content-drop bug class (Fix 1.3b).
+            cmd_learn(store, a.action, role=a.role,
+                      content=a.content or (a.rest if a.action == "add" else "") or "",
+                      scope=a.scope, agent=a.agent, limit=a.limit,
+                      learning_id=None if a.action == "add" else a.rest,
+                      apply=a.apply)
+        elif a.cmd == "eval-gates":
+            rep = cmd_eval_gates(store, gate=a.gate)
+            if not (isinstance(rep, dict) and rep.get("ok_all")):
+                return 1                               # a failing golden (or STOP) is a GATE
         elif a.cmd == "issue":
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":

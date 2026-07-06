@@ -124,7 +124,7 @@ def test_decompose_no_candidate_ledgers_decomposer_spend(tmp_path):
                                 "_spend": {"tokens": 200, "cost": 0.02}}
         n = scope_check.decompose_no_candidate(s, _task("t", "x"), shift_id=sh, decomposer=decomposer)
         rows = [e for e in s.budget_entries() if e["role_or_run"] == "decompose"]
-    assert n == 1 and len(rows) == 1 and rows[0]["tokens"] == 200 and rows[0]["shift_id"] == sh
+    assert len(n) == 1 and len(rows) == 1 and rows[0]["tokens"] == 200 and rows[0]["shift_id"] == sh
 
 
 def test_scope_judge_attaches_its_spend(monkeypatch):
@@ -149,6 +149,122 @@ def test_decompose_judge_attaches_its_spend(monkeypatch):
     assert obj["_spend"]["seconds"] >= 0          # real duration so timesheets aren't 0-min (#17)
 
 
+# -- Task 0.3: judges grounded in the TARGET repo -----------------------------
+def _capture_super(monkeypatch, reply):
+    """Monkeypatch _load_prompt + claude_super; return the dict claude_super's kwargs
+    land in, so a test can assert which workdir the judge was grounded in."""
+    from factory.roles import common as rcommon
+    calls = {}
+    monkeypatch.setattr(rcommon, "_load_prompt", lambda name: "judge {TASK}")
+
+    def fake_super(prompt, **k):
+        calls.update(k)
+        return (reply, 1, 0.0)
+
+    monkeypatch.setattr(rcommon, "claude_super", fake_super)
+    return calls
+
+
+def _fake_adapter_at(monkeypatch, root: str):
+    from factory.common import config as fconfig
+
+    class FakeAdapter:
+        def entry(self):
+            return (root, root + "/main.py")
+
+    monkeypatch.setattr(fconfig, "get_adapter", lambda cfg=None: FakeAdapter())
+
+
+def test_scope_judge_workdir_is_target_root(monkeypatch, tmp_path):
+    """The scope judge must Read/Grep the TARGET repo it is judging, not the factory."""
+    from factory.common import paths
+    target = tmp_path / "target"
+    target.mkdir()
+    _fake_adapter_at(monkeypatch, str(target))
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"
+    assert calls["workdir"] == str(target)
+    assert calls["workdir"] != str(paths.FACTORY_ROOT)
+
+
+def test_decompose_judge_workdir_is_target_root(monkeypatch, tmp_path):
+    from factory.common import paths
+    target = tmp_path / "target"
+    target.mkdir()
+    _fake_adapter_at(monkeypatch, str(target))
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls["workdir"] == str(target)
+    assert calls["workdir"] != str(paths.FACTORY_ROOT)
+
+
+def test_scope_judge_workdir_falls_back_to_factory_root_on_adapter_error(monkeypatch):
+    """Adapter/config can't resolve → fail-open to FACTORY_ROOT (judge still runs)."""
+    from factory.common import config as fconfig, paths
+
+    def boom(cfg=None):
+        raise RuntimeError("no adapter registered")
+
+    monkeypatch.setattr(fconfig, "get_adapter", boom)
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"                 # the judge itself is unaffected
+    assert calls["workdir"] == str(paths.FACTORY_ROOT)
+
+
+def test_decompose_judge_workdir_falls_back_when_target_missing(monkeypatch, tmp_path):
+    """A configured root that doesn't exist on disk also fails open to FACTORY_ROOT."""
+    from factory.common import paths
+    _fake_adapter_at(monkeypatch, str(tmp_path / "nope"))   # never created
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls["workdir"] == str(paths.FACTORY_ROOT)
+
+
+# -- Task 2.4: scope_check_tier routing knob (cheap-grader pattern) -----------
+def _fake_config(monkeypatch, super_worker: dict):
+    """Pin config.load_config to a fake with a models block + the given super_worker,
+    so scope_judge's resolve_model call is deterministic and hermetic (no config.yaml)."""
+    from factory.common import config as fconfig
+    cfg = {"super_worker": super_worker,
+           "models": {"frontier": "", "standard": "claude-sonnet-4-6", "fast": "claude-haiku-4-5"}}
+    monkeypatch.setattr(fconfig, "load_config", lambda: cfg)
+
+
+def test_scope_judge_threads_resolved_model(monkeypatch):
+    """super_worker.scope_check_tier resolves via resolve_model and is threaded to claude_super."""
+    _fake_config(monkeypatch, {"scope_check_tier": "fast"})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    v = scope_check.scope_judge({"title": "x"})
+    assert v["decision"] == "pass"
+    assert calls["model"] == "claude-haiku-4-5"        # 'fast' resolved DOWN and threaded
+
+
+def test_scope_judge_default_tier_is_frontier_empty_model(monkeypatch):
+    """No scope_check_tier → '' = frontier = account default, byte-for-byte today's call."""
+    _fake_config(monkeypatch, {})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    scope_check.scope_judge({"title": "x"})
+    assert calls["model"] == ""                         # frontier default, no down-tier
+
+
+def test_scope_judge_unknown_tier_fails_open_downward_never_up(monkeypatch):
+    """An unresolvable tier fails open DOWNWARD to standard — never silently up to frontier."""
+    _fake_config(monkeypatch, {"scope_check_tier": "typo-tier"})
+    calls = _capture_super(monkeypatch, '```json\n{"decision":"pass"}\n```')
+    scope_check.scope_judge({"title": "x"})
+    assert calls["model"] == "claude-sonnet-4-6"        # standard, not '' (frontier)
+
+
+def test_decompose_judge_ignores_scope_check_tier(monkeypatch):
+    """The knob is scope_judge-only (separate call path); decompose stays at the account default."""
+    _fake_config(monkeypatch, {"scope_check_tier": "fast"})
+    calls = _capture_super(monkeypatch, '```json\n{"subtasks":[]}\n```')
+    scope_check.decompose_judge({"title": "x"})
+    assert calls.get("model", "") == ""                 # unaffected by scope_check_tier
+
+
 # -- wiring into execute_claimed_tasks ---------------------------------------
 def test_execute_runs_scope_prefilter_when_judge_given(tmp_path):
     from factory.orchestrator import develop as dev
@@ -166,3 +282,13 @@ def test_execute_runs_scope_prefilter_when_judge_given(tmp_path):
                                   scope_judge=lambda t: {"decision": "reject", "reason": "too broad"})
         assert dispatched == []                            # rejected before any worker spun up
         assert s.get_task("task-1")["status"] == "blocked"
+
+
+# -- Task 3.1 correction (c): the scope-check prompt nudges RUNNABLE acceptance refs ----------
+def test_scope_check_prompt_nudges_runnable_test_refs():
+    """The judge should emit acceptance as a runnable `tests/…::name` ref (the objective done-
+    condition the acceptance-exec gate can execute), and must only cite refs it can ground."""
+    from factory.roles import common as rcommon
+    prompt = rcommon._load_prompt("scope_check")
+    assert "tests/<path>.py::<test_name>" in prompt
+    assert "RUNNABLE" in prompt

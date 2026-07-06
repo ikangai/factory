@@ -47,6 +47,9 @@ class FakeAdapter:
     def run_tests(self, repo, **k):
         return (self._tests_passed, "report")
 
+    def run_named_test(self, cwd, ref, **k):
+        self.calls.append(("named", ref)); return getattr(self, "_named", ("passed", "acc ok"))
+
     def merge_branch(self, repo, branch, **k):
         self.calls.append(("merge", branch)); return "MERGESHA"
 
@@ -560,3 +563,833 @@ def test_merged_result_carries_developer_spend(monkeypatch, tmp_path):
                                     grade_fn=_good_grade, label="factory/cand-x")
     assert res["action"] == "merged"
     assert res["tokens"] == 1234 and res["cost"] == 0.05 and res["seconds"] >= 0
+
+
+# ============================================================================
+# Task 0.1 (P11): split the empty-handed-worker collapse — a no-branch run is
+# classified by its reply (timeout / worker_failed / transport / refusal) BEFORE
+# collapsing to no_candidate, so infrastructure failures and refusals stop
+# masquerading as "brief too big" evidence.
+# ============================================================================
+
+def _no_branch_result(monkeypatch, tmp_path, reply):
+    """Run develop_and_merge with a worker that produced NO branch and `reply`."""
+    ad = FakeAdapter(changed=["x"])
+    ad._has_branch = False
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": reply,
+                                                "tokens": 7, "cost": 0.001})
+    return develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"),
+                                     task="t", champion_scores=CHAMP, grade_fn=_good_grade)
+
+
+def test_timeout_sentinel_classifies_error_timeout(monkeypatch, tmp_path):
+    """A worker killed at the 30-min wall is the strongest 'task too big' evidence —
+    it must surface as error(timeout), not a generic no_candidate."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "[claude -p unavailable: Command '['claude', '-p']' timed out after 1800 seconds]")
+    assert res["action"] == "error" and res["stage"] == "timeout"
+    # every new error result carries the learnings/spend keys no_candidate carries
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_rc_sentinel_classifies_error_worker_failed(monkeypatch, tmp_path):
+    """A non-zero rc (incl. max-turns exhaustion) is a worker failure, not scope evidence."""
+    res = _no_branch_result(monkeypatch, tmp_path, "[claude -p super-worker failed: rc=1]")
+    assert res["action"] == "error" and res["stage"] == "worker_failed"
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_unavailable_sentinel_classifies_error_transport(monkeypatch, tmp_path):
+    """A FileNotFoundError-shaped sentinel (no 'timed out') means the brief was NEVER
+    attempted — error(transport), decompose-suppressed downstream."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "[claude -p unavailable: [Errno 2] No such file or directory: 'claude']")
+    assert res["action"] == "error" and res["stage"] == "transport"
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_short_refusal_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """A short reply with a refusal marker near the start + no branch = a refusal —
+    the refusal text rides out in `error` for the blocked reason."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I can't help with modifying this safety-critical code.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+    assert res["error"].startswith("I can't help")
+    assert "learnings" in res
+    assert res["tokens"] == 7 and res["cost"] == 0.001 and res["seconds"] >= 0
+
+
+def test_long_reply_without_markers_stays_no_candidate(monkeypatch, tmp_path):
+    """A genuinely empty-handed worker (long real-work reply, no branch) is today's path."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I explored the codebase. " + "analysis " * 100)
+    assert res["action"] == "no_candidate"
+
+
+def test_long_reply_with_refusal_words_stays_no_candidate(monkeypatch, tmp_path):
+    """A refusal marker buried in a LONG reply is real work, not a refusal."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            ("detailed analysis " * 40) + " I can't help further here.")
+    assert res["action"] == "no_candidate"
+
+
+def test_honest_unable_reply_stays_no_candidate(monkeypatch, tmp_path):
+    """Fix 0.1b: prompt.md tells workers committing nothing is VALID when they 'cannot
+    make a safe, test-passing change' — an honest short 'I'm unable to …' report is
+    genuine no_candidate (decompose-eligible), NOT a refusal. Capability statements
+    ('unable to' without a refusal verb) must not be refusal markers."""
+    res = _no_branch_result(
+        monkeypatch, tmp_path,
+        "I'm unable to make a safe, test-passing change — the brief spans three modules.")
+    assert res["action"] == "no_candidate"
+
+
+def test_must_decline_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """Fix 0.1b: 'I must decline' is explicit refusal phrasing — error(refusal)."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I must decline this brief; it asks me to weaken safety checks.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+
+
+def test_wont_help_reply_classifies_error_refusal(monkeypatch, tmp_path):
+    """Fix 0.1b: 'I won't help' is explicit refusal phrasing — error(refusal)."""
+    res = _no_branch_result(monkeypatch, tmp_path,
+                            "I won't help with disabling the killswitch.")
+    assert res["action"] == "error" and res["stage"] == "refusal"
+
+
+def _exec_one(tmp_path, res_dict, *, decomposer=None):
+    """Run one claimed task through execute_claimed_tasks with a fixed worker result."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("task-1", "big brief", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    develop.execute_claimed_tasks(s, sh, develop_fn=lambda text, **k: dict(res_dict),
+                                  decomposer=decomposer)
+    t = s.get_task("task-1")
+    s.close()
+    return t
+
+
+def test_error_timeout_is_decompose_eligible(tmp_path):
+    """Task 0.1: the decompose trigger extends to error(timeout)."""
+    calls = []
+
+    def dec(task):
+        calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}, {"title": "slice two"}]}
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "timeout",
+                             "error": "[claude -p unavailable: ... timed out after 1800 seconds]"},
+                  decomposer=dec)
+    assert calls == ["task-1"]
+    assert t["status"] == "blocked" and "decomposed into 2" in t["result"]
+
+
+def test_error_worker_failed_is_decompose_eligible(tmp_path):
+    """Task 0.1: the decompose trigger extends to error(worker_failed)."""
+    calls = []
+
+    def dec(task):
+        calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}]}
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "worker_failed",
+                             "error": "[claude -p super-worker failed: rc=1]"},
+                  decomposer=dec)
+    assert calls == ["task-1"]
+    assert t["status"] == "blocked" and "decomposed into 1" in t["result"]
+
+
+def test_error_transport_suppresses_decompose(tmp_path):
+    """A dead transport never attempted the brief — decomposing it is pure spend."""
+    def dec(task):
+        raise AssertionError("the decomposer must not run for a transport failure")
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "transport",
+                             "error": "[claude -p unavailable: [Errno 2] No such file: 'claude']"},
+                  decomposer=dec)
+    assert t["status"] == "blocked" and "(transport)" in t["result"]
+
+
+def test_error_refusal_suppresses_decompose_and_persists_the_reason(tmp_path):
+    """A refusal is not scope evidence: decompose suppressed, and the refusal's first
+    ~300 chars land in the close-out result (180 would clip the diagnosis)."""
+    refusal = "I can't help with this brief. " + "z" * 300      # 330 chars
+
+    def dec(task):
+        raise AssertionError("the decomposer must not run for a refusal")
+
+    t = _exec_one(tmp_path, {"action": "error", "stage": "refusal", "error": refusal},
+                  decomposer=dec)
+    assert t["status"] == "blocked" and "(refusal)" in t["result"]
+    assert "z" * 270 in t["result"]          # exactly the first 300 chars persisted…
+    assert "z" * 271 not in t["result"]      # …and no more
+
+
+def test_error_without_stage_still_blocks_with_reason(tmp_path):
+    """The pre-existing dispatch-error path (no stage) keeps its shape."""
+    t = _exec_one(tmp_path, {"action": "error", "error": "git worktree add failed"})
+    assert t["status"] == "blocked"
+    assert t["result"].startswith("error:") and "git worktree" in t["result"]
+
+
+# ============================================================================
+# Task 2.3 (reviewer + scope-check calibration): gate-outcome scoring.
+# Slice 1 — carry the reviewer verdict out (res['review']) + a reviewer-MISS
+# learning when an APPROVED candidate ends auto_reverted.
+# Slice 2 — a no_candidate whose task carries a scope-check-passed spec scores a
+# scope_check calibration learning (the mirror of the merged-side spec-creep feedback).
+# ============================================================================
+
+def test_reviewer_approve_verdict_rides_out(monkeypatch, tmp_path):
+    """Slice 1: an APPROVE verdict rides out on the merged result as res['review']."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": true, "reason": "fits"}', 40, 0.01))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="add x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged"
+    assert res["review"] == {"approved": True, "reason": "fits"}
+
+
+def test_reviewer_reject_verdict_rides_out(monkeypatch, tmp_path):
+    """Slice 1: a REJECT verdict rides out on the discarded result as res['review']."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p",
+                        lambda prompt, **k: ('{"approve": false, "reason": "off scope"}', 30, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "discarded" and res["stage"] == "review"
+    assert res["review"] == {"approved": False, "reason": "off scope"}
+
+
+def test_fail_open_review_carries_no_verdict(monkeypatch, tmp_path):
+    """Slice 1: a fail-open review (no parseable verdict) carries NO 'review' key — there is
+    no verdict to score, so a reviewer hiccup never fabricates a calibration signal."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    monkeypatch.setattr(common, "claude_p", lambda prompt, **k: ("[claude -p unavailable]", 0, 0.0))
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="t",
+                                    champion_scores=CHAMP, grade_fn=_good_grade, reviewer=True)
+    assert res["action"] == "merged" and "review" not in res
+
+
+def test_reviewer_miss_learning_on_approved_auto_revert(tmp_path):
+    """Slice 1: an APPROVED candidate that then auto-reverts is a reviewer MISS — recorded as
+    a scope='reviewer_calibration' factory learning (a counter/ledger note, never a settings key)."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "auto_reverted", "merge_sha": "m", "revert_sha": "r",
+                                "review": {"approved": True, "reason": "lgtm"}}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert s.get_task("task-1")["status"] == "blocked"
+    miss = [r for r in s.learnings_for_role("factory") if r["scope"] == "reviewer_calibration"]
+    assert len(miss) == 1 and "auto-revert" in miss[0]["content"].lower()
+    s.close()
+
+
+def test_no_reviewer_miss_when_no_review_verdict(tmp_path):
+    """Slice 1: an auto_reverted candidate WITHOUT a reviewer verdict (reviewer off / fail-open)
+    records NO reviewer_calibration learning — a miss requires the reviewer to have approved it."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "auto_reverted", "merge_sha": "m", "revert_sha": "r"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert not any(r["scope"] == "reviewer_calibration" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+def test_no_reviewer_miss_when_approved_candidate_merges(tmp_path):
+    """Slice 1: an APPROVED candidate that MERGES cleanly is not a miss — only auto_reverted is."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "merged", "merge_sha": "m",
+                                "review": {"approved": True, "reason": "lgtm"}}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert s.get_task("task-1")["status"] == "done"
+    assert not any(r["scope"] == "reviewer_calibration" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+def test_scope_miss_recorded_on_no_candidate_with_spec(tmp_path):
+    """Slice 2: a no_candidate whose task carries a spec the scope check PASSED (attached) scores
+    a scope='scope_check' calibration learning — the judge under-rejected a brief too big to land."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    scope = lambda t: {"decision": "pass",
+                       "spec": {"target_surface": "llm.py", "acceptance": "a test"}}
+    dev_fn = lambda text, **k: {"action": "no_candidate"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, scope_judge=scope)
+    assert s.get_task("task-1")["status"] == "blocked"
+    miss = [r for r in s.learnings_for_role("factory")
+            if r["scope"] == "scope_check" and "no_candidate" in r["content"]]
+    assert len(miss) == 1
+    s.close()
+
+
+def test_no_scope_miss_on_no_candidate_without_spec(tmp_path):
+    """Slice 2: a no_candidate with NO spec (nothing proves the scope check passed it) records
+    no scope_check calibration learning — only a passed-spec brief scores the miss."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    dev_fn = lambda text, **k: {"action": "no_candidate"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn)
+    assert not any(r["scope"] == "scope_check" for r in s.learnings_for_role("factory"))
+    s.close()
+
+
+# ============================================================================
+# Task 3.1: execute the spec's named acceptance test (stage='acceptance').
+#   - develop_and_merge threads acceptance_ref into run_code_round (adapter seam);
+#   - execute_claimed_tasks extracts the ref ON THE MAIN THREAD from each task's
+#     spec (only when the acceptance_exec gate is on), surfaces it as a HARD CONTRACT
+#     line in the brief, and counts acceptance_skipped as telemetry at close-out.
+# ============================================================================
+
+def test_develop_and_merge_runs_acceptance_ref(monkeypatch, tmp_path):
+    """acceptance_ref threads through develop_and_merge → run_code_round → adapter.run_named_test."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate",
+                        lambda clone_dir, **k: {"branch": k["branch"], "reply": "did it"})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade,
+                                    acceptance_ref="tests/test_x.py::test_it")
+    assert res["action"] == "merged"
+    assert ("named", "tests/test_x.py::test_it") in ad.calls
+
+
+def test_develop_and_merge_acceptance_red_discards(monkeypatch, tmp_path):
+    """A red named acceptance test discards the candidate at stage 'acceptance' (never merges)."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    ad._named = ("failed", "E assert False")
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade,
+                                    acceptance_ref="tests/test_x.py::test_it")
+    assert res["action"] == "discarded" and res["stage"] == "acceptance"
+    assert "assert False" in res["tests_report"]
+    assert "merge" not in [c[0] for c in ad.calls]
+
+
+def test_develop_and_merge_no_ref_never_runs_named_test(monkeypatch, tmp_path):
+    """No acceptance_ref (gate off / prose spec) → run_named_test is never invoked (today's path)."""
+    ad = FakeAdapter(changed=["src/x.py", "tests/test_x.py"], tests_passed=True)
+    monkeypatch.setattr(common, "develop_candidate", lambda clone_dir, **k: {"branch": k["branch"]})
+    res = develop.develop_and_merge(adapter=ad, main_repo=str(tmp_path / "m"), task="do x",
+                                    champion_scores=CHAMP, grade_fn=_good_grade)
+    assert res["action"] == "merged" and "named" not in [c[0] for c in ad.calls]
+
+
+def _acc_store(tmp_path, spec):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1000)
+    s.add_task("task-1", "do x", source="issue")
+    if spec is not None:
+        s.set_task_spec("task-1", spec)
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_execute_extracts_ref_and_adds_contract_when_gate_on(tmp_path):
+    """Correction (a): with acceptance_exec ON, the rail extracts the spec's ref on the MAIN
+    THREAD, threads it as acceptance_ref, AND surfaces it in the brief as a hard contract line."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "prove: tests/test_x.py::test_it"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, acceptance_exec=True)
+    assert seen["k"]["acceptance_ref"] == "tests/test_x.py::test_it"
+    assert "ACCEPTANCE CONTRACT" in seen["text"] and "tests/test_x.py::test_it" in seen["text"]
+    s.close()
+
+
+def test_execute_no_ref_when_gate_off(tmp_path):
+    """Gate OFF (default): no ref is extracted or threaded, no contract line — byte-for-byte today."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "tests/test_x.py::test_it"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake)      # acceptance_exec defaults off
+    assert seen["k"].get("acceptance_ref") is None
+    assert "ACCEPTANCE CONTRACT" not in seen["text"]
+    s.close()
+
+
+def test_execute_prose_acceptance_yields_no_ref(tmp_path):
+    """Gate ON but the spec's acceptance is prose (no runnable ref) → acceptance_ref None, no
+    contract line — fail-open (the gate simply doesn't run)."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py", "acceptance": "a retry test passes"})
+    seen = {}
+
+    def fake(text, **k):
+        seen["text"] = text
+        seen["k"] = dict(k)
+        return {"action": "merged", "merge_sha": "z"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, acceptance_exec=True)
+    assert seen["k"].get("acceptance_ref") is None
+    assert "ACCEPTANCE CONTRACT" not in seen["text"]
+    s.close()
+
+
+def test_execute_counts_acceptance_skipped_telemetry(tmp_path):
+    """Correction (b): a candidate whose result carries acceptance_skipped records a per-shift
+    'acceptance' factory learning (telemetry-first) — recurrence is counted via the hits column."""
+    s, sh = _acc_store(tmp_path, {"target_surface": "llm.py",
+                                  "acceptance": "tests/test_x.py::test_it"})
+    dev_fn = lambda text, **k: {"action": "merged", "merge_sha": "z",
+                                "acceptance_skipped": "tests/test_x.py::test_it"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, acceptance_exec=True)
+    skips = [r for r in s.learnings_for_role("factory") if r["scope"] == "acceptance"]
+    assert len(skips) == 1
+    assert s.get_task("task-1")["status"] == "done"      # skipped != discarded — it still merged
+    s.close()
+
+
+def test_acceptance_discard_gets_stage_lesson(tmp_path):
+    """A discarded(acceptance) result blocks the task with the acceptance-specific canned lesson."""
+    from factory.reporting import factory_memory
+    s, sh = _acc_store(tmp_path, None)
+    dev_fn = lambda text, **k: {"action": "discarded", "stage": "acceptance",
+                                "tests_report": "E assert False"}
+    develop.execute_claimed_tasks(s, sh, develop_fn=dev_fn, acceptance_exec=True)
+    assert s.get_task("task-1")["status"] == "blocked"
+    assert factory_memory.lesson_for_block("discarded", "acceptance") is not None
+    lessons = [r["content"] for r in s.learnings_for_role("factory") if r["scope"] == "blocked"]
+    assert any("acceptance" in c.lower() for c in lessons)
+    s.close()
+
+
+# ============================================================================
+# Task 3.2: one informed retry on a gradeable gate-discard (maker→grader→retry).
+#   Gate super_worker.retry_on_discard (default OFF, board-toggleable). Attempt 1
+#   discarded at stage in {tests,no_test,acceptance} (NEVER frozen) → retry EXACTLY
+#   once with the failure evidence appended, worded honestly (a prior INDEPENDENT
+#   attempt, a CLEAN base — the prior code is NOT visible). retry_budget_ok is computed
+#   on the MAIN THREAD (shift spend vs the shift's token_budget); tokens/cost/seconds
+#   sum into the SINGLE ledger write.
+# ============================================================================
+
+def _retry_store(tmp_path, *, budget=1000, on=True, pre_spend=0):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=budget)
+    if on:
+        s.set_setting("super_worker.retry_on_discard", "true")   # board toggle → store override
+    if pre_spend:
+        s.add_budget("conductor", pre_spend, shift_id=sh)        # prior shift spend (pre-dispatch)
+    s.add_task("task-1", "big brief", source="issue")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_retry_off_by_default_never_retries(tmp_path):
+    """Gate OFF (default): a discarded(tests) result is NOT retried — one dispatch, blocked."""
+    s, sh = _retry_store(tmp_path, on=False)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "tests", "tests_report": "E assert False"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                   # no retry when the gate is off
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_on_discard_retries_once_and_can_merge(tmp_path):
+    """Gate ON + budget headroom: attempt 1 discarded(tests), attempt 2 merges → done; the
+    worker is dispatched EXACTLY twice (the retry is one-shot, never a loop)."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "tests", "tests_report": "E assert 1 == 2"}
+        return {"action": "merged", "merge_sha": "sha2"}
+
+    shipped = develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert shipped == 1 and len(calls) == 2
+    assert s.get_task("task-1")["status"] == "done" and s.get_task("task-1")["result"] == "sha2"
+    s.close()
+
+
+def test_retry_brief_is_honest_about_the_clean_base(tmp_path):
+    """The retry suffix is worded honestly: an INDEPENDENT prior attempt, its stage + evidence,
+    and a CLEAN base (per operator memory — never imply the prior code is visible)."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "acceptance",
+                    "tests_report": "E   assert retry_ran is True"}
+        return {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    retry_brief = calls[1]
+    assert "independent attempt" in retry_brief.lower()
+    assert "stage=acceptance" in retry_brief
+    assert "clean base" in retry_brief.lower()
+    assert "assert retry_ran is True" in retry_brief          # the failure evidence rides along
+    s.close()
+
+
+def test_retry_never_fires_for_frozen(tmp_path):
+    """A frozen-surface discard is a structural safety veto — NEVER retried (a retry can only
+    re-violate it), even with the gate ON."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "frozen", "violations": ["selfmod/gate.py"]}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                     # frozen is never retried
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_suppressed_when_budget_exhausted(tmp_path):
+    """Brake-honest: retry_budget_ok is computed on the MAIN THREAD from the shift's ledgered
+    spend vs its token_budget — once spend has reached budget, no retry (composes with Task 0.2)."""
+    s, sh = _retry_store(tmp_path, budget=100, pre_spend=200)   # already over budget at dispatch
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        return {"action": "discarded", "stage": "tests", "tests_report": "red"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 1                                       # no second attempt over budget
+    assert s.get_task("task-1")["status"] == "blocked"
+    s.close()
+
+
+def test_retry_sums_spend_into_one_ledger_write(tmp_path):
+    """Both attempts' tokens/cost/seconds sum into the SINGLE developer ledger row for the task."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "tests", "tests_report": "red",
+                    "tokens": 300, "cost": 0.01, "seconds": 2.0}
+        return {"action": "merged", "merge_sha": "s", "tokens": 500, "cost": 0.02, "seconds": 3.0}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    rows = [e for e in s.budget_entries() if e["role_or_run"] == "developer:task-1"]
+    assert len(rows) == 1                                        # ONE ledger write, not two
+    assert rows[0]["tokens"] == 800 and abs(rows[0]["cost"] - 0.03) < 1e-9
+    assert rows[0]["seconds"] == 5.0
+    s.close()
+
+
+def test_retry_no_test_stage_is_retry_eligible(tmp_path):
+    """A no_test discard (source changed, no test shipped) is gradeable → retry-eligible."""
+    s, sh = _retry_store(tmp_path)
+    calls = []
+
+    def fake(text, **k):
+        calls.append(text)
+        if len(calls) == 1:
+            return {"action": "discarded", "stage": "no_test", "why": "changed src, no test"}
+        return {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake, max_parallel=1)
+    assert len(calls) == 2 and s.get_task("task-1")["status"] == "done"
+    s.close()
+
+
+def test_retry_on_discard_is_board_toggleable():
+    """The gate is an operator DIAL (a trial gate, not a brake) → it belongs in SETTINGS_SPEC
+    and ships OFF in config.yaml."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert SETTINGS_SPEC.get("super_worker.retry_on_discard") is bool
+    assert (load_config().get("super_worker") or {}).get("retry_on_discard") is False
+
+
+# ============================================================================
+# Task 5.2 — Bounded second-wave dispatch (same-shift loop-until-dry, 2 waves max).
+#   Gate super_worker.dispatch_waves (1 default = today; 2 = one more pass). AFTER close-out,
+#   if any no_candidate DECOMPOSED this shift AND STOP clear AND headroom under max_tasks AND
+#   shift spend < token_budget AND an EXPLICIT TIME GUARD fits (elapsed + waves×1800s ≤ the
+#   loop-deadline share — the executor has NO wall-clock, only per-worker 1800s timeouts, and
+#   the loop deadline is checked only BETWEEN shifts), claim the new sub-task ids and run ONE
+#   more identical pass with decomposer=None (HARD recursion stop, no wave 3). Wave-2 sub-tasks
+#   inherit the parent's milestone_id so EVM/timesheet attribution survives the rail claiming
+#   the tasks itself. Depends HARD on Task 0.2's enforced shift budget.
+# ============================================================================
+
+def _wave_store(tmp_path, *, waves=2, budget=1_000_000):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=budget)
+    if waves is not None:
+        s.set_setting("super_worker.dispatch_waves", str(waves))   # board toggle → store override
+    s.add_task("task-1", "big brief", source="human")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_second_wave_dispatches_decomposed_subtasks(tmp_path):
+    """dispatch_waves=2 + time/budget headroom: a no_candidate decomposed into 2 sub-tasks →
+    the rail CLAIMS them and runs a second wave in the SAME shift; both ship."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen, dec_calls = [], []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    def dec(task):
+        dec_calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}, {"title": "slice two"}]}
+
+    shipped = develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert any("slice one" in t for t in seen) and any("slice two" in t for t in seen)
+    assert shipped == 2                                   # both wave-2 sub-tasks merged
+    subs = [t for t in s.list_tasks() if t["title"] in ("slice one", "slice two")]
+    assert len(subs) == 2 and all(t["status"] == "done" for t in subs)
+    assert dec_calls == ["task-1"]                        # decomposer ran ONLY in wave 1
+    s.close()
+
+
+def test_second_wave_runs_with_no_decomposer_hard_stop(tmp_path):
+    """Recursion HARD stop: the second wave runs with decomposer=None — a wave-2 sub-task that
+    itself returns no_candidate is NOT decomposed again (no wave 3)."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    dec_calls = []
+
+    def dev_fn(text, **k):
+        return {"action": "no_candidate"}                 # EVERY task comes back empty-handed
+
+    def dec(task):
+        dec_calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert dec_calls == ["task-1"]                        # decomposer NEVER runs in wave 2
+    sub = [t for t in s.list_tasks() if t["title"] == "slice one"][0]
+    assert sub["status"] == "blocked"                     # wave-2 sub-task blocked, not re-split
+    assert len(s.list_tasks()) == 2                       # parent + 1 sub-task; no wave-3 spawn
+    s.close()
+
+
+def test_dispatch_waves_default_one_no_second_wave(tmp_path):
+    """Default (dispatch_waves=1): the no_candidate is still decomposed, but the sub-task is NOT
+    claimed/dispatched — it sits open for a future shift (today's behavior)."""
+    import time
+    s, sh = _wave_store(tmp_path, waves=None)              # no override → config default (1)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert seen == ["big brief"]                           # only the wave-1 parent dispatched
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_without_time_guard(tmp_path):
+    """The EXPLICIT time guard fails CLOSED: with no loop_deadline_s threaded in, wave 2 never
+    runs (the executor must not silently overrun a deadline it can't see)."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=None)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_when_deadline_headroom_insufficient(tmp_path):
+    """Time guard math: elapsed + waves×1800 must fit the loop-deadline share, else skip. Here
+    waves=2 reserves 3600s and the deadline is 3600s with 100s already elapsed → 3700 > 3600."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic() - 100, loop_deadline_s=3600)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_when_budget_exhausted(tmp_path):
+    """Brake-honest (composes with Task 0.2): once the shift's ledgered spend has reached its
+    token_budget, no second wave — the same guard that gates the retry."""
+    import time
+    s, sh = _wave_store(tmp_path, budget=100)
+    s.add_budget("conductor", 200, shift_id=sh)           # already over budget before wave 2
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_vetoed_by_stop(tmp_path):
+    """STOP vetoes everything, including the second wave — tripped on the MAIN thread during
+    close-out (the decomposer engages it), the wave-2 block re-checks and skips."""
+    import time
+    from factory.common import killswitch
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    def dec(task):
+        killswitch.engage("test-stop")                    # trip STOP mid close-out (main thread)
+        return {"subtasks": [{"title": "slice one"}]}
+
+    try:
+        develop.execute_claimed_tasks(
+            s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+            shift_started=time.monotonic(), loop_deadline_s=100_000)
+        assert seen == ["big brief"]                       # wave 1 ran; wave 2 vetoed by STOP
+        assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    finally:
+        killswitch.release()
+    s.close()
+
+
+def test_second_wave_respects_max_tasks_headroom(tmp_path):
+    """Headroom under max_tasks_per_shift: wave 1 used 1 of max_tasks=2 slots, so wave 2 may
+    claim only 1 of the 3 decomposed sub-tasks; the other two stay open."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    def dec(task):
+        return {"subtasks": [{"title": "sub a"}, {"title": "sub b"}, {"title": "sub c"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1, max_tasks=2,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    done = [t for t in s.list_tasks() if t["status"] == "done"]
+    opened = [t for t in s.list_tasks() if t["title"] in ("sub a", "sub b", "sub c") and t["status"] == "open"]
+    assert len(done) == 1 and len(opened) == 2             # only ONE sub-task fit the wave-2 headroom
+    s.close()
+
+
+def test_second_wave_subtasks_inherit_parent_milestone(tmp_path):
+    """Plan-link: wave-2 sub-tasks inherit the parent's milestone_id so EVM/timesheet attribution
+    survives the rail claiming the tasks itself."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    mid = s.add_milestone("M1")
+    s.set_task_milestone("task-1", mid)
+
+    def dev_fn(text, **k):
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    sub = [t for t in s.list_tasks() if t["title"] == "slice one"][0]
+    assert sub["milestone_id"] == mid                      # inherited the parent's plan link
+    s.close()
+
+
+def test_dispatch_waves_is_board_toggleable():
+    """The gate is an operator DIAL (a trial gate, not a brake) → it belongs in SETTINGS_SPEC as
+    an int and ships at 1 (= today) in config.yaml."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert SETTINGS_SPEC.get("super_worker.dispatch_waves") is int
+    assert (load_config().get("super_worker") or {}).get("dispatch_waves") == 1

@@ -23,7 +23,7 @@ def test_add_subtasks_adds_titled_with_folded_spec(tmp_path):
             {"detail": "no title"},                       # skipped (no title)
             {"title": "do y"},
         ])
-        assert n == 2
+        assert len(n) == 2                                # add_subtasks returns the NEW ids (Task 5.2)
         opens = {t["title"]: t for t in s.list_tasks(status="open")}
         assert set(opens) == {"do x", "do y"}
         assert "a.py" in opens["do x"]["detail"] and "test a" in opens["do x"]["detail"]
@@ -32,8 +32,8 @@ def test_add_subtasks_adds_titled_with_folded_spec(tmp_path):
 
 def test_add_subtasks_empty_is_zero(tmp_path):
     with _store(tmp_path) as s:
-        assert scope_check.add_subtasks(s, []) == 0
-        assert scope_check.add_subtasks(s, None) == 0
+        assert scope_check.add_subtasks(s, []) == []
+        assert scope_check.add_subtasks(s, None) == []
 
 
 # -- decompose_no_candidate --------------------------------------------------
@@ -42,7 +42,7 @@ def test_decompose_splits_and_records_learning(tmp_path):
         sh = s.start_shift(token_budget=1000)
         decomposer = lambda t: {"subtasks": [{"title": "part one"}, {"title": "part two"}]}
         n = scope_check.decompose_no_candidate(s, _task(), shift_id=sh, decomposer=decomposer)
-        assert n == 2
+        assert len(n) == 2                                # decompose_no_candidate returns the NEW ids
         assert {"part one", "part two"} <= {t["title"] for t in s.list_tasks(status="open")}
         assert any("decompos" in r["content"].lower() for r in s.learnings_for_role("factory"))
 
@@ -51,7 +51,7 @@ def test_decompose_empty_returns_zero(tmp_path):
     with _store(tmp_path) as s:
         sh = s.start_shift(token_budget=1000)
         assert scope_check.decompose_no_candidate(s, _task(), shift_id=sh,
-                                                  decomposer=lambda t: {"subtasks": []}) == 0
+                                                  decomposer=lambda t: {"subtasks": []}) == []
 
 
 def test_decompose_judge_error_returns_zero(tmp_path):
@@ -61,7 +61,7 @@ def test_decompose_judge_error_returns_zero(tmp_path):
         def boom(t):
             raise RuntimeError("llm down")
 
-        assert scope_check.decompose_no_candidate(s, _task(), shift_id=sh, decomposer=boom) == 0
+        assert scope_check.decompose_no_candidate(s, _task(), shift_id=sh, decomposer=boom) == []
 
 
 # -- wiring into execute_claimed_tasks ---------------------------------------

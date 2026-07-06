@@ -26,23 +26,83 @@ CONDUCTOR_TOOLS = ("Read", "Bash", "Grep", "Glob", "Task", "Workflow", "Skill") 
 # not shift-level, and would violate the shifts.status CHECK constraint.
 _VALID_SHIFT_STATUS = {"completed", "halted", "timed_out", "budget_exhausted", "error"}
 
+# Task 1.2: the sectioned resume note's (json_key, label) pairs, in render order.
+_RESUME_SECTIONS = (("verified", "VERIFIED"), ("open", "OPEN FAILURES"), ("next", "NEXT"))
+
+
+def _fold_resume_note(note) -> str:
+    """Task 1.2 (P7 structure at the write site): the conductor MAY return resume_note as
+    an object with optional verified/open/next keys — fold it into one labeled block
+    (VERIFIED/OPEN FAILURES/NEXT lines) for the existing shifts.resume_note column. A bare
+    string passes through unchanged (fail-open floor = status quo); the abnormal end paths
+    (transport sentinel above, shift timeout/error, crash-reap) never reach this parse.
+    A dict with no usable sections (or an explicit null) degrades to '' — never a
+    stringified '{}'/'None' in the next shift's {RESUME} seam."""
+    if not isinstance(note, dict):
+        return note if isinstance(note, str) else ("" if note is None else str(note))
+    lines = []
+    for key, label in _RESUME_SECTIONS:
+        v = note.get(key)
+        if isinstance(v, (list, tuple)):                # plural facts → one '; '-joined line
+            v = "; ".join(str(x).strip() for x in v if str(x).strip())
+        v = str(v).strip() if v is not None else ""
+        if v:
+            lines.append(f"{label}: {v}")
+    return "\n".join(lines)
+
 
 def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
+def _evm_header(store) -> str:
+    """Task 1.5: one EVM header line for the {PLAN} seam — CPI (earned ÷ actual tokens),
+    percent complete, overhead share of the whole ledger. This is the factory's only
+    cost-efficiency signal, and until now nothing automated consumed it; this routes it to
+    the one decision-maker who can react (shrink scope/estimates — the contract sentence).
+    Fail-open (advisory line, never a gate): evm() raising, or a zero-spend ledger (fresh
+    store — CPI/overhead are undefined-or-noise with nothing spent), returns '' and the
+    seam renders exactly as before."""
+    try:
+        from ..reporting import evm as evm_mod
+        snap = evm_mod.evm(store)
+        overhead = int(snap.get("overhead_tokens") or 0)
+        total = int(snap.get("ac_tokens") or 0) + overhead      # conservation: the whole ledger
+        if total <= 0:
+            return ""
+        cpi, pct = snap.get("cpi"), snap.get("percent_complete")
+    except Exception:
+        return ""
+    cpi_s = f"CPI {cpi:.2f}" if cpi is not None else "CPI n/a"  # None = no attributed spend yet
+    pct_s = f"{pct:.0%} complete" if pct is not None else "completion n/a"   # None = no PV baseline
+    return f"EVM: {cpi_s} | {pct_s} | overhead {overhead / total:.0%} of spend"
+
+
 def _plan_bullets(store) -> str:
-    """Render the plan for the {PLAN} seam: per-milestone progress, budget, and — the signal
-    the conductor revises the plan against (Task 2.4) — the linked tasks' estimated vs ACTUAL
-    tokens (`./bin/factory timesheet` has the per-engagement breakdown)."""
+    """Render the plan for the {PLAN} seam: the EVM header (Task 1.5), then per-milestone
+    progress, budget, and — the signal the conductor revises the plan against (Task 2.4) —
+    the linked tasks' estimated vs ACTUAL tokens (`./bin/factory timesheet` has the
+    per-engagement breakdown)."""
     ms = store.list_milestones()
     if not ms:
         return "(no plan yet — draft 2-4 milestones with `./bin/factory plan add …`)"
     lines = []
+    header = _evm_header(store)
+    if header:
+        lines.append(header)
+    verify_on = bool(config.resolve_setting(store, "super_worker.milestone_verify", False)[0])
     for m in ms:
         p = store.milestone_progress(m["id"])
         e = store.milestone_effort(m["id"])
-        line = (f"- M{m['id']} [{m['status']}] {m['title']} — {p['done']}/{p['total']} tasks, "
+        # Task 3.3 (c): DERIVE '(unverified)' at render time for a milestone that reads
+        # 'delivered' but no longer verifies (no linked tasks, or one still unresolved). The
+        # milestones.status CHECK has no such value and no detail column, so this label is NEVER
+        # stored — it is a truthful render only, and only when the grader gate is engaged.
+        status = m["status"]
+        if verify_on and status == "delivered" and (
+                p["total"] == 0 or store.milestone_open_task_ids(m["id"])):
+            status = "delivered (unverified)"
+        line = (f"- M{m['id']} [{status}] {m['title']} — {p['done']}/{p['total']} tasks, "
                 f"budget {m['budget_tokens']:,} tok, "
                 f"est {e['est_tokens']:,} vs actual {e['actual_tokens']:,} tok")
         if m.get("deliverable"):
@@ -88,6 +148,15 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
         lambda t: f"- [{t['source']}{('/' + t['source_ref']) if t['source_ref'] else ''}] "
                   f"{t['id']}: {t['title']}",
         "(empty — mine new work from the target's issues + research)")
+    # Task 1.1: the {BLOCKED} seam. The backlog above injects status='open' ONLY, so blocked
+    # outcomes never reached the prompt — this guarantees the freshest failures (with the
+    # reason each blocked) are prompt input, newest-first. Reasons are whitespace-collapsed
+    # before the slice (blocked results can carry multi-line refusal text, Task 0.1) so each
+    # task stays ONE bullet line — matching the reopen provenance path.
+    blocked = _bullets(
+        store.recent_blocked_tasks(limit=8),
+        lambda t: f"- {t['id']}: {t['title']} — {' '.join((t['result'] or '').split())[:160]}",
+        "(none blocked — nothing to reopen)")
     digests = _bullets(store.unconsumed_digests(), lambda d: f"- {d['summary']}", "(none)")
     target = mission.get("target_repo") or config.target_repo_slug()   # robust fallback if unset
     issues = fetch_issues(target) or "(none fetched)"
@@ -100,6 +169,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{MEMORY}", factory_memory.memory_card(store, "conductor"))
             .replace("{ISSUES}", issues)
             .replace("{BACKLOG}", backlog)
+            .replace("{BLOCKED}", blocked)
             .replace("{PLAN}", _plan_bullets(store))
             .replace("{WORKERS}", _workers_bullets(store))
             .replace("{DIGESTS}", digests))
@@ -141,5 +211,5 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         status = "completed"                 # (blockers live in the report + mission_status)
     return {"status": status,
             "report": obj.get("report") or reply[:2000],
-            "resume_note": obj.get("resume_note", ""),
+            "resume_note": _fold_resume_note(obj.get("resume_note", "")),
             "tokens_used": tokens}

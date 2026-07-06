@@ -1,8 +1,12 @@
 """The research feed (design step 4): a web researcher proposes bounded directions toward
 the mission, de-duped against the backlog, landing as source='research' tasks; consuming
 the shipped digests closes the research<->dev loop. Hermetic — claude_super injected."""
-import pytest
+import os
 
+import pytest
+import yaml
+
+from factory.common import paths
 from factory.common.store import Blackboard
 from factory.research import focus
 from factory.roles import common, research_feed
@@ -160,3 +164,79 @@ def test_propose_directions_tolerates_a_junk_reply(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
         s.set_mission("m")
         assert research_feed.propose_directions(s) == []          # parses to nothing → no tasks, no crash
+
+
+# --- Task 5.4: staged-brief → backlog converter -----------------------------
+
+def _write_brief(dir_, name, **fields):
+    """Drop a research-staging yaml (hermetic: dir_ is a tmp, never the real staging)."""
+    path = os.path.join(dir_, f"{name}.yaml")
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(fields, fh, sort_keys=False, allow_unicode=True)
+    return path
+
+
+def _read_status(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return (yaml.safe_load(fh) or {}).get("status")
+
+
+def test_convert_briefs_staged_clean_adds_task_and_flips_yaml(tmp_path, monkeypatch):
+    """A staged, grounded brief becomes a source='research' backlog task and its yaml
+    flips to 'converted' so a re-run never re-adds it."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(paths, "RESEARCH_STAGING_DIR", str(staging))
+    p = _write_brief(str(staging), "rb-aaa", id="rb-aaa", status="staged",
+                     title="add locate-before-edit skill",
+                     suggested_change="hypothesis first", rationale="fewer flails",
+                     arxiv_id="2606.24820")
+
+    with _store(tmp_path) as s:
+        added = research_feed.convert_briefs(s)
+        assert [a["title"] for a in added] == ["add locate-before-edit skill"]
+        tasks = [t for t in s.list_tasks(status="open") if t["source"] == "research"]
+        assert [t["title"] for t in tasks] == ["add locate-before-edit skill"]
+    assert _read_status(p) == "converted"
+
+
+def test_convert_briefs_provenance_warning_is_skipped_and_untouched(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(paths, "RESEARCH_STAGING_DIR", str(staging))
+    p = _write_brief(str(staging), "rb-bad", id="rb-bad", status="staged",
+                     title="ungrounded idea", suggested_change="do a thing",
+                     provenance_warning="citation not among fetched papers — verify")
+
+    with _store(tmp_path) as s:
+        added = research_feed.convert_briefs(s)
+        assert added == []
+        assert s.list_tasks(status="open") == []
+    assert _read_status(p) == "staged"          # untouched — operator must verify first
+
+
+def test_convert_briefs_already_converted_is_skipped(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(paths, "RESEARCH_STAGING_DIR", str(staging))
+    _write_brief(str(staging), "rb-done", id="rb-done", status="converted",
+                 title="already promoted", suggested_change="x")
+
+    with _store(tmp_path) as s:
+        assert research_feed.convert_briefs(s) == []
+        assert s.list_tasks(status="open") == []
+
+
+def test_convert_briefs_dedupes_against_open_backlog(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(paths, "RESEARCH_STAGING_DIR", str(staging))
+    p = _write_brief(str(staging), "rb-dup", id="rb-dup", status="staged",
+                     title="Fix Dead-Pane Detection", suggested_change="x")
+
+    with _store(tmp_path) as s:
+        s.add_task("t1", "fix dead-pane detection", source="issue")   # already in backlog
+        added = research_feed.convert_briefs(s)
+        assert added == []                                            # case-insensitive dup dropped
+        assert len(s.list_tasks(status="open")) == 1
+    assert _read_status(p) == "staged"          # not converted — nothing was added

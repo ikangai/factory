@@ -130,3 +130,60 @@ def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,
     for dg in digests:                                    # well-formed result → close the loop
         store.mark_digest_consumed(dg["id"])
     return added
+
+
+def _brief_detail(b: dict) -> str:
+    """Fold a staged brief's operator-facing fields into a task detail (best-effort)."""
+    parts: list[str] = []
+    if b.get("suggested_change"):
+        parts.append(str(b["suggested_change"]).strip())
+    if b.get("rationale"):
+        parts.append("Rationale: " + str(b["rationale"]).strip())
+    cite = b.get("arxiv_id") or b.get("repo") or b.get("url")
+    if cite:
+        parts.append(f"Source: {cite}")
+    return "\n\n".join(parts)
+
+
+def convert_briefs(store) -> list[dict]:
+    """Human-triggered: promote vetted staged research briefs into the backlog.
+
+    For each research/staging/*.yaml with status=='staged' and NO provenance_warning,
+    add a source='research' task (backlog-title de-duped, mirroring propose_directions'
+    open-task-title dedup), then flip that yaml's status to 'converted' so a re-run won't
+    re-add it. Ungrounded (provenance_warning) or already-converted briefs are left
+    untouched. Best-effort per file: a single unreadable/malformed brief drops only
+    itself. Returns the tasks added. No auto call site — the operator invokes it."""
+    import glob
+    import os
+
+    import yaml
+
+    existing = {t["title"].strip().lower() for t in store.list_tasks(status="open")}
+    added: list[dict] = []
+    for path in sorted(glob.glob(os.path.join(paths.RESEARCH_STAGING_DIR, "*.yaml"))):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                b = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(b, dict):
+            continue
+        if b.get("status") != "staged":               # only un-converted, operator-staged briefs
+            continue
+        if b.get("provenance_warning"):               # ungrounded → operator must verify first
+            continue
+        title = (b.get("title") or b.get("technique") or "").strip()
+        if not title or title.lower() in existing:     # skip blanks + backlog duplicates
+            continue
+        tid = f"task-{uuid.uuid4().hex[:8]}"
+        store.add_task(tid, title, source="research", detail=_brief_detail(b))
+        existing.add(title.lower())
+        added.append({"id": tid, "title": title})
+        b["status"] = "converted"                      # so a re-run won't re-add this brief
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(b, fh, sort_keys=False, allow_unicode=True)
+        except OSError:                                # rewrite raced/failed — title-dedup still guards
+            continue
+    return added

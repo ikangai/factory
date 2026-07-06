@@ -16,9 +16,27 @@ design: docs/plans/2026-06-27-gsd-spec-driven-integration.md
 """
 from __future__ import annotations
 
+import os
 import uuid
 
 DECISIONS = ("pass", "split", "reject")
+
+
+def _target_root() -> str:
+    """Resolve the TARGET repo's root via the adapter (as develop.py does), so the judges
+    Read/Grep the codebase they are judging — the prompt says "you are looking at the target
+    repo", and until Task 0.3 both judges ran against the factory instead. The judges are
+    Read/Grep/Glob-only, so grounding them in the operator's checkout is safe. Fail-open to
+    FACTORY_ROOT when the adapter/config can't resolve (or the root doesn't exist on disk):
+    a mis-grounded judge beats a dead one."""
+    from ..common import config, paths
+    try:
+        root = os.path.abspath(config.get_adapter().entry()[0])
+        if os.path.isdir(root):
+            return root
+    except Exception:  # noqa: BLE001 — fail open
+        pass
+    return str(paths.FACTORY_ROOT)
 
 
 def _ledger_judge_spend(store, raw, role: str, notes: str, shift_id) -> None:
@@ -72,7 +90,7 @@ def prefilter(store, tasks: list[dict], *, shift_id, judge) -> list[dict]:
                 store, "factory", f"a task was scope-rejected before dispatch — {reason}",
                 scope="scope_check", shift_id=shift_id)
         elif v["decision"] == "split":
-            n = add_subtasks(store, v["subtasks"])    # source='worker' + spec folded into detail
+            n = len(add_subtasks(store, v["subtasks"]))   # source='worker' + spec folded into detail
             store.set_task_status(
                 t["id"], "blocked",
                 result=f"scope-split into {n}: {v['reason']}"[:200],
@@ -161,11 +179,14 @@ def spec_fulfillment(spec, changed_paths) -> tuple[bool, str]:
     return True, ""
 
 
-def add_subtasks(store, subtasks) -> int:
+def add_subtasks(store, subtasks, *, milestone_id=None) -> list[str]:
     """Add the titled sub-tasks as OPEN tasks (source='worker' to satisfy the tasks.source
-    CHECK) with each one's spec folded into its detail. Returns the count added. Shared by the
+    CHECK) with each one's spec folded into its detail. Returns the list of NEW task ids (Task
+    5.2 threads them into the bounded second wave). When `milestone_id` is given each sub-task
+    INHERITS it — so wave-2 sub-tasks stay plan-linked to their parent's milestone and
+    EVM/timesheet attribution survives the rail claiming the tasks itself. Shared by the
     scope-check `split` path and no_candidate decomposition."""
-    n = 0
+    ids: list[str] = []
     for s in (subtasks if isinstance(subtasks, list) else []):   # a non-list (LLM drift) → []
         if not (isinstance(s, dict) and (s.get("title") or "").strip()):
             continue
@@ -173,39 +194,44 @@ def add_subtasks(store, subtasks) -> int:
             "target_surface": s.get("target_surface", ""), "acceptance": s.get("acceptance", ""),
             "out_of_scope": s.get("out_of_scope", "")}.items() if v}
         detail = (s.get("detail", "") or "").strip() + spec_detail_suffix(spec)
-        store.add_task(f"task-{uuid.uuid4().hex[:8]}", s["title"].strip(),
+        tid = f"task-{uuid.uuid4().hex[:8]}"
+        store.add_task(tid, s["title"].strip(),
                        source="worker", detail=detail, spec=spec)   # typed spec (GSD #2)
-        n += 1
-    return n
+        if milestone_id is not None:                             # Task 5.2: inherit the plan link
+            store.set_task_milestone(tid, milestone_id)
+        ids.append(tid)
+    return ids
 
 
-def decompose_no_candidate(store, task: dict, *, shift_id, decomposer) -> int:
+def decompose_no_candidate(store, task: dict, *, shift_id, decomposer) -> list[str]:
     """A worker returned no_candidate (the brief was too big to land). Split it into a
-    sequenced chain of single-surface sub-tasks (open, source='worker') and return the count
-    added — turning the failure into forward progress. `decomposer(task) -> raw {subtasks:…}`
-    is injected (production: one LLM call). Returns 0 on a decomposer error or empty result,
-    so the caller falls back to the canned no_candidate lesson. Fail-safe."""
+    sequenced chain of single-surface sub-tasks (open, source='worker') and return their NEW
+    ids — turning the failure into forward progress AND handing the ids to Task 5.2's bounded
+    second wave. The sub-tasks inherit the parent's milestone_id (plan-link). `decomposer(task)
+    -> raw {subtasks:…}` is injected (production: one LLM call). Returns [] on a decomposer error
+    or empty result, so the caller falls back to the canned no_candidate lesson. Fail-safe."""
     try:
         raw = decomposer(task)
     except Exception:                                  # noqa: BLE001 — never block the close-out
-        return 0
+        return []
     _ledger_judge_spend(store, raw, "decompose", "decompose judge", shift_id)
-    n = add_subtasks(store, raw.get("subtasks") if isinstance(raw, dict) else None)
-    if n:
+    ids = add_subtasks(store, raw.get("subtasks") if isinstance(raw, dict) else None,
+                       milestone_id=task.get("milestone_id"))
+    if ids:
         from . import factory_memory
         factory_memory.record_learning(
             store, "factory",
             "a no_candidate brief was auto-decomposed into smaller single-surface sub-tasks — "
             "write tasks that small up front to skip the wasted worker run",
             scope="decompose", shift_id=shift_id)
-    return n
+    return ids
 
 
 def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     """Production decomposer: one LLM call over roles/decompose/prompt.md → a raw dict with a
     `subtasks` chain. Returns {} on any failure so decompose_no_candidate falls back."""
     from ..roles import common
-    from ..common import config, paths
+    from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("decompose").replace("{TASK}", text)
@@ -213,7 +239,7 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
-            prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
+            prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("decompose_max_turns", 8)),
             timeout=int(sw.get("decompose_timeout_s", 240)))
@@ -230,7 +256,7 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     """Production judge: one cheap LLM call over roles/scope_check/prompt.md → a raw verdict
     dict (parsed). Returns {} on any failure so prefilter fails open."""
     from ..roles import common
-    from ..common import config, paths
+    from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
     text = task.get("title", "") + ((": " + task["detail"]) if task.get("detail") else "")
     prompt = common._load_prompt("scope_check").replace("{TASK}", text)
@@ -238,10 +264,15 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     t0 = time.monotonic()
     try:
         reply, t, c = common.claude_super(
-            prompt, workdir=paths.FACTORY_ROOT, allowed_tools=("Read", "Grep", "Glob"),
+            prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("scope_check_max_turns", 6)),
-            timeout=int(sw.get("scope_check_timeout_s", 180)))
+            timeout=int(sw.get("scope_check_timeout_s", 180)),
+            # Task 2.4 cheap-grader knob: '' = today's frontier (byte-for-byte). resolve_model
+            # fails open DOWNWARD to `standard` on an unknown tier — never silently up to frontier.
+            # decompose_judge is a SEPARATE call path and is deliberately NOT threaded (spec: scope
+            # only). config.yaml-only (no store handle here), so it stays out of SETTINGS_SPEC.
+            model=config.resolve_model(sw.get("scope_check_tier") or ""))
         obj = common._parse_obj(reply)
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fail open

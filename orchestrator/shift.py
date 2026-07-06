@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from ..common import killswitch
+from ..common import config, killswitch
 
 
 def run_shift(store, *, token_budget: int, conductor: Callable, executor: Optional[Callable] = None,
@@ -66,17 +66,35 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
         return {"action": "error", "shift_id": sh, "reaped": len(reaped), "shipped": 0,
                 "tokens_used": spent}
 
+    # THE PER-SHIFT TOKEN BRAKE (Task 0.2): budget_exhausted was schema-legal but nothing
+    # enforced it — a decorative brake. Check the LEDGERED spend after the conductor plans,
+    # BEFORE the executor dispatches (the workers are the expensive part). token_budget == 0
+    # means unlimited (the loop_token_budget convention). The knob defaults ON and lives in
+    # config.yaml ONLY — a brake must not be board-toggleable, so it is NOT in SETTINGS_SPEC.
+    enforce = bool((config.load_config().get("autonomy") or {}).get("enforce_shift_budget", True))
+    spent = int(store.shift_spend(sh)["tokens"])
+    budget_hit = enforce and token_budget > 0 and spent >= token_budget
+
     # EXECUTE the tasks the conductor claimed — deterministically, here, not via the
     # conductor's Bash (which would background + orphan the long dispatch in a headless -p).
     shipped = 0
-    if executor is not None and not killswitch.is_halted():
+    if executor is not None and not budget_hit and not killswitch.is_halted():
         try:
             shipped = executor(store, shift_id=sh) or 0
         except Exception:  # noqa: BLE001 — a dispatch failure mustn't sink the shift record
             shipped = 0
 
-    # A STOP that tripped DURING the shift overrides the conductor's own status.
-    status = "halted" if killswitch.is_halted() else outcome.get("status", "completed")
+    # A STOP that tripped DURING the shift overrides everything, including the budget brake.
+    status = ("halted" if killswitch.is_halted()
+              else "budget_exhausted" if budget_hit
+              else outcome.get("status", "completed"))
+    # The budget note is APPENDED to the conductor's own resume note, never replacing it —
+    # the next shift's {RESUME} seam needs both the plan context AND the brake reason.
+    resume_note = outcome.get("resume_note", "")
+    if budget_hit:
+        note = (f"budget exhausted: spent {spent} of {token_budget} tokens before dispatch — "
+                f"executor skipped, claimed tasks requeued")
+        resume_note = f"{resume_note}\n{note}" if resume_note else note
     # Requeue anything STILL in-flight (the executor closes what it ran; this rescues a task
     # the conductor claimed but the executor didn't reach / a crash left dangling).
     store.requeue_shift_tasks(sh)
@@ -87,7 +105,7 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     ledgered = store.shift_spend(sh)["tokens"]
     tokens_total = max(int(outcome.get("tokens_used", 0)), int(ledgered))
     store.end_shift(sh, status=status, report=outcome.get("report", ""),
-                    resume_note=outcome.get("resume_note", ""),
+                    resume_note=resume_note,
                     tokens_used=tokens_total)
     return {"action": status, "shift_id": sh, "reaped": len(reaped), "shipped": shipped,
             "tokens_used": tokens_total}   # for the loop's cumulative ceiling

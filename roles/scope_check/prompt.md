@@ -17,7 +17,11 @@ Return exactly ONE verdict:
 - **pass** — this is a single bounded change a worker can land + test in one shot. Emit a
   `spec` that sharpens it: the ONE `target_surface` (file or tight area to stay within), the
   `acceptance` (the concrete, observable thing that proves it's done — ideally a test), and
-  optionally `out_of_scope`.
+  optionally `out_of_scope`. Prefer writing `acceptance` as a **RUNNABLE pytest ref** —
+  `tests/<path>.py::<test_name>` — because the factory can then EXECUTE it as the objective
+  done-condition (a prose acceptance is not runnable). Only name a ref you have actually
+  grounded: you can Read the target here, so cite an existing test to extend, or a new
+  `tests/…` path that plainly fits the target's layout — never invent a path you can't verify.
 - **split** — the brief bundles **more than one** independent change (multiple files/features,
   an "and", a refactor + a feature). Emit `subtasks`: each a single bounded change, sequenced
   smallest-first, with a one-line `title` and a `detail`. The factory will queue them and the

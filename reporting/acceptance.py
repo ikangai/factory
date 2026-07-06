@@ -15,9 +15,52 @@ design: docs/plans/2026-06-27-gsd-spec-driven-integration.md
 """
 from __future__ import annotations
 
+import re
+from typing import Optional
+
 _TEST_SUFFIXES = ("_test.py", ".test.js", ".test.ts", ".test.jsx", ".test.tsx",
                   ".spec.js", ".spec.ts", "_test.go", "_test.rb")
 _SOURCE_SUFFIXES = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb")
+
+# Task 3.1: pull a RUNNABLE pytest ref out of a spec's free-text `acceptance` string — the
+# named acceptance test the acceptance-exec gate executes in the candidate. CONSERVATIVE +
+# safe-charset (a whitelist of [A-Za-z0-9_./-] in the path, [A-Za-z0-9_] in node-id segments)
+# so an injected/odd token can never form a ref, and prose ("a retry test passes") yields None
+# (fail-open — the gate simply doesn't run rather than fabricate a red). The ref must be under
+# tests/, end in .py (NOT .pyc — the negative lookahead rejects a longer extension), and may
+# carry a pytest node id (::TestClass::test_method).
+#
+# The safe charset includes '.' and '/' (needed for tests/sub/dir/test_x.py), so a '..' segment
+# can still COMPOSE from those chars — and pytest resolves a file-path arg by filesystem
+# traversal (it does NOT confine args to rootdir), so 'tests/../../x.py' would import/execute a
+# module OUTSIDE the candidate's tests/ (with enough '..', outside cand_repo into the operator's
+# tree = arbitrary code execution). The `_has_traversal` post-check rejects any '..' path
+# segment so the whitelist truly "can't be walked out of tests/".
+_TEST_REF_RE = re.compile(
+    r"(?<![\w./-])(tests/[A-Za-z0-9_./-]+\.py(?![A-Za-z0-9_])(?:::[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*)?)")
+
+
+def _has_traversal(ref: str) -> bool:
+    """True if `ref`'s FILE PATH (the part before any '::' node id) contains a '..' segment —
+    a directory literally NAMED with dots (e.g. 'a..b') is fine, only the exact '..' segment
+    escapes the dir. Backslashes are normalized so a Windows-style separator can't hide one."""
+    path = ref.split("::", 1)[0].replace("\\", "/")
+    return ".." in path.split("/")
+
+
+def extract_test_ref(acceptance) -> Optional[str]:
+    """Extract a conservative `tests/<path>.py[::<name>[::<name>]]` pytest ref from a spec's
+    free-text `acceptance` (a str, or a spec dict whose 'acceptance' is read) — or None when the
+    text is prose / names no safe tests/ ref (fail-open). Never returns a partial/unsafe token,
+    and never a '..' traversal ref that would resolve outside the candidate's tests/ dir."""
+    if isinstance(acceptance, dict):
+        acceptance = acceptance.get("acceptance", "")
+    if not isinstance(acceptance, str) or not acceptance:
+        return None
+    m = _TEST_REF_RE.search(acceptance)
+    if not m or _has_traversal(m.group(1)):
+        return None
+    return m.group(1)
 
 
 def _norm(path: str) -> str:
