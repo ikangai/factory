@@ -258,6 +258,10 @@ autonomy:
   # the continuous `run --loop` / autopilot ceilings (HARD brakes for unattended AUTO):
   loop_token_budget: 5000000        # stop after ~5M cumulative output tokens across shifts (0 = unlimited)
   loop_deadline_s: 14400            # …or after 4h wall-clock, whichever first (+ max_shifts=50)
+  # circuit breaker: halt + durably brake (AUTO→SHIFT) after this many CONSECUTIVE failed shifts.
+  # error/timed_out shifts ledger ~0 tokens, so the token ceiling never catches a failure storm.
+  max_consecutive_errors: 3
+  error_backoff_s: 30               # backoff between consecutive failed shifts before retrying
   # HARD per-shift brake (Task 0.2): once a shift's LEDGERED spend reaches its token_budget,
   # the rail skips the executor, requeues the claimed work and ends the shift
   # 'budget_exhausted' (a shift token_budget of 0 = unlimited, matching loop_token_budget).

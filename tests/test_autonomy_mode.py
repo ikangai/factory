@@ -131,3 +131,34 @@ def test_benign_convergence_leaves_mode_auto():
     seq = iter([{"action": "completed", "shift_id": 1}, {"action": "idle"}])
     orchestrator.cmd_run_loop(object(), run_fn=lambda store, **k: next(seq))
     assert modemod.read_mode() == "auto"           # idle is not a ceiling — stays AUTO to resume
+
+
+# --- consecutive-failure circuit breaker ---------------------------------------------------
+# error/timed_out shifts ledger ~0 tokens, so the token ceiling never trips on them; without
+# a breaker the loop grinds through all of max_shifts (and, pre-fix, respawned forever) with
+# no backoff. K consecutive failures trips the breaker, which is a ceiling → durable brake.
+
+def test_consecutive_failures_trip_the_breaker_and_brake():
+    modemod.set_mode("auto")
+    calls = {"n": 0}
+
+    def fake(store, **k):
+        calls["n"] += 1
+        return {"action": "error", "shift_id": calls["n"]}
+
+    n = orchestrator.cmd_run_loop(object(), run_fn=fake, sleep_fn=lambda s: None)
+    assert n == 3                                   # stopped after 3 consecutive fails, not 50
+    assert modemod.read_mode() == "shift"           # breaker is a ceiling → durable brake
+
+
+def test_a_healthy_shift_resets_the_failure_streak():
+    modemod.set_mode("auto")
+    seq = iter([{"action": "error", "shift_id": 1},
+                {"action": "completed", "shift_id": 2},   # resets the streak
+                {"action": "error", "shift_id": 3},
+                {"action": "timed_out", "shift_id": 4},
+                {"action": "idle", "shift_id": 5}])        # converged before 3 in a row
+    n = orchestrator.cmd_run_loop(object(), run_fn=lambda store, **k: next(seq),
+                                  sleep_fn=lambda s: None)
+    assert n == 5                                   # ran to convergence; breaker never tripped
+    assert modemod.read_mode() == "auto"            # idle convergence, not a ceiling
