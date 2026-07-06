@@ -180,14 +180,14 @@ def test_within_surface_rejects_substring_siblings():
 # -- finding 5: add_subtasks robust to a non-list, strips, drops empty spec ---
 def test_add_subtasks_non_list_subtasks_is_zero_not_chars(tmp_path):
     with _store(tmp_path) as s:
-        assert scope_check.add_subtasks(s, "do x then y") == 0    # a string is not iterated char-by-char
+        assert scope_check.add_subtasks(s, "do x then y") == []   # a string is not iterated char-by-char
         assert s.list_tasks() == []
 
 
 def test_add_subtasks_strips_detail_and_drops_empty_spec(tmp_path):
     with _store(tmp_path) as s:
         n = scope_check.add_subtasks(s, [{"title": "do x", "detail": "  spaced  "}])
-        assert n == 1
+        assert len(n) == 1
         t = s.list_tasks()[0]
         assert t["detail"] == "spaced"                    # stripped
         assert t["spec"] == {}                            # no surface/acceptance -> empty, not {"":""}

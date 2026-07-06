@@ -124,7 +124,7 @@ def test_decompose_no_candidate_ledgers_decomposer_spend(tmp_path):
                                 "_spend": {"tokens": 200, "cost": 0.02}}
         n = scope_check.decompose_no_candidate(s, _task("t", "x"), shift_id=sh, decomposer=decomposer)
         rows = [e for e in s.budget_entries() if e["role_or_run"] == "decompose"]
-    assert n == 1 and len(rows) == 1 and rows[0]["tokens"] == 200 and rows[0]["shift_id"] == sh
+    assert len(n) == 1 and len(rows) == 1 and rows[0]["tokens"] == 200 and rows[0]["shift_id"] == sh
 
 
 def test_scope_judge_attaches_its_spend(monkeypatch):

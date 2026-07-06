@@ -1157,3 +1157,239 @@ def test_retry_on_discard_is_board_toggleable():
     from factory.common.config import SETTINGS_SPEC, load_config
     assert SETTINGS_SPEC.get("super_worker.retry_on_discard") is bool
     assert (load_config().get("super_worker") or {}).get("retry_on_discard") is False
+
+
+# ============================================================================
+# Task 5.2 — Bounded second-wave dispatch (same-shift loop-until-dry, 2 waves max).
+#   Gate super_worker.dispatch_waves (1 default = today; 2 = one more pass). AFTER close-out,
+#   if any no_candidate DECOMPOSED this shift AND STOP clear AND headroom under max_tasks AND
+#   shift spend < token_budget AND an EXPLICIT TIME GUARD fits (elapsed + waves×1800s ≤ the
+#   loop-deadline share — the executor has NO wall-clock, only per-worker 1800s timeouts, and
+#   the loop deadline is checked only BETWEEN shifts), claim the new sub-task ids and run ONE
+#   more identical pass with decomposer=None (HARD recursion stop, no wave 3). Wave-2 sub-tasks
+#   inherit the parent's milestone_id so EVM/timesheet attribution survives the rail claiming
+#   the tasks itself. Depends HARD on Task 0.2's enforced shift budget.
+# ============================================================================
+
+def _wave_store(tmp_path, *, waves=2, budget=1_000_000):
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=budget)
+    if waves is not None:
+        s.set_setting("super_worker.dispatch_waves", str(waves))   # board toggle → store override
+    s.add_task("task-1", "big brief", source="human")
+    s.set_task_status("task-1", "in_progress", shift_id=sh)
+    return s, sh
+
+
+def test_second_wave_dispatches_decomposed_subtasks(tmp_path):
+    """dispatch_waves=2 + time/budget headroom: a no_candidate decomposed into 2 sub-tasks →
+    the rail CLAIMS them and runs a second wave in the SAME shift; both ship."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen, dec_calls = [], []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    def dec(task):
+        dec_calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}, {"title": "slice two"}]}
+
+    shipped = develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert any("slice one" in t for t in seen) and any("slice two" in t for t in seen)
+    assert shipped == 2                                   # both wave-2 sub-tasks merged
+    subs = [t for t in s.list_tasks() if t["title"] in ("slice one", "slice two")]
+    assert len(subs) == 2 and all(t["status"] == "done" for t in subs)
+    assert dec_calls == ["task-1"]                        # decomposer ran ONLY in wave 1
+    s.close()
+
+
+def test_second_wave_runs_with_no_decomposer_hard_stop(tmp_path):
+    """Recursion HARD stop: the second wave runs with decomposer=None — a wave-2 sub-task that
+    itself returns no_candidate is NOT decomposed again (no wave 3)."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    dec_calls = []
+
+    def dev_fn(text, **k):
+        return {"action": "no_candidate"}                 # EVERY task comes back empty-handed
+
+    def dec(task):
+        dec_calls.append(task["id"])
+        return {"subtasks": [{"title": "slice one"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert dec_calls == ["task-1"]                        # decomposer NEVER runs in wave 2
+    sub = [t for t in s.list_tasks() if t["title"] == "slice one"][0]
+    assert sub["status"] == "blocked"                     # wave-2 sub-task blocked, not re-split
+    assert len(s.list_tasks()) == 2                       # parent + 1 sub-task; no wave-3 spawn
+    s.close()
+
+
+def test_dispatch_waves_default_one_no_second_wave(tmp_path):
+    """Default (dispatch_waves=1): the no_candidate is still decomposed, but the sub-task is NOT
+    claimed/dispatched — it sits open for a future shift (today's behavior)."""
+    import time
+    s, sh = _wave_store(tmp_path, waves=None)              # no override → config default (1)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert seen == ["big brief"]                           # only the wave-1 parent dispatched
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_without_time_guard(tmp_path):
+    """The EXPLICIT time guard fails CLOSED: with no loop_deadline_s threaded in, wave 2 never
+    runs (the executor must not silently overrun a deadline it can't see)."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=None)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_when_deadline_headroom_insufficient(tmp_path):
+    """Time guard math: elapsed + waves×1800 must fit the loop-deadline share, else skip. Here
+    waves=2 reserves 3600s and the deadline is 3600s with 100s already elapsed → 3700 > 3600."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic() - 100, loop_deadline_s=3600)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_skipped_when_budget_exhausted(tmp_path):
+    """Brake-honest (composes with Task 0.2): once the shift's ledgered spend has reached its
+    token_budget, no second wave — the same guard that gates the retry."""
+    import time
+    s, sh = _wave_store(tmp_path, budget=100)
+    s.add_budget("conductor", 200, shift_id=sh)           # already over budget before wave 2
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    assert seen == ["big brief"]
+    assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    s.close()
+
+
+def test_second_wave_vetoed_by_stop(tmp_path):
+    """STOP vetoes everything, including the second wave — tripped on the MAIN thread during
+    close-out (the decomposer engages it), the wave-2 block re-checks and skips."""
+    import time
+    from factory.common import killswitch
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"}
+
+    def dec(task):
+        killswitch.engage("test-stop")                    # trip STOP mid close-out (main thread)
+        return {"subtasks": [{"title": "slice one"}]}
+
+    try:
+        develop.execute_claimed_tasks(
+            s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1,
+            shift_started=time.monotonic(), loop_deadline_s=100_000)
+        assert seen == ["big brief"]                       # wave 1 ran; wave 2 vetoed by STOP
+        assert [t for t in s.list_tasks() if t["title"] == "slice one"][0]["status"] == "open"
+    finally:
+        killswitch.release()
+    s.close()
+
+
+def test_second_wave_respects_max_tasks_headroom(tmp_path):
+    """Headroom under max_tasks_per_shift: wave 1 used 1 of max_tasks=2 slots, so wave 2 may
+    claim only 1 of the 3 decomposed sub-tasks; the other two stay open."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    seen = []
+
+    def dev_fn(text, **k):
+        seen.append(text)
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    def dec(task):
+        return {"subtasks": [{"title": "sub a"}, {"title": "sub b"}, {"title": "sub c"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=dec, max_parallel=1, max_tasks=2,
+        shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    done = [t for t in s.list_tasks() if t["status"] == "done"]
+    opened = [t for t in s.list_tasks() if t["title"] in ("sub a", "sub b", "sub c") and t["status"] == "open"]
+    assert len(done) == 1 and len(opened) == 2             # only ONE sub-task fit the wave-2 headroom
+    s.close()
+
+
+def test_second_wave_subtasks_inherit_parent_milestone(tmp_path):
+    """Plan-link: wave-2 sub-tasks inherit the parent's milestone_id so EVM/timesheet attribution
+    survives the rail claiming the tasks itself."""
+    import time
+    s, sh = _wave_store(tmp_path)
+    mid = s.add_milestone("M1")
+    s.set_task_milestone("task-1", mid)
+
+    def dev_fn(text, **k):
+        return {"action": "no_candidate"} if "big brief" in text else {"action": "merged", "merge_sha": "s"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=dev_fn, decomposer=lambda t: {"subtasks": [{"title": "slice one"}]},
+        max_parallel=1, shift_started=time.monotonic(), loop_deadline_s=100_000)
+
+    sub = [t for t in s.list_tasks() if t["title"] == "slice one"][0]
+    assert sub["milestone_id"] == mid                      # inherited the parent's plan link
+    s.close()
+
+
+def test_dispatch_waves_is_board_toggleable():
+    """The gate is an operator DIAL (a trial gate, not a brake) → it belongs in SETTINGS_SPEC as
+    an int and ships at 1 (= today) in config.yaml."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert SETTINGS_SPEC.get("super_worker.dispatch_waves") is int
+    assert (load_config().get("super_worker") or {}).get("dispatch_waves") == 1

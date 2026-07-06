@@ -56,6 +56,10 @@ _NO_CONSULT_STAGES = ("transport", "chown")
 # (a structural safety veto a retry can only re-violate), never review/gate/merge/transport
 # (not a gradeable code outcome the worker can act on).
 _RETRY_STAGES = ("tests", "no_test", "acceptance")
+# Task 5.2: the per-worker wall (there is NO shift wall-clock over the executor — only these
+# per-worker timeouts). The bounded second wave reserves waves×this against the loop deadline
+# before it dispatches, because the loop deadline is checked only BETWEEN shifts.
+_WORKER_TIMEOUT_S = 1800
 
 
 def classify_empty_handed(reply: str) -> Optional[dict]:
@@ -156,7 +160,9 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           require_test: Optional[bool] = None,
                           reviewer: bool = False,
                           acceptance_exec: bool = False,
-                          investigate_blocked: bool = False) -> int:
+                          investigate_blocked: bool = False,
+                          shift_started: Optional[float] = None,
+                          loop_deadline_s: Optional[float] = None) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
     each: merged → done(sha), anything else → blocked(reason). Returns the count shipped.
 
@@ -296,6 +302,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         results = [f.result() for f in [ex.submit(work, t) for t in claimed]]
 
     shipped = 0                                       # close out on the MAIN thread (single-writer)
+    wave2_ids: list = []                              # Task 5.2: ids decomposed this shift → a bounded 2nd wave
     for task, res in results:
         action = res.get("action")
         has_spend = bool(res.get("tokens") or res.get("cost") or res.get("seconds"))
@@ -397,23 +404,25 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                     "the correctness gate — a reviewer miss; the review isn't catching regressions "
                     "the target's own tests catch.",
                     scope="reviewer_calibration", shift_id=shift_id)
-            decomposed = 0                            # GSD #4: turn no_candidate into forward progress
+            sub_ids: list = []                        # GSD #4: turn no_candidate into forward progress
             # Task 0.1: error(timeout)/error(worker_failed) stay decompose-eligible — both are
             # "task too big" evidence; transport/refusal never reach the decomposer (pure spend).
             decompose_ok = action == "no_candidate" or (
                 action == "error" and res.get("stage") in _DECOMPOSE_STAGES)
             if decompose_ok and decomposer is not None:
                 from ..reporting import scope_check
-                decomposed = scope_check.decompose_no_candidate(
+                sub_ids = scope_check.decompose_no_candidate(
                     store, task, shift_id=shift_id, decomposer=decomposer)
-            if decomposed:
+            if sub_ids:
+                wave2_ids.extend(sub_ids)             # Task 5.2: gather for a bounded second wave
+                n_sub = len(sub_ids)
                 label = f"{action} ({res['stage']})" if res.get("stage") else action
                 store.set_task_status(
                     task["id"], "blocked",
-                    result=f"{label} → decomposed into {decomposed} sub-tasks"[:200],
+                    result=f"{label} → decomposed into {n_sub} sub-tasks"[:200],
                     shift_id=shift_id)
                 print(f"[execute]   {task['id']} → {label}, auto-decomposed into "
-                      f"{decomposed} sub-task(s) — blocked", flush=True)
+                      f"{n_sub} sub-task(s) — blocked", flush=True)
                 continue                              # decomposition replaces the canned lesson
             store.set_task_status(task["id"], "blocked", result=reason, shift_id=shift_id)
             print(f"[execute]   {task['id']} → {reason} — blocked", flush=True)
@@ -431,6 +440,40 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             factory_memory.investigate_blocked(store, shift_id)
         except Exception as e:  # noqa: BLE001 — advisory memory refinement; never fatal to close-out
             print(f"[execute] investigator skipped (non-fatal): {e}", flush=True)
+
+    # Task 5.2 (P3, loop-until-dry): a BOUNDED second wave. Gate super_worker.dispatch_waves
+    # (1 = today; 2 = one more pass). Only from wave 1 — decomposer is not None here, and the
+    # wave-2 recursion runs with decomposer=None, a HARD recursion stop (there is never a wave 3).
+    # Every brake is re-checked on the MAIN THREAD before claiming: STOP clear, dispatch_waves≥2,
+    # headroom under max_tasks_per_shift, shift spend < token_budget (composes with Task 0.2), AND
+    # an EXPLICIT TIME GUARD — the executor has NO wall-clock (only the per-worker 1800s timeouts)
+    # and the loop deadline is checked only BETWEEN shifts, so wave 2 must reserve its own deadline
+    # headroom (elapsed + waves×worker_timeout ≤ the loop-deadline share) or it can silently overrun
+    # the loop deadline. Missing time inputs → fail CLOSED (a brake never fails toward more autonomy).
+    if wave2_ids and decomposer is not None and not killswitch.is_halted():
+        waves = int(config.resolve_setting(store, "super_worker.dispatch_waves", 1)[0])
+        if waves >= 2:
+            remaining = (max_tasks - len(claimed)) if max_tasks is not None else len(wave2_ids)
+            budget = int((store.get_shift(shift_id) or {}).get("token_budget") or 0)
+            spent = int(store.shift_spend(shift_id)["tokens"])
+            budget_ok = budget == 0 or spent < budget
+            started = shift_started if shift_started is not None else time.monotonic()
+            elapsed = time.monotonic() - started
+            time_ok = (loop_deadline_s is not None
+                       and elapsed + waves * _WORKER_TIMEOUT_S <= loop_deadline_s)
+            if remaining > 0 and budget_ok and time_ok:
+                wave2 = wave2_ids[:remaining]         # respect the per-shift fan-out cap across waves
+                for tid in wave2:                     # claim the new sub-task ids for THIS shift
+                    store.set_task_status(tid, "in_progress", shift_id=shift_id)
+                print(f"[execute] second wave: {len(wave2)} decomposed sub-task(s) claimed — one "
+                      f"more pass (decomposer OFF, hard recursion stop).", flush=True)
+                shipped += execute_claimed_tasks(
+                    store, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
+                    develop_fn=develop_fn, max_tasks=remaining, max_parallel=max_parallel,
+                    scope_judge=scope_judge, decomposer=None,   # HARD recursion stop — no wave 3
+                    require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
+                    investigate_blocked=investigate_blocked,
+                    shift_started=shift_started, loop_deadline_s=loop_deadline_s)
     return shipped
 
 

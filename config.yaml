@@ -180,6 +180,17 @@ super_worker:
   auto_decompose: true
   decompose_max_turns: 8
   decompose_timeout_s: 240
+  # Task 5.2 (Phase 5): bounded same-shift SECOND WAVE (loop-until-dry, 2 waves MAX). 1 = today
+  # (a no_candidate is decomposed and its sub-tasks wait for the next shift). 2 = after close-out,
+  # if any no_candidate DECOMPOSED this shift, the rail CLAIMS the new sub-task ids and runs ONE
+  # more identical pass with the decomposer OFF (a HARD recursion stop — never a wave 3). Fires
+  # only when every brake clears: STOP disengaged, headroom under max_tasks_per_shift, shift spend
+  # < token_budget (composes with the per-shift brake, Task 0.2), AND an EXPLICIT TIME GUARD —
+  # elapsed + waves×1800s must fit the loop-deadline share (the executor has no wall-clock; the
+  # loop deadline is checked only between shifts, so wave 2 reserves its own headroom or fails
+  # CLOSED). Wave-2 sub-tasks inherit the parent's milestone_id (EVM/timesheet attribution). Default
+  # 1; board-toggleable (in SETTINGS_SPEC). Trial with a LOW max_tasks — do NOT flip to 2 broadly.
+  dispatch_waves: 1
   # Cap on ACTIVE worker capability profiles (Phase 5) — `worker add` beyond this fails with
   # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
   # it (it's the fail-open default and can't be retired).
