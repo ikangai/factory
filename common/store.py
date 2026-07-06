@@ -108,6 +108,11 @@ class Blackboard:
         if lcols and "stale" not in lcols:
             self.conn.execute(
                 "ALTER TABLE learnings ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+        # distill + pinned card ranking (Task 4.2): a pinned lesson renders FIRST and never
+        # ages out of the memory_card (capped ~6/role); `factory learn distill --apply` sets it.
+        if lcols and "pinned" not in lcols:
+            self.conn.execute(
+                "ALTER TABLE learnings ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         # consult-telemetry (Task 1.4): each surfaced learning gets the task's OUTCOME
         # attributed back — the effectiveness signal `learn list` renders (suppressed
         # below a minimum denominator; a 2-of-3 "ratio" is noise).
@@ -750,6 +755,20 @@ class Blackboard:
         Advisory only: a stale row still surfaces, with a card suffix warning the reader."""
         self._exec("UPDATE learnings SET stale = ? WHERE id = ?",
                    (1 if stale else 0, learning_id))
+
+    def pin_learning(self, learning_id: int) -> None:
+        """Pin a learning (`factory learn distill --apply`, Task 4.2): pinned=1 makes it
+        render FIRST in the role's memory_card and never age out of the newest-N window.
+        Callers refuse unknown ids via get_learning FIRST (exact-id discipline)."""
+        self._exec("UPDATE learnings SET pinned = 1 WHERE id = ?", (learning_id,))
+
+    def pinned_for_role(self, role: str, limit: int = 6) -> list[dict]:
+        """A role's LIVE pinned learnings, newest first — the pinned leg of memory_card
+        (Task 4.2). archived=0 so a pinned-then-retired row never resurfaces; `limit` caps
+        the leg (~6/role) so unbounded pins can't regrow the card the phase shrinks."""
+        return self._all(
+            "SELECT * FROM learnings WHERE role = ? AND pinned = 1 AND archived = 0 "
+            "ORDER BY id DESC LIMIT ?", (role, limit))
 
     def learnings_for_role(self, role: str, limit: int = 10, *,
                            include_archived: bool = False) -> list[dict]:

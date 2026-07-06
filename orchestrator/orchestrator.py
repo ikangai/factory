@@ -1106,7 +1106,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
 
 def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, content: str = "",
               scope: str = "general", agent: str = "", limit: int = 20,
-              learning_id: Optional[str] = None):
+              learning_id: Optional[str] = None, apply: bool = False):
     """`factory learn add [--role R] "…"` (or --content "…") / `factory learn list
     [--role R]` / `factory learn retire <id>` / `factory learn verify` — the factory's
     memory CLI. The CLI positional is action-routed by main(): add's TEXT arrives here
@@ -1175,8 +1175,34 @@ def cmd_learn(store: Blackboard, action: str, *, role: Optional[str] = None, con
             print(f"  [{r['role']}] #{r['id']} (uses {r['uses']}, hits {r.get('hits', 1)}"
                   f"{eff_s}){mark}: {r['content']}")
         return rows
+    if action == "distill":
+        # `factory learn distill --role R [--apply]` (Task 4.2, P6 stage 4): consolidate a
+        # role's overlapping lessons into <=5 pinned rules. Dry-run by DEFAULT (proposals
+        # only); --apply is a HUMAN act that inserts scope='distilled', pinned=1 and archives
+        # the sources. SPENDS one standard-tier claude_p; STOP vetoes at entry, spend ledgers
+        # notes='distill'. Fail-open: a bad reply proposes nothing.
+        if not role:
+            print("[learn] distill needs --role R (conductor | developer | researcher | factory)")
+            return None
+        rep = factory_memory.distill_learnings(store, role, apply=apply)
+        proposed = rep.get("proposed") or []
+        if not proposed:
+            print(f"[learn] distill {role}: nothing to consolidate ({rep.get('reason') or 'no rules'})")
+            return rep
+        verb = "APPLIED" if rep.get("applied") else "propose"
+        for p in proposed:
+            src = ", ".join(f"#{s}" for s in p["sources"]) or "(no sources cited)"
+            print(f"[learn] {verb}: {p['rule']}  <- {src}")
+        if rep.get("applied"):
+            print(f"[learn] distilled {len(rep.get('distilled_ids') or [])} pinned rule(s) for "
+                  f"{role}; cited sources archived")
+        else:
+            print(f"[learn] dry-run — re-run `factory learn distill --role {role} --apply` to "
+                  "insert the rules (pinned, scope='distilled') and archive the sources")
+        return rep
     print('[learn] usage: factory learn add [--role R] "…" | '
-          'factory learn list [--role R] | factory learn retire <id> | factory learn verify')
+          'factory learn list [--role R] | factory learn retire <id> | factory learn verify | '
+          'factory learn distill --role R [--apply]')
     return None
 
 
@@ -1626,17 +1652,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
-    lrn.add_argument("action", choices=["add", "list", "retire", "verify"])
+    lrn.add_argument("action", choices=["add", "list", "retire", "verify", "distill"])
     lrn.add_argument("rest", nargs="?", default=None,
                      help="the learning text (add — same as --content) or the integer "
                           "learning id (retire — exact id, see `learn list`)")
     lrn.add_argument("--role", default=None,
                      help="conductor | developer | researcher | factory "
-                          "(add defaults to factory; list with no role shows ALL roles)")
+                          "(add defaults to factory; list with no role shows ALL roles; "
+                          "distill REQUIRES one)")
     lrn.add_argument("--content", default="", help="the learning to record (for add)")
     lrn.add_argument("--scope", default="general", help="free tag, e.g. no_candidate / graduation")
     lrn.add_argument("--agent", default="", help="optional agent handle/identity")
     lrn.add_argument("--limit", type=int, default=20)
+    lrn.add_argument("--apply", action="store_true",
+                     help="distill: actually INSERT the consolidated rules (pinned, "
+                          "scope='distilled') and archive the sources — default is DRY-RUN")
     evg = sub.add_parser("eval-gates")      # golden-case eval of the LLM gates (Task 2.1, P12)
     evg.add_argument("--gate", choices=["scope"], default="scope",
                      help="which gate's goldens to replay (decompose/reviewer are follow-ups); "
@@ -1798,7 +1828,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_learn(store, a.action, role=a.role,
                       content=a.content or (a.rest if a.action == "add" else "") or "",
                       scope=a.scope, agent=a.agent, limit=a.limit,
-                      learning_id=None if a.action == "add" else a.rest)
+                      learning_id=None if a.action == "add" else a.rest,
+                      apply=a.apply)
         elif a.cmd == "eval-gates":
             rep = cmd_eval_gates(store, gate=a.gate)
             if not (isinstance(rep, dict) and rep.get("ok_all")):

@@ -974,6 +974,26 @@ def test_migrate_adds_outcome_columns_to_old_db(tmp_path):
         assert row["merged_after"] == 0 and row["blocked_after"] == 0  # backfilled default
 
 
+def test_migrate_adds_pinned_to_old_db(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)                       # a pre-Task-4.2 learnings table
+    conn.execute("""CREATE TABLE learnings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL,
+        agent TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT 'general',
+        content TEXT NOT NULL, shift_id INTEGER,
+        uses INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
+    conn.execute("INSERT INTO learnings(role, content, created_at) VALUES ('factory','pre','t')")
+    conn.commit()
+    conn.close()
+    with Blackboard(db) as s:
+        s.init_db()
+        row = s.learnings_for_role("factory")[0]
+        assert row["pinned"] == 0                        # backfilled default: not pinned
+        s.pin_learning(row["id"])                         # the migrated column is writable
+        assert s.pinned_for_role("factory")[0]["id"] == row["id"]
+
+
 def test_bump_learning_outcomes_batched_and_scoped(tmp_path):
     with _store(tmp_path) as s:
         a = s.add_learning("developer", "A")
@@ -1589,3 +1609,246 @@ def test_execute_no_investigation_when_gate_off(tmp_path, monkeypatch):
 
         dev.execute_claimed_tasks(s, sh, develop_fn=fake)     # investigate_blocked defaults OFF
         assert called["n"] == 0
+
+
+# ============================================================================
+# Task 4.2 (P6 stage 4 + P8): pinned card ranking + `factory learn distill`.
+# Slice 1 (deterministic): a `pinned` row renders FIRST in the memory_card and
+# never ages out, CAPPED at ~6 per role. Slice 2: `factory learn distill
+# --role R [--apply]` — dry-run DEFAULT, ONE isolated claude_p at STANDARD tier
+# proposes <=5 general rules citing source ids; --apply inserts scope='distilled'
+# pinned=1 and archives the sources; the re-insert dedup INCLUDES archived rows;
+# killswitch checked FIRST; spend ledgered notes='distill'; fail-open.
+# ============================================================================
+
+# -- Slice 1: pinned card ranking --------------------------------------------
+
+def test_pin_learning_and_pinned_for_role(tmp_path):
+    with _store(tmp_path) as s:
+        a = s.add_learning("developer", "pin me")
+        b = s.add_learning("developer", "leave me")
+        s.pin_learning(a)
+        assert [r["id"] for r in s.pinned_for_role("developer")] == [a]
+        assert s.get_learning(a)["pinned"] == 1 and s.get_learning(b)["pinned"] == 0
+
+
+def test_pinned_for_role_excludes_archived(tmp_path):
+    """A pinned row that is later retired never surfaces via the pinned leg."""
+    with _store(tmp_path) as s:
+        a = s.add_learning("developer", "pinned but retired")
+        s.pin_learning(a)
+        s.archive_learning(a)
+        assert s.pinned_for_role("developer") == []
+
+
+def test_pinned_learning_renders_first_and_never_ages_out(tmp_path):
+    """A pinned OLD row surfaces at the TOP of the card even though it fell out of
+    the newest-`limit` window."""
+    with _store(tmp_path) as s:
+        ids = [s.add_learning("developer", f"lesson {i}") for i in range(10)]
+        s.pin_learning(ids[0])                              # the OLDEST — normally aged out
+        card = factory_memory.memory_card(s, "developer")   # default limit=8
+        assert "lesson 0" in card                           # never ages out
+        assert card.index("lesson 0") < card.index("lesson 9")   # renders FIRST
+
+
+def test_pinned_rows_capped_per_role(tmp_path):
+    """At most _PINNED_CAP pinned rows enter via the pinned leg — unbounded pins
+    must not regrow the card the phase shrinks."""
+    with _store(tmp_path) as s:
+        pins = [s.add_learning("developer", f"pinned {i}") for i in range(8)]
+        for p in pins:
+            s.pin_learning(p)
+        for i in range(8):                                   # push the pins out of newest-8
+            s.add_learning("developer", f"fresh {i}")
+        card = factory_memory.memory_card(s, "developer")
+        shown = sum(1 for i in range(8) if f"pinned {i}" in card)
+        assert shown == factory_memory._PINNED_CAP           # exactly the cap, not all 8
+        assert "pinned 0" not in card and "pinned 1" not in card   # 2 OLDEST pins dropped
+
+
+# -- Slice 2: `factory learn distill` ----------------------------------------
+
+def _seed_distillables(s, role="developer"):
+    return [
+        s.add_learning(role, "narrow the brief to one landable slice", scope="no_candidate"),
+        s.add_learning(role, "encode the acceptance as a focused test first", scope="tests"),
+        s.add_learning(role, "keep changes off frozen files entirely", scope="frozen"),
+    ]
+
+
+def test_distill_dry_run_is_default_and_writes_no_rows(tmp_path):
+    """No --apply → propose only: no distilled row, nothing archived — but the LLM
+    spend IS ledgered notes='distill' (a dry-run still calls the model to propose)."""
+    import json
+    with _store(tmp_path) as s:
+        ids = _seed_distillables(s)
+
+        def fake(prompt, *, model="", **k):
+            return (json.dumps({"rules": [
+                {"rule": "write the failing test first, then the minimal change",
+                 "sources": ids}]}), 30, 0.004)
+
+        rep = factory_memory.distill_learnings(s, "developer", claude_fn=fake)
+        assert rep["applied"] is False
+        assert rep["proposed"][0]["rule"].startswith("write the failing test")
+        allrows = s.learnings_for_role("developer", include_archived=True)
+        assert [r for r in allrows if r["scope"] == "distilled"] == []   # nothing inserted
+        assert all(r["archived"] == 0 for r in allrows)                  # nothing archived
+        row = s.conn.execute(
+            "SELECT notes, tokens FROM budget_ledger WHERE notes='distill'").fetchone()
+        assert row is not None and row["tokens"] == 30
+
+
+def test_distill_runs_at_standard_tier(tmp_path):
+    """The model is the STANDARD tier (the P10 promise — judgment, never frontier)."""
+    import json
+    from factory.common import config
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+        seen = {}
+
+        def fake(prompt, *, model="", **k):
+            seen["model"] = model
+            return (json.dumps({"rules": []}), 5, 0.0)
+
+        factory_memory.distill_learnings(s, "developer", claude_fn=fake)
+        assert seen["model"] == config.resolve_model("standard") != ""
+
+
+def test_distill_apply_inserts_pinned_distilled_and_archives_sources(tmp_path):
+    """--apply inserts scope='distilled', pinned=1 (renders first, never ages out) and
+    archives the cited sources."""
+    import json
+    with _store(tmp_path) as s:
+        ids = _seed_distillables(s)
+
+        def fake(prompt, *, model="", **k):
+            return (json.dumps({"rules": [
+                {"rule": "TDD first: one failing test, then the minimal change on a clean surface",
+                 "sources": ids}]}), 20, 0.003)
+
+        rep = factory_memory.distill_learnings(s, "developer", apply=True, claude_fn=fake)
+        assert rep["applied"] is True
+        distilled = [r for r in s.learnings_for_role("developer")
+                     if r["scope"] == "distilled"]
+        assert len(distilled) == 1
+        assert distilled[0]["pinned"] == 1
+        # the sources are now archived (hidden from prompts)
+        for sid in ids:
+            assert s.get_learning(sid)["archived"] == 1
+        # and the distilled rule pins to the TOP of the card
+        card = factory_memory.memory_card(s, "developer")
+        assert "TDD first" in card
+
+
+def test_distill_includes_existing_pinned_distilled_as_candidates(tmp_path):
+    """Existing pinned/distilled rows are CONSOLIDATION candidates — else repeat runs
+    accumulate. The prompt must surface them."""
+    import json
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+        d = s.add_learning("developer", "an already-distilled pinned rule", scope="distilled")
+        s.pin_learning(d)
+        seen = {}
+
+        def fake(prompt, *, model="", **k):
+            seen["prompt"] = prompt
+            return (json.dumps({"rules": []}), 5, 0.0)
+
+        factory_memory.distill_learnings(s, "developer", claude_fn=fake)
+        assert "an already-distilled pinned rule" in seen["prompt"]
+
+
+def test_distill_apply_dedups_reinsert_against_archived_rows(tmp_path):
+    """A distilled rule matching a PREVIOUSLY-ARCHIVED lesson must dedup onto the
+    archived row (hits bumped, stays hidden), NOT re-enter as a fresh live row."""
+    import json
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+        gone = s.add_learning("developer", "retired lesson: always pin the fixture seed")
+        s.archive_learning(gone)
+
+        def fake(prompt, *, model="", **k):
+            return (json.dumps({"rules": [
+                {"rule": "retired lesson: always pin the fixture seed", "sources": []}]}),
+                10, 0.0)
+
+        factory_memory.distill_learnings(s, "developer", apply=True, claude_fn=fake)
+        matches = [r for r in s.learnings_for_role("developer", include_archived=True)
+                   if "always pin the fixture seed" in r["content"]]
+        assert len(matches) == 1 and matches[0]["id"] == gone   # deduped onto the archived row
+        assert matches[0]["archived"] == 1                       # stays hidden, not resurrected
+
+
+def test_distill_caps_at_five_rules(tmp_path):
+    """<=5 rules are ever proposed/applied even if the model returns more."""
+    import json
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+
+        def fake(prompt, *, model="", **k):
+            return (json.dumps({"rules": [
+                {"rule": f"rule number {i}", "sources": []} for i in range(9)]}), 5, 0.0)
+
+        rep = factory_memory.distill_learnings(s, "developer", claude_fn=fake)
+        assert len(rep["proposed"]) == 5
+
+
+def test_distill_stop_vetoes_all_spend(tmp_path, monkeypatch):
+    """killswitch.is_halted() is checked FIRST — STOP vetoes even read-only distill
+    spend: no claude call, no ledger row, nothing applied."""
+    import json
+    from factory.common import killswitch
+    monkeypatch.setattr(killswitch, "is_halted", lambda: True)
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+        called = {"n": 0}
+
+        def fake(prompt, **k):
+            called["n"] += 1
+            return (json.dumps({"rules": []}), 1, 0.0)
+
+        rep = factory_memory.distill_learnings(s, "developer", apply=True, claude_fn=fake)
+        assert called["n"] == 0 and rep["applied"] is False
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM budget_ledger WHERE notes='distill'").fetchone()["c"] == 0
+
+
+def test_distill_fails_open_on_unparseable_reply(tmp_path):
+    """A garbage (non-JSON) reply → nothing proposed, nothing applied, no crash; the
+    spend still ledgers (the call happened)."""
+    with _store(tmp_path) as s:
+        _seed_distillables(s)
+
+        def fake(prompt, *, model="", **k):
+            return ("sorry, I could not do that", 7, 0.0)
+
+        rep = factory_memory.distill_learnings(s, "developer", apply=True, claude_fn=fake)
+        assert rep["proposed"] == [] and rep["applied"] is False
+        assert [r for r in s.learnings_for_role("developer", include_archived=True)
+                if r["scope"] == "distilled"] == []
+
+
+def test_cli_learn_distill_dry_run_through_main(tmp_path, monkeypatch, capsys):
+    """`factory learn distill --role developer` wires through main as a DRY-RUN by
+    default (no --apply): proposals printed, nothing written."""
+    import json
+    from factory.roles import common as roles_common
+    db = str(tmp_path / "f.db")
+    with Blackboard(db) as s:
+        s.init_db()
+        _seed_distillables(s)
+
+    def fake(prompt, *, model="", **k):
+        return (json.dumps({"rules": [
+            {"rule": "consolidated rule from the dry run", "sources": []}]}), 8, 0.0)
+
+    monkeypatch.setattr(roles_common, "claude_p", fake)
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    orch.main(["learn", "distill", "--role", "developer"])
+    out = capsys.readouterr().out
+    assert "consolidated rule from the dry run" in out and "dry-run" in out
+    with Blackboard(db) as s:
+        assert [r for r in s.learnings_for_role("developer", include_archived=True)
+                if r["scope"] == "distilled"] == []

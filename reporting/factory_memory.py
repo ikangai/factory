@@ -128,6 +128,22 @@ def _select_rows(rows: list[dict], topic: str) -> list[dict]:
     return picked
 
 
+# Pinned rows render FIRST and never age out (Task 4.2, P8) — but CAPPED per role: an
+# unbounded pin set would regrow the card and recreate the bloat the phase fixes.
+_PINNED_CAP = 6
+
+
+def _with_pinned(store, role: str, selected: list[dict]) -> list[dict]:
+    """Prepend up to `_PINNED_CAP` of the role's LIVE pinned rows to `selected`, dropping
+    any that already appear in the selection (no double-render). Pinned rows lead the card
+    and survive regardless of the newest-N / relevance windows (Task 4.2)."""
+    pinned = store.pinned_for_role(role, limit=_PINNED_CAP)
+    if not pinned:
+        return selected
+    pids = {r["id"] for r in pinned}
+    return pinned + [r for r in selected if r["id"] not in pids]
+
+
 def memory_card_with_ids(store, role: str, *, topic: Optional[str] = None,
                          limit: int = 8, include_factory: bool = True) -> tuple[str, list[int]]:
     """`memory_card` + the surfaced learning ids, so the caller can attribute the task's
@@ -135,7 +151,8 @@ def memory_card_with_ids(store, role: str, *, topic: Optional[str] = None,
     telemetry: `bump_learning_outcomes` at close-out). With a `topic` (the task's
     title+detail) the card is PER-TASK: a `_TOPIC_WINDOW`-row window is scored by
     normalized-keyword overlap and the top-4 relevant + newest-4 surface. No topic →
-    the classic newest-`limit` card. Bumps `uses` on every surfaced learning; lessons
+    the classic newest-`limit` card. Pinned rows (Task 4.2) always LEAD the card and never
+    age out (capped `_PINNED_CAP`/role). Bumps `uses` on every surfaced learning; lessons
     reported >= 3 times are flagged `(recurring xN)`."""
     if topic:
         rows = _select_rows(store.learnings_for_role(role, limit=_TOPIC_WINDOW), topic)
@@ -146,6 +163,9 @@ def memory_card_with_ids(store, role: str, *, topic: Optional[str] = None,
         rows = store.learnings_for_role(role, limit=limit)
         factory_rows = (store.learnings_for_role("factory", limit=limit)
                         if include_factory and role != "factory" else [])
+    rows = _with_pinned(store, role, rows)
+    if include_factory and role != "factory":
+        factory_rows = _with_pinned(store, "factory", factory_rows)
     if not rows and not factory_rows:
         return "", []
     lines = [f"## What you've learned so far ({role})",
@@ -398,6 +418,136 @@ def investigate_blocked(store, shift_id: int, *, claude_fn: Optional[Callable] =
                         "followup_title": followup_title, "followup_detail": followup_detail,
                         "learning_id": rec[0] if rec else None})
     return reports
+
+
+# -- P6 stage 4: `factory learn distill` (Task 4.2) --------------------------
+# The card grows unbounded (130 rows in 5 days) and high-value seed rows rotate out of
+# the newest-N window. Distill spends ONE isolated claude_p (STANDARD tier — the P10
+# promise) to CONSOLIDATE a role's many overlapping lessons into <=5 general rules, then
+# (only under --apply, a HUMAN act) inserts them scope='distilled', pinned=1 (they lead
+# the card + never age out) and ARCHIVES the sources. All the same brakes as the
+# investigator: gated behind an explicit CLI verb, STOP-vetoed FIRST, spend ledgered,
+# fail-open (a bad reply proposes nothing — never crashes, never half-applies).
+_DISTILL_MAX_RULES = 5   # at most N consolidated rules proposed/applied per run (cost + card cap)
+_DISTILL_WINDOW = 60     # candidate rows scanned per role (includes live pinned/distilled)
+
+
+def _distill_candidate_line(r: dict) -> str:
+    """One candidate learning as the model sees it: id (to cite as a source), recurrence
+    (hits) and effectiveness (merged-share) so it can weight which lessons actually help,
+    plus a [pinned]/[distilled] tag so it treats existing rules as CONSOLIDATION inputs."""
+    eff = effectiveness(r)
+    eff_s = f", eff {eff[0]:.0%} of {eff[1]}" if eff else ""
+    tags = [t for t in (("pinned" if r.get("pinned") else ""),
+                        ("distilled" if r.get("scope") == "distilled" else "")) if t]
+    tag_s = f" [{','.join(tags)}]" if tags else ""
+    return (f"- #{r['id']} (hits {r.get('hits', 1)}, uses {r.get('uses', 0)}{eff_s}){tag_s}: "
+            f"{r['content']}")
+
+
+def _parse_distill(text: str, valid_ids: set, max_rules: int) -> list[dict]:
+    """Parse the model's `{"rules":[{"rule","sources":[ids]}]}` reply into at most
+    `max_rules` clean {rule, sources} dicts. Unknown/foreign source ids are dropped (only
+    ids from the candidate window may be cited); a malformed reply yields [] (fail-open)."""
+    from ..roles.common import _first_json_object
+    raw = _first_json_object(text or "")
+    if not raw:
+        return []
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    rules = obj.get("rules") if isinstance(obj, dict) else None
+    if not isinstance(rules, list):
+        return []
+    out: list[dict] = []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        rule = str(r.get("rule") or "").strip()
+        if not rule:
+            continue
+        sources: list[int] = []
+        for s in (r.get("sources") or []) if isinstance(r.get("sources"), list) else []:
+            try:
+                sid = int(s)
+            except (ValueError, TypeError):
+                continue
+            if sid in valid_ids and sid not in sources:
+                sources.append(sid)
+        out.append({"rule": rule, "sources": sources})
+        if len(out) >= max_rules:                      # hard cap: never propose more than N
+            break
+    return out
+
+
+def distill_learnings(store, role: str, *, apply: bool = False,
+                      claude_fn: Optional[Callable] = None,
+                      max_rules: int = _DISTILL_MAX_RULES) -> dict:
+    """`factory learn distill --role R [--apply]` (Task 4.2, P6 stage 4): consolidate a
+    role's overlapping lessons into <=`max_rules` general, pinned rules.
+
+    Dry-run is the DEFAULT — `--apply` (a HUMAN act, never automated) is what actually
+    inserts. Candidates are the role's LIVE rows (`learnings_for_role`, archived=0) which
+    ALREADY include existing pinned/distilled rows — so repeat runs CONSOLIDATE rather than
+    accumulate. On --apply each rule is inserted via `record_learning` (scope='distilled'),
+    then pinned; the cited sources are archived.
+
+    Dedup on re-insert INCLUDES archived rows: `record_learning`'s dedup window is
+    `learnings_for_role(role, include_archived=True)`, so a proposed rule matching a
+    PREVIOUSLY-archived source dedups onto it (hits bumped, stays hidden) instead of
+    re-entering as a fresh live row — archived lessons never resurrect as dups.
+
+    Brakes (each a MUST): `killswitch.is_halted()` is checked FIRST — STOP vetoes even this
+    read-only consolidation spend; the model runs at STANDARD tier via `resolve_model`
+    (never the reserved frontier — the P10 promise); spend is ledgered notes='distill' (a
+    standalone CLI run has NO shift → ledgered WITHOUT a shift_id, still counted in the
+    all-time budget totals); an unparseable reply FAILS OPEN to an empty proposal set —
+    nothing is applied, nothing crashes. Returns {role, proposed:[{rule,sources}], applied,
+    distilled_ids?, reason?}."""
+    from ..common import config, killswitch
+    if killswitch.is_halted():                         # STOP vetoes even read-only distill spend
+        return {"role": role, "proposed": [], "applied": False, "reason": "halted"}
+
+    candidates = store.learnings_for_role(role, limit=_DISTILL_WINDOW)   # live: incl pinned/distilled
+    if not candidates:
+        return {"role": role, "proposed": [], "applied": False, "reason": "no learnings"}
+
+    if claude_fn is None:                              # deferred import → tests monkeypatch claude_p
+        from ..roles.common import claude_p as claude_fn
+    from ..roles.common import _load_prompt
+
+    model = config.resolve_model("standard")           # STANDARD tier — never frontier (P10)
+    prompt = (_load_prompt("learn_distill")
+              .replace("{ROLE}", role)
+              .replace("{MAX_RULES}", str(max_rules))
+              .replace("{LEARNINGS}", "\n".join(_distill_candidate_line(r) for r in candidates)))
+    text, tok, cost = claude_fn(prompt, model=model)
+    store.add_budget("distill", int(tok or 0), float(cost or 0.0), notes="distill")  # no shift
+
+    valid_ids = {r["id"] for r in candidates}
+    proposed = _parse_distill(text, valid_ids, max_rules)
+    if not apply or not proposed:                      # dry-run, or nothing to apply (fail-open)
+        return {"role": role, "proposed": proposed, "applied": False,
+                "reason": "" if proposed else "nothing to apply"}
+
+    new_ids: set = set()
+    for p in proposed:                                 # insert consolidated rules, pin them
+        rec = record_learning(store, role, p["rule"], scope="distilled")
+        if rec is None:
+            continue
+        lid, _created = rec                            # dedup window INCLUDES archived rows
+        store.pin_learning(lid)                        # render FIRST + never age out
+        new_ids.add(lid)
+    for p in proposed:                                 # archive the sources this run consolidated
+        for sid in p["sources"]:
+            if sid in new_ids:                         # never archive a row a rule deduped ONTO
+                continue
+            src = store.get_learning(sid)              # exact-id discipline
+            if src and src["role"] == role and not src.get("archived"):
+                store.archive_learning(sid)
+    return {"role": role, "proposed": proposed, "applied": True,
+            "distilled_ids": sorted(new_ids)}
 
 
 # -- learnings hygiene: deterministic staleness verify (Task 1.3) -------------
