@@ -17,6 +17,7 @@ class FakeAdapter:
         self._tests_passed = tests_passed
         self._merge_raises = merge_raises
         self.calls = []
+        self.merge_messages = []
 
     def frozen_paths(self):
         return self._frozen
@@ -25,8 +26,9 @@ class FakeAdapter:
         self.calls.append("run_tests")
         return (self._tests_passed, "report")
 
-    def merge_branch(self, repo, branch, **k):
+    def merge_branch(self, repo, branch, message=None, **k):
         self.calls.append(("merge", branch))
+        self.merge_messages.append(message)
         if self._merge_raises:
             raise RuntimeError("merge conflict (aborted)")
         return "MERGESHA"
@@ -146,3 +148,29 @@ def test_post_merge_grade_failure_triggers_auto_revert():
                                     champion_scores=CHAMP, grade_fn=grade, label="cand")
     assert res["action"] == "auto_reverted"
     assert ("revert", "MERGESHA") in ad.calls
+
+
+def test_merge_message_carries_task_trailer():
+    """Blindspot fix (2026-07-07): the sha→task chain must survive WITHOUT the
+    blackboard — a task_ref rides into the merge commit as a Factory-Task trailer."""
+    ad = FakeAdapter(tests_passed=True)
+    res = code_round.run_code_round(
+        adapter=ad, main_repo="/main", cand_repo="/cand", branch="factory/cand-ab12cd34",
+        diff_text=CLEAN_DIFF, champion_scores=CHAMP, grade_fn=_grade(g(0.85), g(0.85)),
+        label="factory/cand-ab12cd34",
+        task_ref="task-d242f07a: guard KeyError in execute_plan")
+    assert res["action"] == "merged"
+    assert ad.merge_messages == [
+        "factory: factory/cand-ab12cd34\n\n"
+        "Factory-Task: task-d242f07a: guard KeyError in execute_plan"
+    ]
+
+
+def test_merge_message_unchanged_without_task_ref():
+    ad = FakeAdapter(tests_passed=True)
+    res = code_round.run_code_round(
+        adapter=ad, main_repo="/main", cand_repo="/cand", branch="factory/cand-ab12cd34",
+        diff_text=CLEAN_DIFF, champion_scores=CHAMP, grade_fn=_grade(g(0.85), g(0.85)),
+        label="factory/cand-ab12cd34")
+    assert res["action"] == "merged"
+    assert ad.merge_messages == ["factory: factory/cand-ab12cd34"]
