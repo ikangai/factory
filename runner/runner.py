@@ -155,8 +155,11 @@ def _classify(acc: check_base.CheckResult, flags, *, crashed: bool,
 def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
             model_entry: dict, *, partition: str = "working",
             store: Optional[Blackboard] = None,
-            provider: Optional[EnvProvider] = None) -> dict:
-    """Run a single (candidate, scenario, model) and record it. Returns the run row."""
+            provider: Optional[EnvProvider] = None,
+            clive_root: Optional[str] = None) -> dict:
+    """Run a single (candidate, scenario, model) and record it. Returns the run row.
+    `clive_root` overrides the target SOURCE — grade a candidate's own clive checkout
+    (the real-merge-grade path) instead of the globally-configured sibling."""
     cfg = config.load_config()
     budget_cfg = cfg.get("budget", {})
     max_tokens = int(budget_cfg.get("per_run_max_tokens", 8000))
@@ -193,7 +196,7 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
         cres = adapter.run(
             goal, applied_env=applied.env, applied_flags=applied.flags,
             env_vars=env_vars, model_entry=model_entry,
-            max_tokens=max_tokens, timeout_s=timeout_s)
+            max_tokens=max_tokens, timeout_s=timeout_s, clive_root=clive_root)
 
         # --- assemble evidence -------------------------------------------
         sess_text, tokens_used, claim = _read_session_log(handle.home)

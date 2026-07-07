@@ -49,10 +49,12 @@ class TargetAdapter(abc.ABC):
     def run(self, goal: str, *, applied_env: dict[str, str],
             applied_flags: list[str], env_vars: dict[str, str],
             model_entry: dict, max_tokens: int, timeout_s: int,
-            cwd: Optional[str] = None) -> CliveResult:
+            cwd: Optional[str] = None, clive_root: Optional[str] = None,
+            clive_py: Optional[str] = None) -> CliveResult:
         """Invoke the target as a subprocess toward `goal` under the actuated
         spec + panel model, bounded by max_tokens/timeout_s. Returns CliveResult
-        (rc/stdout/stderr/duration_s/timed_out/argv/env_overrides)."""
+        (rc/stdout/stderr/duration_s/timed_out/argv/env_overrides). `clive_root`
+        overrides the target SOURCE (grade a CANDIDATE checkout, not the global one)."""
 
     # -- session/evidence recovery ------------------------------------------
     @abc.abstractmethod

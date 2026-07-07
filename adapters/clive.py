@@ -99,11 +99,13 @@ class CliveAdapter(TargetAdapter):
 
     def run(self, goal: str, *, applied_env, applied_flags, env_vars,
             model_entry, max_tokens: int, timeout_s: int,
-            cwd: Optional[str] = None) -> CliveResult:
+            cwd: Optional[str] = None, clive_root: Optional[str] = None,
+            clive_py: Optional[str] = None) -> CliveResult:
         return clive_invoke.run(
             goal, applied_env=applied_env, applied_flags=applied_flags,
             env_vars=env_vars, model_entry=model_entry,
-            max_tokens=max_tokens, timeout_s=timeout_s, cwd=cwd)
+            max_tokens=max_tokens, timeout_s=timeout_s, cwd=cwd,
+            clive_root=clive_root, clive_py=clive_py)
 
     def parse_session_dirs(self, text: str) -> list[str]:
         return clive_invoke.parse_session_dirs(text)
