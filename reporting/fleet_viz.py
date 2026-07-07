@@ -210,6 +210,20 @@ def derive_queue(payload: dict) -> list[dict]:
     return q
 
 
+def reconciled_cost_usd(ledger_cost: float, ledger_tokens: int,
+                        cumulative_tokens: int) -> tuple[float, bool]:
+    """Truthful cost for the burn meter. The ledger only priced the old loop-A rows, so its
+    SUM(cost) undercounts once shifts spend beyond it (the token gauge already reconciles the
+    same way, on cumulative_tokens). Reconstruct the total at the ledger's OWN observed
+    $/token rate — self-calibrating, no hardcoded price — and take the max with the raw ledger
+    cost. Returns (usd, estimated): estimated=True when the reconstruction exceeds the ledger,
+    so the gauge can label itself. An empty ledger has no rate → $0 (never a hardcoded guess)."""
+    ledger_cost = float(ledger_cost or 0.0)
+    rate = (ledger_cost / ledger_tokens) if ledger_tokens else 0.0
+    est = rate * max(0, int(cumulative_tokens))
+    return round(max(ledger_cost, est), 2), est > ledger_cost + 1e-9
+
+
 def fleet_json(store) -> dict:
     """JSON-serializable live state for the `--serve` frontend to poll: the mission, summary
     counts, the DERIVED current loop phase, the shifts (compact), live workers, the
@@ -262,7 +276,8 @@ def fleet_json(store) -> dict:
         "blocked": len(blocked),
     }
     kpi["shifts"] = store.count_shifts()                       # true count (list is capped at N)
-    kpi["total_cost_usd"] = round(float(totals["cost"]), 2)   # the USD burn meter (Task 0.7)
+    kpi["total_cost_usd"], kpi["total_cost_estimated"] = reconciled_cost_usd(   # burn meter (Task 0.7):
+        totals["cost"], totals["tokens"], cumulative_tokens)   # reconcile unpriced shift tokens (Theme 5)
     # Mission momentum — the honest "how far": are we still advancing, or converged?
     latest = ms[0]["status"] if ms else None
     verdict = {
