@@ -85,6 +85,7 @@ def test_build_grade_smoke_returns_grade_fn_and_measured_champion_baseline(monke
             return {"id": sid, "class": "single"}
 
     gf, champ = grade.build_grade(FakeStore(), run_one_fn=fake_run_one,
+                                  store_factory=lambda: FakeStore(),
                                   cfg={"grade": {"mode": "smoke", "smoke_scenarios": ["gate-demo"]}})
     assert callable(gf)
     assert champ["working"] == 1.0                                     # baseline measured, not {0,0}
@@ -152,3 +153,51 @@ def test_run_smoke_registers_the_grade_pseudo_candidate_for_the_runs_fk():
                     model_entry={}, candidate_id="grade",
                     run_one_fn=lambda *a, **k: {"outcome": "pass", "safety_flags": []})
     assert "grade" in added
+
+
+def test_grade_fn_uses_a_fresh_store_per_call_when_given_a_factory():
+    """The grade runs INSIDE a rail worker THREAD; with a store_factory the closure must open its
+    OWN store connection per call (and close it), never reuse a main-thread one."""
+    opened = []
+
+    class ThreadStore:
+        def __init__(self):
+            self.closed = False
+
+        def get_scenario(self, sid):
+            return {"id": sid, "check_path": "c.py"}
+
+        def close(self):
+            self.closed = True
+
+    def factory():
+        s = ThreadStore()
+        opened.append(s)
+        return s
+
+    gf = grade.make_real_grade_fn(store_factory=factory, scenario_ids=["x"], spec_path="/s",
+                                  model_entry={"name": "m"},
+                                  run_one_fn=lambda *a, **k: {"outcome": "pass", "safety_flags": []})
+    gf("/repo")
+    assert len(opened) == 1 and opened[0].closed is True     # fresh connection opened AND closed
+
+
+def test_grade_fn_survives_being_called_from_a_worker_thread(tmp_path):
+    """Regression for the live-shift bug: SQLite forbids using a connection across threads. The
+    grade closure (called in a ThreadPoolExecutor worker) must open its own connection there."""
+    import concurrent.futures
+    from factory.common.store import Blackboard
+    db = str(tmp_path / "f.db")
+    main = Blackboard(db)
+    main.init_db()                                            # `main` connection lives on THIS thread
+    (tmp_path / "s.yaml").write_text("id: gate-demo\ngoal: g\ncheck: c.py\n")
+    main.upsert_scenario("gate-demo", cls="single", partition="working", source="seed",
+                         spec_path=str(tmp_path / "s.yaml"), goal="g", check_path="c.py")
+
+    gf = grade.make_real_grade_fn(store_factory=lambda: Blackboard(db), scenario_ids=["gate-demo"],
+                                  spec_path="/s", model_entry={"name": "m"},
+                                  run_one_fn=lambda *a, **k: {"outcome": "pass", "safety_flags": []})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        result = ex.submit(gf, "/repo").result()             # runs in a DIFFERENT thread than `main`
+    assert result["working"] == 1.0                          # no cross-thread SQLite error
+    main.close()
