@@ -173,3 +173,65 @@ def test_record_graduation_failure_empty_error_is_safe(tmp_path):
         assert r["task_id"] is not None
         t = s.list_tasks(status="open")[0]
         assert "(no error text)" in t["detail"]
+
+
+# -- cmd_rebaseline: the periodic full re-baseline (Piece 5) -----------------
+def _fake_adapter(revert_sha="revert-sha"):
+    import types
+    return types.SimpleNamespace(entry=lambda: ("/champ", "/champ/clive.py"),
+                                 revert_commit=lambda repo, sha: revert_sha)
+
+
+def _scores(working=0.8, held=0.5):
+    return {"working": working, "held_out": held, "held_out_measured": True,
+            "safety_flag": False, "n_working": 1, "n_held_out": 1}
+
+
+def test_rebaseline_first_run_stores_baseline_no_regression(tmp_path, monkeypatch):
+    import json
+    with _store(tmp_path) as s:
+        monkeypatch.setattr(s, "list_scenarios", lambda **k: [{"id": "w1", "partition": "working"}])
+        monkeypatch.setattr(orch.config, "load_config", lambda: {"grade": {}})
+        res = orch.cmd_rebaseline(s, full_scores_fn=lambda store, **k: _scores(),
+                                  adapter=_fake_adapter(), champ_root="/champ")
+        assert res["regression"]["regressed"] is False and res["reverted"] is None
+        assert json.loads(s.get_setting("grade.baseline"))["working"] == 0.8   # baseline stored
+
+
+def test_rebaseline_regression_without_autorevert_reports_only(tmp_path, monkeypatch):
+    import json
+    with _store(tmp_path) as s:
+        s.set_setting("grade.baseline", json.dumps(_scores(working=0.9)))       # prior higher
+        monkeypatch.setattr(s, "list_scenarios", lambda **k: [{"id": "w1", "partition": "working"}])
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"grade": {"rebaseline_autorevert": False}})
+        res = orch.cmd_rebaseline(s, full_scores_fn=lambda store, **k: _scores(working=0.6),
+                                  adapter=_fake_adapter(), champ_root="/champ")
+        assert res["regression"]["regressed"] is True and res["reverted"] is None  # OFF → no revert
+
+
+def test_rebaseline_regression_with_autorevert_reverts_champion(tmp_path, monkeypatch):
+    import json
+    with _store(tmp_path) as s:
+        s.set_setting("grade.baseline", json.dumps(_scores(working=0.9)))
+        monkeypatch.setattr(s, "list_scenarios", lambda **k: [{"id": "w1", "partition": "working"}])
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"grade": {"rebaseline_autorevert": True}})
+        res = orch.cmd_rebaseline(s, full_scores_fn=lambda store, **k: _scores(working=0.6),
+                                  adapter=_fake_adapter(revert_sha="rv1"), champ_root="/champ",
+                                  head_sha_fn=lambda root: "headsha")
+        assert res["regression"]["regressed"] is True and res["reverted"] == "rv1"  # ON → reverted
+
+
+def test_rebaseline_dry_run_stores_nothing_and_never_reverts(tmp_path, monkeypatch):
+    import json
+    with _store(tmp_path) as s:
+        s.set_setting("grade.baseline", json.dumps(_scores(working=0.9)))
+        monkeypatch.setattr(s, "list_scenarios", lambda **k: [{"id": "w1", "partition": "working"}])
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"grade": {"rebaseline_autorevert": True}})
+        res = orch.cmd_rebaseline(s, dry_run=True, adapter=_fake_adapter(), champ_root="/champ",
+                                  full_scores_fn=lambda store, **k: _scores(working=0.6),
+                                  head_sha_fn=lambda root: "headsha")
+        assert res["reverted"] is None                                          # dry-run: no revert
+        assert json.loads(s.get_setting("grade.baseline"))["working"] == 0.9    # unchanged

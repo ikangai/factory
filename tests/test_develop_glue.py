@@ -162,6 +162,50 @@ def test_execute_claimed_tasks_closes_merged_done_and_failed_blocked(tmp_path):
     s.close()
 
 
+def test_execute_uses_stub_grade_by_default(tmp_path):
+    """Real grade is OFF by default: the rail passes grade_fn=None, so develop_task keeps the
+    _smoke_grade default (no behavioral eval, no cost)."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db")); s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "task", source="issue"); s.set_task_status("t", "in_progress", shift_id=sh)
+    seen = {}
+
+    def fake(text, **k):
+        seen["grade_fn"] = k.get("grade_fn", "MISSING")
+        return {"action": "no_candidate"}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake)
+    assert seen["grade_fn"] is None                          # stub default reached the worker
+    s.close()
+
+
+def test_execute_wires_grade_fn_and_champion_from_build_grade(tmp_path, monkeypatch):
+    """When build_grade resolves a real grade (grade.mode: smoke), the rail threads its grade_fn
+    AND the measured champion baseline into every worker dispatch."""
+    from factory.orchestrator.develop import execute_claimed_tasks
+    from factory.orchestrator import grade
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db")); s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "task", source="issue"); s.set_task_status("t", "in_progress", shift_id=sh)
+    sentinel_gf = lambda repo: {"working": 1.0}
+    sentinel_champ = {"working": 0.9, "held_out": 0.0}
+    monkeypatch.setattr(grade, "build_grade", lambda store, **k: (sentinel_gf, sentinel_champ))
+    seen = {}
+
+    def fake(text, **k):
+        seen["grade_fn"] = k.get("grade_fn")
+        seen["champion_scores"] = k.get("champion_scores")
+        return {"action": "no_candidate"}
+
+    execute_claimed_tasks(s, sh, develop_fn=fake)
+    assert seen["grade_fn"] is sentinel_gf
+    assert seen["champion_scores"] is sentinel_champ
+    s.close()
+
+
 def test_execute_dispatches_by_profile_and_ledgers_it(tmp_path):
     """Task 5.4: the rail resolves each task's capability profile ON THE MAIN THREAD and threads
     the overlay + resolved model into the worker, then ledgers the spend under the profile name.

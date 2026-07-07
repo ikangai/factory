@@ -232,6 +232,11 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                                  "overlay": prof.get("overlay", ""),
                                  "model": config.resolve_model(prof.get("model", ""))}
 
+    # Real merge-grade (Piece 4): resolve (grade_fn, champion_scores) ON THE MAIN THREAD — in
+    # 'smoke' mode this measures the champion baseline once (real clive runs) before dispatch;
+    # the DEFAULT ('stub') returns (None, None) cheaply so develop_task keeps _smoke_grade.
+    from . import grade as grademod
+    grade_fn, champion_scores = grademod.build_grade(store)
     merge_lock = threading.Lock() if real else None  # serialize the shared factory/auto merge
     workers = max(1, min(max_parallel or len(claimed), len(claimed)))
     print(f"[execute] dispatching {len(claimed)} task(s) — up to {workers} super-worker(s) "
@@ -272,7 +277,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                            merge_lock=merge_lock, memory=cards[task["id"]][0],
                            profile_overlay=prof["overlay"], model=prof["model"],
                            require_test=require_test, reviewer=reviewer,
-                           acceptance_ref=acc_ref)
+                           acceptance_ref=acc_ref, grade_fn=grade_fn,
+                           champion_scores=champion_scores)
             except Exception as e:                    # noqa: BLE001 — contain a dispatch blow-up
                 return {"action": "error", "error": str(e)}
 

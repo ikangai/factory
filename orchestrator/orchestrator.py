@@ -1256,6 +1256,57 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     return res
 
 
+def _factory_auto_head(root: str) -> Optional[str]:
+    """The champion's current HEAD sha (the last accumulated merge on factory/auto)."""
+    import subprocess
+    r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def cmd_rebaseline(store: Blackboard, *, dry_run: bool = False, full_scores_fn=None,
+                   adapter=None, champ_root: Optional[str] = None, head_sha_fn=None) -> dict:
+    """`factory rebaseline [--dry-run]` — the PERIODIC full re-baseline (real-merge-grade Piece 5).
+    Runs the FULL scenario suite (working + held-out, which the inline gate defers) against the
+    current champion source, compares to the stored baseline, and — gated by
+    grade.rebaseline_autorevert (default OFF) — auto-reverts the champion's factory/auto HEAD on a
+    regression. Reports either way. Off the merge path (a scheduled job). --dry-run measures +
+    reports but stores nothing and never reverts. All I/O seams injectable for hermetic tests."""
+    import json
+    from ..common import code_gate, paths
+    from . import grade as grademod
+    from .develop import factory_worktree
+    scenarios = store.list_scenarios()
+    if not scenarios:
+        print("[rebaseline] no active scenarios — nothing to measure.")
+        return {"action": "skip", "reason": "no-scenarios"}
+    adapter = adapter or config.get_adapter()
+    champ_root = champ_root or factory_worktree(adapter)
+    model_entry = config.panel_models()[0]
+    fs = full_scores_fn or grademod.full_scores
+    current = fs(store, clive_root=champ_root, spec_path=paths.CHAMPION_YAML,
+                 model_entry=model_entry, scenarios=scenarios)
+    prior_raw = store.get_setting("grade.baseline")
+    prior = json.loads(prior_raw) if prior_raw else None
+    reg = (code_gate.regression_after_merge(prior, current) if prior
+           else {"regressed": False, "why": ["first baseline"]})
+    autorevert = bool((config.load_config().get("grade") or {}).get("rebaseline_autorevert", False))
+    reverted = None
+    if reg["regressed"] and autorevert and not dry_run:
+        sha = (head_sha_fn or _factory_auto_head)(champ_root)
+        if sha:
+            reverted = adapter.revert_commit(champ_root, sha)
+    if not dry_run:
+        store.set_setting("grade.baseline", json.dumps(current))
+    status = ("REGRESSED: " + ", ".join(reg["why"])) if reg["regressed"] else "no regression"
+    print(f"[rebaseline] working={current.get('working')} held_out={current.get('held_out')} "
+          f"(n={current.get('n_working', 0)}w+{current.get('n_held_out', 0)}h) — {status}"
+          + (f"; reverted {reverted}" if reverted else "")
+          + (" [dry-run]" if dry_run else ""))
+    return {"action": "rebaselined", "scores": current, "regression": reg,
+            "reverted": reverted, "dry_run": dry_run}
+
+
 def _graduation_test_fn():
     """The prod-push quality gate's re-test hook (Theme 4), or None when disabled. A config-only
     brake (autonomy.graduation_retest, default ON, like enforce_shift_budget — the board can't
@@ -1729,6 +1780,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd = sub.add_parser("graduate")        # ff base->factory/auto + push + sync the target's issues
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
+    rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
+    rbl.add_argument("--dry-run", action="store_true",
+                     help="measure + report but store nothing and never auto-revert")
     lrn = sub.add_parser("learn")           # the factory's memory: agents record + read learnings
     lrn.add_argument("action", choices=["add", "list", "retire", "verify", "distill"])
     lrn.add_argument("rest", nargs="?", default=None,
@@ -1901,6 +1955,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_autopilot(a.action)
         elif a.cmd == "graduate":
             cmd_graduate(store, dry_run=a.dry_run)
+        elif a.cmd == "rebaseline":
+            cmd_rebaseline(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
             # The learn positional is action-routed (the task-CLI pattern): the learning
             # TEXT for `add` (--content also works), the integer id for `retire`. Binding

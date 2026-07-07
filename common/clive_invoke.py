@@ -77,9 +77,13 @@ def panel_env(model_entry: dict) -> dict[str, str]:
 
 
 def build(goal: str, *, applied_env: dict[str, str], applied_flags: list[str],
-          env_vars: dict[str, str], model_entry: dict,
-          max_tokens: int) -> tuple[list[str], dict[str, str]]:
-    clive_root, clive_py = config.clive_entry()
+          env_vars: dict[str, str], model_entry: dict, max_tokens: int,
+          clive_root: Optional[str] = None,
+          clive_py: Optional[str] = None) -> tuple[list[str], dict[str, str]]:
+    if clive_root is None:                            # default: the globally-configured target
+        clive_root, clive_py = config.clive_entry()
+    elif clive_py is None:                            # override: run the CANDIDATE's own clive source
+        clive_py = os.path.join(clive_root, config.target_config().get("entry", "clive.py"))
     py = config.clive_python()
 
     env = dict(os.environ)
@@ -109,12 +113,13 @@ def build(goal: str, *, applied_env: dict[str, str], applied_flags: list[str],
 
 
 def run(goal: str, *, applied_env, applied_flags, env_vars, model_entry,
-        max_tokens: int, timeout_s: int, cwd: Optional[str] = None) -> CliveResult:
+        max_tokens: int, timeout_s: int, cwd: Optional[str] = None,
+        clive_root: Optional[str] = None, clive_py: Optional[str] = None) -> CliveResult:
     argv, env = build(goal, applied_env=applied_env, applied_flags=applied_flags,
                       env_vars=env_vars, model_entry=model_entry,
-                      max_tokens=max_tokens)
-    clive_root, _ = config.clive_entry()
-    workdir = cwd or clive_root  # clive.py must run from the repo root (sys.path shim)
+                      max_tokens=max_tokens, clive_root=clive_root, clive_py=clive_py)
+    root = clive_root if clive_root is not None else config.clive_entry()[0]
+    workdir = cwd or root  # clive.py must run from the repo root (sys.path shim)
     # NB: clive's shell pane CWD is the sandbox via HOME + the goal's paths; the
     # process itself runs from the clive repo root so its imports resolve.
     start = time.time()
