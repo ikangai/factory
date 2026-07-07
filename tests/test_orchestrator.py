@@ -175,6 +175,20 @@ def test_record_graduation_failure_empty_error_is_safe(tmp_path):
         assert "(no error text)" in t["detail"]
 
 
+def test_record_graduation_failure_distinct_refs_do_not_collide(tmp_path):
+    """Edge-specific dedup (lag-alarm hardening): dedup is scoped to the caller's `ref`,
+    so an open base-edge lag task cannot swallow the publication edge's escalation —
+    while a repeat on the SAME ref still dedupes."""
+    with _store(tmp_path) as s:
+        r1 = factory_memory.record_graduation_failure(s, error="A", ref="graduation:lag-base")
+        r2 = factory_memory.record_graduation_failure(s, error="B", ref="graduation:lag-publication")
+        assert r1["deduped"] is False and r2["deduped"] is False
+        assert sorted(t["source_ref"] for t in s.list_tasks(status="open")) == \
+            ["graduation:lag-base", "graduation:lag-publication"]
+        r3 = factory_memory.record_graduation_failure(s, error="A2", ref="graduation:lag-base")
+        assert r3["deduped"] is True and len(s.list_tasks(status="open")) == 2
+
+
 # -- cmd_rebaseline: the periodic full re-baseline (Piece 5) -----------------
 def _fake_adapter(revert_sha="revert-sha"):
     import types

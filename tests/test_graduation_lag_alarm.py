@@ -8,7 +8,11 @@ these tests flaky (the real resolution only feeds the injected lag_fn's kwargs).
 T6b: the alarm watches TWO edges (real-world evidence, same day: origin/<base> edge
 read 0 — pushes current — while origin/main sat 105 commits behind because nothing
 promotes the pushed base branch to the target's DEFAULT branch). The injected lag_fn
-dispatches on the `base` kwarg so each edge's answer is scripted independently."""
+dispatches on the `base` kwarg so each edge's answer is scripted independently.
+
+Hardening: each edge files under its OWN dedup ref (graduation:lag-base /
+graduation:lag-publication) so an open base-edge task can't swallow the publication
+edge's escalation; the outer except prints instead of silently disabling the alarm."""
 from factory.orchestrator import orchestrator as orch
 
 
@@ -34,17 +38,22 @@ def _dispatch(table):
     return lag_fn
 
 
+def _collector(calls):
+    """A file_fn that records (message, dedup ref) — the alarm must scope dedup per edge."""
+    return lambda s, e, ref=None: calls.append((e, ref))
+
+
 # -- base edge (push pipeline) ------------------------------------------------
 def test_lag_alarm_prints_and_files_above_threshold(capsys, store, monkeypatch):
     _fake_config(monkeypatch)
     calls = []
     lag_fn = _dispatch({"basebr": {"ahead": 105}, "main": {"ahead": 0}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, err: calls.append(err))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert "graduation lag: 105" in out and "factory graduate" in out
-    assert len(calls) == 1 and "105" in calls[0]           # base edge only — publication is current
+    assert len(calls) == 1 and "105" in calls[0][0]        # base edge only — publication is current
+    assert calls[0][1] == "graduation:lag-base"            # edge-specific dedup ref
     assert res == {"ahead": 105, "publication": {"ahead": 0}}
 
 
@@ -53,8 +62,7 @@ def test_lag_alarm_quiet_below_threshold(capsys, store, monkeypatch):
     calls = []
     lag_fn = _dispatch({"basebr": {"ahead": 3}, "main": {"ahead": 0}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, e: calls.append(e))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert "graduation lag: 3" in out
     assert "⚠" not in out
@@ -67,8 +75,7 @@ def test_lag_alarm_unmeasurable_is_silent(capsys, store, monkeypatch):
     calls = []
     lag_fn = _dispatch({"basebr": {"ahead": None, "error": "x"}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, e: calls.append(e))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert out == ""
     assert not calls
@@ -77,15 +84,17 @@ def test_lag_alarm_unmeasurable_is_silent(capsys, store, monkeypatch):
 
 
 def test_lag_alarm_never_raises(capsys, store, monkeypatch):
+    """Never raises — but never SILENT about it either: a persistent config bug that
+    swallowed the alarm forever would recreate the exact blindspot it exists to close."""
     _fake_config(monkeypatch)
     calls = []
     res = orch._warn_graduation_lag(
         store, threshold=12,
         lag_fn=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
-        file_fn=lambda s, e: calls.append(e))
+        file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert res is None
-    assert out == ""
+    assert "lag alarm skipped" in out and "boom" in out    # traceable, not silent
     assert not calls
 
 
@@ -96,12 +105,12 @@ def test_publication_lag_prints_warns_and_files_above_threshold(capsys, store, m
     calls = []
     lag_fn = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 105}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, e: calls.append(e))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert "publication lag: 105" in out and "origin/main" in out
     assert "⚠" in out and "release_branch" in out          # remedy named
-    assert len(calls) == 1 and "publication lag" in calls[0] and "105" in calls[0]
+    assert len(calls) == 1 and "publication lag" in calls[0][0] and "105" in calls[0][0]
+    assert calls[0][1] == "graduation:lag-publication"     # its own dedup ref, not the base edge's
     assert res == {"ahead": 0, "publication": {"ahead": 105}}
     assert lag_fn.seen == ["chore", "main"]
 
@@ -111,8 +120,7 @@ def test_publication_lag_zero_is_silent(capsys, store, monkeypatch):
     calls = []
     lag_fn = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 0}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, e: calls.append(e))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert "graduation lag: 0" in out                      # base edge still reports
     assert "publication lag" not in out                    # a current default branch is not news
@@ -125,11 +133,27 @@ def test_publication_edge_skipped_when_release_equals_base(capsys, store, monkey
     calls = []
     lag_fn = _dispatch({"main": {"ahead": 5}})
     res = orch._warn_graduation_lag(
-        store, threshold=12, lag_fn=lag_fn,
-        file_fn=lambda s, e: calls.append(e))
+        store, threshold=12, lag_fn=lag_fn, file_fn=_collector(calls))
     out = capsys.readouterr().out
     assert "graduation lag: 5" in out
     assert "publication lag" not in out
     assert not calls
     assert res == {"ahead": 5}                             # no publication key — one edge, one call
     assert lag_fn.seen == ["main"]
+
+
+# -- end-to-end: the REAL failure seam, both edges, cross-edge dedup ----------
+def test_both_edges_file_distinct_tasks_and_dedup_within_edge(capsys, store, monkeypatch):
+    """No injected file_fn: the alarm routes through the real _maybe_file_graduation_failure
+    → factory_memory.record_graduation_failure (gate forced ON). Both edges above threshold
+    must file TWO distinct open tasks (edge-specific source_refs — an open base-edge task
+    must not swallow the publication escalation); a second run files none (per-edge dedup)."""
+    _fake_config(monkeypatch, target={"base_branch": "chore"})
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"failure_tasks": True}})
+    lag_fn = _dispatch({"chore": {"ahead": 100}, "main": {"ahead": 105}})
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn)
+    refs = sorted(t.get("source_ref") for t in store.list_tasks(status="open"))
+    assert refs == ["graduation:lag-base", "graduation:lag-publication"]
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn)   # same lags, next shift
+    assert len(store.list_tasks(status="open")) == 2               # deduped within each edge

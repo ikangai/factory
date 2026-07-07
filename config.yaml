@@ -32,6 +32,9 @@ target:
   # ff base_branch -> factory/auto, push origin base_branch, then sync the target's
   # GitHub issues for the pushed commits. Defaults to chore/extract-factory.
   base_branch: "chore/extract-factory"
+  # release_branch: "main"   # optional — the target's GitHub DEFAULT branch, which the
+  # shift-end publication-lag edge measures against (origin/<release_branch>..factory/auto);
+  # graduation pushes base_branch but nothing auto-promotes it there. Defaults to "main".
 
 # --- environment provisioning (§6, §11) ------------------------------------
 env:

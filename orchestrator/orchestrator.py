@@ -1084,7 +1084,6 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
 
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
-        _warn_graduation_lag(store)                    # passive, every mode (blindspot fix)
         shipped_tasks = [t for t in store.list_tasks(status="done")
                          if t.get("shift_id") == res["shift_id"]]
         m = assess(store, shift_id=res["shift_id"], shipped_count=res.get("shipped", len(shipped_tasks)),
@@ -1094,6 +1093,9 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
                              shipped=[t["id"] for t in shipped_tasks],
                              summary="shipped: " + "; ".join(t["title"] for t in shipped_tasks))
         print(f"[run] mission status: {m['status']} — {m['rationale']}")
+        # AFTER assess — a filed lag task must inform the NEXT shift's backlog, not corrupt
+        # this shift's status/plateau (mirrors _graduate_after_shift). Passive, every mode.
+        _warn_graduation_lag(store)
         if real and res.get("shipped", 0):
             root = config.get_adapter().entry()[0]
             print(f"[run] real-clive: {res['shipped']} merge(s) on branch factory/auto — review: "
@@ -1365,10 +1367,12 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
     mode — one or two local rev-lists, no fetch/push/LLM. Prints measurable lags (the
     publication edge only when > 0 — a current default branch is not news); above
     `threshold` each edge routes through the graduation-failure seam (deduped conductor
-    task, gated by autonomy.failure_tasks like every failure task). Returns the base-edge
-    dict, plus {"publication": …} when the second edge was measured (absent when
-    release == base or the base edge was unmeasurable). Never raises — an alarm must not
-    be able to kill the loop it guards."""
+    task, gated by autonomy.failure_tasks like every failure task — each edge under its
+    OWN dedup ref so one edge's open task can't swallow the other's escalation). Returns
+    the base-edge dict, plus {"publication": …} when the second edge was measured (absent
+    when release == base or the base edge was unmeasurable). Never raises — an alarm must
+    not be able to kill the loop it guards — but never silently either: a persistent skip
+    would recreate the blindspot, so the except prints its cause."""
     try:
         from ..reporting import issue_sync
         lag_fn = lag_fn or issue_sync.graduation_lag
@@ -1384,7 +1388,8 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
         if ahead > threshold:
             print(f"[run] ⚠ graduation lag {ahead} > {threshold} — run `factory graduate` "
                   f"(or check why the autopilot isn't graduating)")
-            file_fn(store, f"graduation lag: {ahead} ungraduated commit(s) on factory/auto")
+            file_fn(store, f"graduation lag: {ahead} ungraduated commit(s) on factory/auto",
+                    ref="graduation:lag-base")
         release = tc.get("release_branch") or "main"
         if release == base:                    # one branch plays both roles — one edge suffices
             return lag
@@ -1400,25 +1405,31 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                       f"set target.release_branch")
                 file_fn(store, f"publication lag: {p} commit(s) not on origin/{release} — "
                                f"graduation pushes the base branch but nothing promotes it to "
-                               f"the default branch")
+                               f"the default branch",
+                        ref="graduation:lag-publication")
         return {**lag, "publication": pub}
-    except Exception:  # noqa: BLE001 — the alarm must never crash the loop
+    except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
+        print(f"[run] lag alarm skipped (non-fatal): {e}")
         return None
 
 
-def _maybe_file_graduation_failure(store: Blackboard, error: str) -> None:
+def _maybe_file_graduation_failure(store: Blackboard, error: str, *,
+                                   ref: str = "graduation") -> None:
     """Task 5.1: when the unattended graduation/issue-sync path fails, turn the swallowed
     error into a deduped, conductor-only backlog task + a factory learning instead of
-    letting it vanish into a log print. Gated OFF by default (autonomy.failure_tasks) — a
-    passive store write (no LLM, no spend), so no STOP/mode gate is needed: the caller only
-    reaches this path when a shift actually shipped in REAL mode, which STOP already blocks
-    upstream. Never raises — it runs inside the loop-protecting except handler."""
+    letting it vanish into a log print. `ref` scopes the dedup marker per failure class
+    (default 'graduation' for graduate/sync callers; the lag alarm passes edge-specific
+    refs so its two edges escalate independently). Gated OFF by default
+    (autonomy.failure_tasks) — a passive store write (no LLM, no spend), so no STOP/mode
+    gate is needed: the caller only reaches this path when a shift actually shipped in
+    REAL mode, which STOP already blocks upstream. Never raises — it runs inside the
+    loop-protecting except handler."""
     try:
         auton = config.load_config().get("autonomy", {}) or {}
         if not auton.get("failure_tasks", False):
             return
         from ..reporting import factory_memory
-        factory_memory.record_graduation_failure(store, error=error)
+        factory_memory.record_graduation_failure(store, error=error, ref=ref)
     except Exception as ex:  # noqa: BLE001 — diagnostics must never crash the loop
         print(f"[run] failure-task filing skipped (non-fatal): {ex}")
 
