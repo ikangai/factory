@@ -1084,6 +1084,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
 
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
+        _warn_graduation_lag(store)                    # passive, every mode (blindspot fix)
         shipped_tasks = [t for t in store.list_tasks(status="done")
                          if t.get("shift_id") == res["shift_id"]]
         m = assess(store, shift_id=res["shift_id"], shipped_count=res.get("shipped", len(shipped_tasks)),
@@ -1348,6 +1349,37 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         print(f"[run] graduate+sync skipped (non-fatal error): {err}")
         _maybe_file_graduation_failure(store, err)
         return {"action": "error", "error": err}
+
+
+_GRAD_LAG_ALARM = 12   # commits ≈ 2 shifts of merges; beyond this the clean-merge surface is at risk
+
+
+def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
+                         lag_fn=None, file_fn=None) -> Optional[dict]:
+    """Shift-end PASSIVE alarm (blindspot fix 2026-07-07: lag hit 105 commits with zero
+    signal because the only reporting lived inside the real+shipped graduation path).
+    Runs in every mode — it's one local rev-list, no fetch/push/LLM. Prints the lag when
+    measurable; above `threshold` also routes through the graduation-failure seam
+    (deduped conductor task, gated by autonomy.failure_tasks like every failure task).
+    Never raises — an alarm must not be able to kill the loop it guards."""
+    try:
+        from ..reporting import issue_sync
+        lag_fn = lag_fn or issue_sync.graduation_lag
+        file_fn = file_fn or _maybe_file_graduation_failure
+        root = config.get_adapter().entry()[0]
+        base = config.target_config().get("base_branch") or "chore/extract-factory"
+        lag = lag_fn(root=root, base=base)
+        ahead = lag.get("ahead")
+        if ahead is None:
+            return lag
+        print(f"[run] graduation lag: {ahead} commit(s) on factory/auto not yet pushed to origin/{base}")
+        if ahead > threshold:
+            print(f"[run] ⚠ graduation lag {ahead} > {threshold} — run `factory graduate` "
+                  f"(or check why the autopilot isn't graduating)")
+            file_fn(store, f"graduation lag: {ahead} ungraduated commit(s) on factory/auto")
+        return lag
+    except Exception:  # noqa: BLE001 — the alarm must never crash the loop
+        return None
 
 
 def _maybe_file_graduation_failure(store: Blackboard, error: str) -> None:
