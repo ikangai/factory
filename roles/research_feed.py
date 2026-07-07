@@ -17,6 +17,16 @@ from ..common import config, paths
 from . import common
 
 
+def _clean_title(title: str, cap: int = 140) -> str:
+    """Issue titles are OUTSIDER-authored (anyone can file against the public target repo)
+    and flow into role prompts — normalize them to inert single-line data: printable chars
+    only, whitespace collapsed, length-capped. Semantic injection is handled by the prompt
+    framing (untrusted-data contract); this kills the mechanical vectors (control/format
+    chars, walls of text)."""
+    t = "".join(ch for ch in str(title) if ch.isprintable())
+    return " ".join(t.split())[:cap]
+
+
 def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
@@ -38,8 +48,8 @@ def fetch_issues(repo: str, limit: int = 25) -> str:
         return ""
     lines = []
     for it in issues:
-        labels = ",".join(l.get("name", "") for l in it.get("labels", []))
-        lines.append(f"- #{it.get('number')}: {it.get('title', '')}"
+        labels = ",".join(_clean_title(l.get("name", ""), cap=40) for l in it.get("labels", []))
+        lines.append(f"- #{it.get('number')}: {_clean_title(it.get('title', ''))}"
                      + (f"  [{labels}]" if labels else ""))
     return "\n".join(lines)
 
