@@ -1240,7 +1240,7 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
     res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
-                                       dry_run=dry_run)
+                                       test_fn=_graduation_test_fn(), dry_run=dry_run)
     action = res.get("action")
     if action in ("synced", "dry_run"):
         synced = res.get("synced", [])
@@ -1254,6 +1254,19 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     else:
         print(f"[graduate] {action}: {res.get('reason') or res.get('error', '')}")
     return res
+
+
+def _graduation_test_fn():
+    """The prod-push quality gate's re-test hook (Theme 4), or None when disabled. A config-only
+    brake (autonomy.graduation_retest, default ON, like enforce_shift_budget — the board can't
+    flip it off): re-run the TARGET's suite on the integrated factory/auto tip before pushing to
+    the real repo, since the per-task merges each tested only their own change, not the tip.
+    Returns a LAZY closure so config.get_adapter() is resolved only if the gate actually runs
+    (keeps callers that inject their own graduate_fn hermetic)."""
+    auton = config.load_config().get("autonomy", {}) or {}
+    if not auton.get("graduation_retest", True):
+        return None
+    return lambda root: config.get_adapter().run_tests(root)
 
 
 def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
@@ -1277,7 +1290,8 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         root = root or config.get_adapter().entry()[0]
         base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
         return graduate_fn(root=root, base=base, repo=repo, store=store,
-                           stop_check=stop_check or killswitch.is_halted)
+                           stop_check=stop_check or killswitch.is_halted,
+                           test_fn=_graduation_test_fn())
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
         err = str(e)
         print(f"[run] graduate+sync skipped (non-fatal error): {err}")
