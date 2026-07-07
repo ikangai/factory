@@ -210,6 +210,8 @@ def memory_card_with_ids(store, role: str, *, topic: Optional[str] = None,
         rows = store.learnings_for_role(role, limit=limit)
         factory_rows = (store.learnings_for_role("factory", limit=limit)
                         if include_factory and role != "factory" else [])
+    rows = [r for r in rows if not is_counterproductive(r)]                  # Theme 6: drop proven-bad
+    factory_rows = [r for r in factory_rows if not is_counterproductive(r)]  # (pinned survive below)
     rows = _with_pinned(store, role, rows)
     if include_factory and role != "factory":
         factory_rows = _with_pinned(store, "factory", factory_rows)
@@ -248,6 +250,21 @@ def effectiveness(row: dict) -> Optional[tuple[float, int]]:
     if n < EFFECTIVENESS_MIN_N:
         return None
     return merged / n, n
+
+
+# Below this merge share, a well-evidenced lesson (n >= EFFECTIVENESS_MIN_N) has a proven-bad
+# track record and is SUPPRESSED from the card — it stops biasing prompts, but the row is kept
+# (still in `learn list`) and a pin overrides. Suppression, not deletion: reversible + data-safe.
+_SUPPRESS_MAX_SHARE = 0.25
+
+
+def is_counterproductive(row: dict) -> bool:
+    """True when a lesson has enough outcome attributions to judge (n >= EFFECTIVENESS_MIN_N)
+    AND its merge share is at/below _SUPPRESS_MAX_SHARE — i.e. it kept preceding blocks, not
+    merges. Correlation, not proof, so the evidence floor is deliberately high and a pinned
+    lesson is never suppressed (operator override, applied in memory_card_with_ids)."""
+    eff = effectiveness(row)
+    return eff is not None and eff[0] <= _SUPPRESS_MAX_SHARE
 
 
 _HEADER_RE = re.compile(r"(?i)^#{0,3}\s*learnings?\s*:\s*(.*)$")

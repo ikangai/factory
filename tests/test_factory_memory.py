@@ -121,6 +121,43 @@ def test_memory_card_bumps_uses_on_surfaced_rows(tmp_path):
         assert s.learnings_for_role("developer")[0]["uses"] == 1
 
 
+# -- Theme 6: outcome-based suppression of counterproductive lessons ----------
+# A wrong auto-written lesson is injected into every card forever. The factory already
+# attributes each surfaced lesson's downstream outcome (merged_after / blocked_after). Once a
+# lesson has enough evidence (n >= EFFECTIVENESS_MIN_N) and a poor merge share, it is dropped
+# from the card — data preserved (still in `learn list`), reversible, pin overrides.
+
+def test_memory_card_suppresses_counterproductive_learnings(tmp_path):
+    with _store(tmp_path) as s:
+        factory_memory.record_learning(s, "developer", "narrow briefs to one landable slice")
+        bad = s.add_learning("developer", "always refactor the whole module first")
+        s.bump_learning_outcomes([bad], merged=True)              # 1 merge …
+        for _ in range(14):
+            s.bump_learning_outcomes([bad], merged=False)         # … 14 blocks → n=15, share≈0.07
+        card = factory_memory.memory_card(s, "developer")
+        assert "narrow briefs" in card                            # healthy lesson kept
+        assert "refactor the whole module" not in card            # proven-bad lesson suppressed
+
+
+def test_memory_card_keeps_bad_ratio_below_evidence_floor(tmp_path):
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "prefer sibling-site helper reuse")
+        s.bump_learning_outcomes([lid], merged=False)             # 0/1 — n < EFFECTIVENESS_MIN_N
+        card = factory_memory.memory_card(s, "developer")
+        assert "sibling-site helper" in card                      # too little evidence → kept
+
+
+def test_memory_card_keeps_pinned_even_when_counterproductive(tmp_path):
+    with _store(tmp_path) as s:
+        bad = s.add_learning("developer", "rewrite the tests from scratch every time")
+        s.bump_learning_outcomes([bad], merged=True)
+        for _ in range(14):
+            s.bump_learning_outcomes([bad], merged=False)
+        s.pin_learning(bad)                                        # operator override
+        card = factory_memory.memory_card(s, "developer")
+        assert "rewrite the tests from scratch" in card           # pin wins over auto-suppression
+
+
 # -- CLI: factory learn ------------------------------------------------------
 def test_cmd_learn_add_records(tmp_path):
     with _store(tmp_path) as s:
