@@ -1356,18 +1356,26 @@ _GRAD_LAG_ALARM = 12   # commits ≈ 2 shifts of merges; beyond this the clean-m
 
 def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                          lag_fn=None, file_fn=None) -> Optional[dict]:
-    """Shift-end PASSIVE alarm (blindspot fix 2026-07-07: lag hit 105 commits with zero
-    signal because the only reporting lived inside the real+shipped graduation path).
-    Runs in every mode — it's one local rev-list, no fetch/push/LLM. Prints the lag when
-    measurable; above `threshold` also routes through the graduation-failure seam
-    (deduped conductor task, gated by autonomy.failure_tasks like every failure task).
-    Never raises — an alarm must not be able to kill the loop it guards."""
+    """Shift-end PASSIVE alarm on BOTH graduation edges (blindspot fixes 2026-07-07):
+    (1) base edge — origin/<base>..factory/auto, the push pipeline stalled (lag hit 105
+    commits with zero signal because the only reporting lived inside the real+shipped
+    graduation path); (2) publication edge — origin/<release>..factory/auto, pushes land
+    on the base branch but nothing PROMOTES them to the target's default branch (same-day
+    evidence: base edge read 0 while origin/main sat 105 commits behind). Runs in every
+    mode — one or two local rev-lists, no fetch/push/LLM. Prints measurable lags (the
+    publication edge only when > 0 — a current default branch is not news); above
+    `threshold` each edge routes through the graduation-failure seam (deduped conductor
+    task, gated by autonomy.failure_tasks like every failure task). Returns the base-edge
+    dict, plus {"publication": …} when the second edge was measured (absent when
+    release == base or the base edge was unmeasurable). Never raises — an alarm must not
+    be able to kill the loop it guards."""
     try:
         from ..reporting import issue_sync
         lag_fn = lag_fn or issue_sync.graduation_lag
         file_fn = file_fn or _maybe_file_graduation_failure
         root = config.get_adapter().entry()[0]
-        base = config.target_config().get("base_branch") or "chore/extract-factory"
+        tc = config.target_config()
+        base = tc.get("base_branch") or "chore/extract-factory"
         lag = lag_fn(root=root, base=base)
         ahead = lag.get("ahead")
         if ahead is None:
@@ -1377,7 +1385,23 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
             print(f"[run] ⚠ graduation lag {ahead} > {threshold} — run `factory graduate` "
                   f"(or check why the autopilot isn't graduating)")
             file_fn(store, f"graduation lag: {ahead} ungraduated commit(s) on factory/auto")
-        return lag
+        release = tc.get("release_branch") or "main"
+        if release == base:                    # one branch plays both roles — one edge suffices
+            return lag
+        pub = lag_fn(root=root, base=release)
+        p = pub.get("ahead")
+        if p is not None:
+            if p > 0:
+                print(f"[run] publication lag: {p} commit(s) on factory/auto not on "
+                      f"origin/{release} (the target's default branch)")
+            if p > threshold:
+                print(f"[run] ⚠ publication lag {p} > {threshold} — base pushes are current but "
+                      f"nothing promotes them to origin/{release} — promote/merge on GitHub or "
+                      f"set target.release_branch")
+                file_fn(store, f"publication lag: {p} commit(s) not on origin/{release} — "
+                               f"graduation pushes the base branch but nothing promotes it to "
+                               f"the default branch")
+        return {**lag, "publication": pub}
     except Exception:  # noqa: BLE001 — the alarm must never crash the loop
         return None
 
