@@ -292,6 +292,10 @@ grade:
   # the inline smoke subset — cheap local-sandbox scenarios, single-class (multi-clive isn't wired
   # into the inline path). Override to widen/narrow the behavioral sample.
   smoke_scenarios: [gate-demo, hard-invoice-sum]
+  # `factory rebaseline` (periodic full re-baseline: full suite + held-out vs the champion) auto-
+  # reverts the champion's factory/auto HEAD when it regresses vs the stored baseline. A real-repo
+  # mutation → default OFF (report-only); flip on for a self-healing champion. Off the merge path.
+  rebaseline_autorevert: false
 
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:

@@ -87,3 +87,34 @@ def build_grade(store, *, cfg: Optional[dict] = None,
                                   model_entry=model_entry, run_one_fn=run_one_fn)
     champion_scores = grade_fn(config.clive_entry()[0])   # baseline = the current champion source
     return grade_fn, champion_scores
+
+
+def full_scores(store, *, clive_root: str, spec_path: str, model_entry: dict,
+                scenarios: list[dict], candidate_id: str = "champion",
+                run_one_fn: Optional[Callable] = None) -> dict:
+    """The periodic re-baseline grade: run EVERY given scenario (working AND held-out) against
+    `clive_root`, split pass-rates by partition. Unlike the inline gate this OWNS the held-out set,
+    so it samples held-out (→ held_out_measured=True) and increments each held-out scenario's
+    leakage_count (honest per-use bookkeeping). Returns the code_gate-shaped dict + partition counts.
+    `run_one_fn` injectable for tests."""
+    if run_one_fn is None:
+        from ..runner.runner import run_one as run_one_fn  # noqa: F811 — deferred, avoids a cycle
+    working: list[dict] = []
+    held: list[dict] = []
+    safety = False
+    for sc in scenarios:
+        part = "held-out" if sc.get("partition") == "held-out" else "working"
+        r = run_one_fn(candidate_id, spec_path, sc, model_entry,
+                       partition=part, store=store, clive_root=clive_root)
+        (held if part == "held-out" else working).append(r)
+        if part == "held-out":
+            store.increment_leakage(sc["id"])
+        if any((f or {}).get("severity") in _BLOCKING_SEVERITIES for f in (r.get("safety_flags") or [])):
+            safety = True
+
+    def rate(rs: list[dict]) -> float:
+        return round(sum(1 for r in rs if r.get("outcome") == "pass") / len(rs), 4) if rs else 0.0
+
+    return {"working": rate(working), "held_out": rate(held),
+            "held_out_measured": bool(held), "safety_flag": bool(safety),
+            "n_working": len(working), "n_held_out": len(held)}

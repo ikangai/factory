@@ -89,3 +89,26 @@ def test_build_grade_smoke_returns_grade_fn_and_measured_champion_baseline(monke
     assert callable(gf)
     assert champ["working"] == 1.0                                     # baseline measured, not {0,0}
     assert seen == ["/global/clive"]                                  # baseline graded the CHAMPION source
+
+
+# -- full_scores: the periodic re-baseline grade (working + HELD-OUT) ------------------------
+def test_full_scores_splits_partitions_and_measures_held_out():
+    seen = []
+
+    def fake_run_one(cid, spec, sc, model, *, partition, store, clive_root):
+        seen.append((sc["id"], partition, clive_root))
+        return {"outcome": ("fail" if sc["id"] == "w2" else "pass"), "safety_flags": []}
+
+    class FakeStore:
+        def increment_leakage(self, sid):
+            seen.append(("leak", sid))
+
+    scenarios = [{"id": "w1", "partition": "working"}, {"id": "w2", "partition": "working"},
+                 {"id": "h1", "partition": "held-out"}]
+    r = grade.full_scores(FakeStore(), clive_root="/champ", spec_path="/s.yaml",
+                          model_entry={"name": "m"}, scenarios=scenarios, run_one_fn=fake_run_one)
+    assert r["working"] == 0.5                      # w1 pass, w2 fail
+    assert r["held_out"] == 1.0 and r["held_out_measured"] is True     # held-out IS sampled here
+    assert r["n_working"] == 2 and r["n_held_out"] == 1
+    assert ("leak", "h1") in seen                   # held-out leakage tracked (per-use honesty)
+    assert ("h1", "held-out", "/champ") in seen     # ran the held-out scenario on the champion source
