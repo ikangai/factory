@@ -82,17 +82,29 @@ def run_smoke(store, *, clive_root: str, scenario_ids: list[str], spec_path: str
     return runs
 
 
-def make_real_grade_fn(store, *, scenario_ids: list[str], spec_path: str, model_entry: dict,
-                       candidate_id: str = "grade",
-                       run_one_fn: Optional[Callable] = None) -> Callable[[str], dict]:
+def make_real_grade_fn(store=None, *, scenario_ids: list[str], spec_path: str, model_entry: dict,
+                       candidate_id: str = "grade", run_one_fn: Optional[Callable] = None,
+                       store_factory: Optional[Callable] = None) -> Callable[[str], dict]:
     """Build the `grade_fn(repo_dir) -> grade dict` closure that `code_round.run_code_round` calls
     (pre-merge on the candidate, post-merge on the champion). Its only per-call input is the
-    checkout to grade; everything else is captured here."""
+    checkout to grade; everything else is captured here.
+
+    THREADING: run_code_round runs inside a rail WORKER THREAD, and SQLite forbids using a
+    connection across threads. Pass `store_factory` (e.g. Blackboard) → the closure opens a FRESH
+    thread-local connection per call and closes it. `store` (one connection) is only for
+    single-threaded callers / tests."""
     def grade(repo_dir: str) -> dict:
-        runs = run_smoke(store, clive_root=repo_dir, scenario_ids=scenario_ids,
-                         spec_path=spec_path, model_entry=model_entry,
-                         candidate_id=candidate_id, run_one_fn=run_one_fn)
-        return smoke_scores(runs)
+        gstore = store_factory() if store_factory is not None else store
+        try:
+            runs = run_smoke(gstore, clive_root=repo_dir, scenario_ids=scenario_ids,
+                             spec_path=spec_path, model_entry=model_entry,
+                             candidate_id=candidate_id, run_one_fn=run_one_fn)
+            return smoke_scores(runs)
+        finally:
+            if store_factory is not None:                # close only the connection WE opened
+                close = getattr(gstore, "close", None)
+                if callable(close):
+                    close()
 
     return grade
 
@@ -103,7 +115,8 @@ _DEFAULT_SMOKE = ["gate-demo", "hard-invoice-sum"]
 
 
 def build_grade(store, *, cfg: Optional[dict] = None,
-                run_one_fn: Optional[Callable] = None) -> tuple[Optional[Callable], Optional[dict]]:
+                run_one_fn: Optional[Callable] = None,
+                store_factory: Optional[Callable] = None) -> tuple[Optional[Callable], Optional[dict]]:
     """Resolve `(grade_fn, champion_scores)` from config for the rail. `grade.mode` 'stub'
     (DEFAULT) → `(None, None)`, so `develop_task` keeps the `_smoke_grade` default — the real
     grade is OFF unless opted in. 'smoke' → the inline behavioral grade closure PLUS a champion
@@ -116,8 +129,12 @@ def build_grade(store, *, cfg: Optional[dict] = None,
         return None, None
     scenario_ids = gcfg.get("smoke_scenarios") or _DEFAULT_SMOKE
     model_entry = config.panel_models()[0]
-    grade_fn = make_real_grade_fn(store, scenario_ids=scenario_ids, spec_path=paths.CHAMPION_YAML,
-                                  model_entry=model_entry, run_one_fn=run_one_fn)
+    if store_factory is None:                            # each grade call opens its OWN connection
+        from ..common.store import Blackboard           # (grades run in rail worker threads)
+        store_factory = Blackboard
+    grade_fn = make_real_grade_fn(scenario_ids=scenario_ids, spec_path=paths.CHAMPION_YAML,
+                                  model_entry=model_entry, run_one_fn=run_one_fn,
+                                  store_factory=store_factory)
     champion_scores = grade_fn(config.clive_entry()[0])   # baseline = the current champion source
     return grade_fn, champion_scores
 
