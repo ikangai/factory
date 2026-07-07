@@ -139,12 +139,15 @@ def commits_in_range(root: str, rng: str, *, runner=subprocess.run) -> list[dict
 
 def graduate_and_push(*, root: str, base: str, repo: str, store,
                       auto_branch: str = "factory/auto", remote: str = "origin",
-                      runner=subprocess.run, stop_check=None,
+                      runner=subprocess.run, stop_check=None, test_fn=None,
                       dry_run: bool = False) -> dict:
     """Graduate (ff `base` → `auto_branch`), push `base` to `remote`, then sync the
     issues referenced by the newly-pushed commits. Fails CLOSED at every step — skips
     (never forces) when STOP is set, the repo isn't on `base`, the merge isn't a
-    fast-forward, or the push is rejected. `dry_run` mutates nothing and previews the
+    fast-forward, the pushed diff is a no-op, the integrated tip fails re-test, or the
+    push is rejected. `test_fn(root) -> (passed, report)` is the prod-push quality gate:
+    when given, the target's suite is re-run on the integrated tip before the push and a
+    red tip skips ('tests-failed'). `dry_run` mutates nothing and previews the
     `remote/base..auto_branch` range. git+gh go through `runner` (injected for tests)."""
     if stop_check and stop_check():
         return {"action": "skip", "reason": "stop"}
@@ -179,6 +182,11 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     noop = git("diff", "-w", "--quiet", old_sha, "HEAD")
     if getattr(noop, "returncode", 1) == 0:
         return {"action": "skip", "reason": "no-op"}
+
+    if test_fn is not None:                          # prod-push quality gate (Theme 4): the per-task
+        passed, report = test_fn(root)               # merges each tested their own change, but not
+        if not passed:                               # the INTEGRATED tip — re-run the suite on it and
+            return {"action": "skip", "reason": "tests-failed", "report": report}   # skip if red
 
     push = git("push", remote, base)                # plain push: a rejected push fails, never forces
     if getattr(push, "returncode", 1) != 0:

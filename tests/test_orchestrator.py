@@ -36,6 +36,41 @@ def _gate(monkeypatch, *, on: bool):
                         lambda: {"autonomy": {"failure_tasks": on}})
 
 
+# -- prod-push quality gate wiring (Theme 4) --------------------------------
+def test_graduation_retest_wires_the_adapter_suite_when_on(tmp_path, monkeypatch):
+    import types
+    with _store(tmp_path) as s:
+        captured = {}
+
+        def capture(**kw):
+            captured.update(kw)
+            return {"action": "synced"}
+
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"autonomy": {"graduation_retest": True}})
+        monkeypatch.setattr(orch.config, "get_adapter",
+                            lambda: types.SimpleNamespace(run_tests=lambda cwd, **k: (True, "ok")))
+        orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=capture,
+                                   repo="o/r", root="/root", base="base")
+        assert captured.get("test_fn") is not None
+        assert captured["test_fn"]("/root") == (True, "ok")     # routes to the adapter's suite
+
+
+def test_graduation_retest_passes_no_test_fn_when_off(tmp_path, monkeypatch):
+    with _store(tmp_path) as s:
+        captured = {}
+
+        def capture(**kw):
+            captured.update(kw)
+            return {"action": "synced"}
+
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"autonomy": {"graduation_retest": False}})
+        orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=capture,
+                                   repo="o/r", root="/root", base="base")
+        assert captured.get("test_fn") is None
+
+
 # -- _graduate_after_shift wiring -------------------------------------------
 def test_graduation_error_files_conductor_task_and_learning_when_gated_on(tmp_path, monkeypatch):
     with _store(tmp_path) as s:

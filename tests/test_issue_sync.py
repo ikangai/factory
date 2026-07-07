@@ -310,6 +310,42 @@ def test_graduate_skips_a_whitespace_only_noop_before_pushing(tmp_path):
         assert not any(a[0] == "gh" for a in f.calls)       # never auto-closed an issue for nothing
 
 
+def test_graduate_reblocks_push_when_the_integrated_tip_fails_retest(tmp_path):
+    """Prod-push quality gate: the per-task merges each tested their own change, but not the
+    INTEGRATED tip. A red re-test of the tip skips the push (fail-closed) — nothing reaches prod."""
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r", store=s,
+                                           runner=f, test_fn=lambda root: (False, "2 failed"))
+        assert res["action"] == "skip" and res["reason"] == "tests-failed"
+        assert res.get("report") == "2 failed"
+        assert "push" not in f.git_subcmds()                # never pushed a red tip to prod
+        assert not any(a[0] == "gh" for a in f.calls)       # no issue sync after a red gate
+
+
+def test_graduate_pushes_when_the_tip_passes_retest(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r", store=s,
+                                           runner=f, test_fn=lambda root: (True, "ok"))
+        assert res["action"] == "synced" and "push" in f.git_subcmds()
+
+
+def test_graduate_does_not_retest_a_no_op(tmp_path):
+    """The cheap no-op guard runs BEFORE the (expensive) re-test — a no-op never spends a run."""
+    with _store(tmp_path) as s:
+        ran = {"n": 0}
+
+        def retest(root):
+            ran["n"] += 1
+            return (True, "")
+
+        f = _GitFake(branch="base", diff_rc=0, log=_log([{"sha": "c1", "subject": "style"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r", store=s,
+                                           runner=f, test_fn=retest)
+        assert res["reason"] == "no-op" and ran["n"] == 0
+
+
 def test_graduate_skips_on_stop(tmp_path):
     with _store(tmp_path) as s:
         f = _GitFake(branch="base")
