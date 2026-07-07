@@ -62,3 +62,28 @@ def make_real_grade_fn(store, *, scenario_ids: list[str], spec_path: str, model_
         return smoke_scores(runs)
 
     return grade
+
+
+# The default smoke subset — cheap local-sandbox scenarios, single-class (multi-clive isn't wired
+# into the inline path). Overridable via config `grade.smoke_scenarios`.
+_DEFAULT_SMOKE = ["gate-demo", "hard-invoice-sum"]
+
+
+def build_grade(store, *, cfg: Optional[dict] = None,
+                run_one_fn: Optional[Callable] = None) -> tuple[Optional[Callable], Optional[dict]]:
+    """Resolve `(grade_fn, champion_scores)` from config for the rail. `grade.mode` 'stub'
+    (DEFAULT) → `(None, None)`, so `develop_task` keeps the `_smoke_grade` default — the real
+    grade is OFF unless opted in. 'smoke' → the inline behavioral grade closure PLUS a champion
+    baseline measured ONCE (the current champion source), so `working_delta` is a real
+    champion-vs-candidate diff instead of the vacuous 0-vs-0. `run_one_fn` injectable for tests."""
+    from ..common import config, paths
+    cfg = cfg if cfg is not None else config.load_config()
+    gcfg = (cfg.get("grade") or {})
+    if str(gcfg.get("mode") or "stub").lower() != "smoke":
+        return None, None
+    scenario_ids = gcfg.get("smoke_scenarios") or _DEFAULT_SMOKE
+    model_entry = config.panel_models()[0]
+    grade_fn = make_real_grade_fn(store, scenario_ids=scenario_ids, spec_path=paths.CHAMPION_YAML,
+                                  model_entry=model_entry, run_one_fn=run_one_fn)
+    champion_scores = grade_fn(config.clive_entry()[0])   # baseline = the current champion source
+    return grade_fn, champion_scores
