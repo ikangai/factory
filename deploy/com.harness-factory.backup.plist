@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Recurring WAL-safe backup of the factory blackboard (durability: the DB is a single,
+     gitignored, iCloud-synced file with no other copy). Runs every 3h + at load.
+     Install:  cp deploy/com.harness-factory.backup.plist ~/Library/LaunchAgents/ \
+               && launchctl load ~/Library/LaunchAgents/com.harness-factory.backup.plist
+     Remove:   launchctl unload ~/Library/LaunchAgents/com.harness-factory.backup.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.harness-factory.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/martintreiber/Documents/Development/factory/scripts/backup_blackboard.sh</string>
+  </array>
+  <key>StartInterval</key><integer>10800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/martintreiber/Documents/Development/factory/logs/backup.log</string>
+  <key>StandardErrorPath</key><string>/Users/martintreiber/Documents/Development/factory/logs/backup.log</string>
+</dict>
+</plist>
