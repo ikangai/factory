@@ -153,6 +153,41 @@ def test_resolved_failure_task_does_not_block_a_fresh_one(tmp_path, monkeypatch)
         assert len(s.list_tasks(status="open")) == 1         # a fresh one
 
 
+def test_abnormal_graduate_skip_files_failure(tmp_path, monkeypatch):
+    """An abnormal skip (reason not 'stop'/'no-op') escalates through the failure seam
+    just like a raised graduate error (2026-07-07 blindspot pass)."""
+    with _store(tmp_path) as s:
+        _gate(monkeypatch, on=True)
+
+        def skip_fn(**kw):
+            return {"action": "skip", "reason": "push-failed"}
+
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=skip_fn,
+                                         repo="o/r", root="/x", base="base")
+        assert res["reason"] == "push-failed"
+        # filed a failure task, just like a raised error would
+        tasks = s.list_tasks(status="open")
+        assert len(tasks) == 1
+        t = tasks[0]
+        assert t["source_ref"] == "graduation"
+        assert "graduate skipped: push-failed" in t["detail"]
+
+
+def test_benign_graduate_skip_stays_quiet(tmp_path, monkeypatch):
+    """Benign skips (stop = operator brake, no-op = nothing to push) are NOT escalated."""
+    with _store(tmp_path) as s:
+        _gate(monkeypatch, on=True)
+
+        for reason in ("stop", "no-op"):
+            def skip_fn(**kw):
+                return {"action": "skip", "reason": reason}
+
+            orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=skip_fn,
+                                       repo="o/r", root="/x", base="base")
+        # no failure tasks filed for benign skips
+        assert s.list_tasks(status="open") == []
+
+
 # -- factory_memory.record_graduation_failure (unit) ------------------------
 def test_record_graduation_failure_shapes_and_dedup(tmp_path):
     with _store(tmp_path) as s:

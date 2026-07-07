@@ -1343,9 +1343,16 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             return {"action": "skip", "reason": "no-repo"}
         root = root or config.get_adapter().entry()[0]
         base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
-        return graduate_fn(root=root, base=base, repo=repo, store=store,
-                           stop_check=stop_check or killswitch.is_halted,
-                           test_fn=_graduation_test_fn())
+        res = graduate_fn(root=root, base=base, repo=repo, store=store,
+                          stop_check=stop_check or killswitch.is_halted,
+                          test_fn=_graduation_test_fn())
+        # A silent abnormal skip is how a broken graduation pipeline stays invisible
+        # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
+        # broken" through the same deduped failure seam as a raised graduate error;
+        # benign: stop = operator brake, no-op = nothing worth pushing.
+        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op"):
+            _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
+        return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
         err = str(e)
         print(f"[run] graduate+sync skipped (non-fatal error): {err}")
