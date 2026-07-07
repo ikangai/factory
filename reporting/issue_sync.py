@@ -137,6 +137,24 @@ def commits_in_range(root: str, rng: str, *, runner=subprocess.run) -> list[dict
     return commits
 
 
+def graduation_lag(*, root: str, base: str, auto_branch: str = "factory/auto",
+                   remote: str = "origin", runner=subprocess.run) -> dict:
+    """How far the champion has drifted ahead of the last push: commits on `auto_branch`
+    that `remote/base` never received. PASSIVE (no fetch, no mutation) — safe to call
+    every shift in any mode. Returns {'ahead': int} or, when a ref is missing/unreadable,
+    {'ahead': None, 'error': str} — callers alarm on ahead>threshold, never on error.
+    Blindspot fix 2026-07-07: the lag reached 105 commits with zero signal."""
+    out = runner(["git", "-C", root, "rev-list", "--count",
+                  f"{remote}/{base}..{auto_branch}"],
+                 capture_output=True, text=True, timeout=30)
+    if getattr(out, "returncode", 1) != 0:
+        return {"ahead": None, "error": (getattr(out, "stderr", "") or "").strip()[:120]}
+    try:
+        return {"ahead": int((out.stdout or "").strip())}
+    except ValueError:
+        return {"ahead": None, "error": "unparsable rev-list output"}
+
+
 def graduate_and_push(*, root: str, base: str, repo: str, store,
                       auto_branch: str = "factory/auto", remote: str = "origin",
                       runner=subprocess.run, stop_check=None, test_fn=None,

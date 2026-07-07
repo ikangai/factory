@@ -491,3 +491,31 @@ def test_cmd_graduate_skips_without_a_repo(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
         monkeypatch.setattr(orch.config, "target_repo_slug", lambda: "")
         assert orch.cmd_graduate(s) is None
+
+
+# -- graduation_lag (blindspot fix 2026-07-07: passive unpushed-commit counter) --
+def test_graduation_lag_counts_unpushed_commits():
+    """graduation_lag measures how far the champion has drifted ahead of the last push."""
+    def fake_runner(argv, **kw):
+        # Expect: ["git", "-C", "/r", "rev-list", "--count", "origin/base..factory/auto"]
+        assert argv == ["git", "-C", "/r", "rev-list", "--count", "origin/base..factory/auto"]
+        return _Run(returncode=0, stdout="105\n")
+
+    result = issue_sync.graduation_lag(root="/r", base="base", runner=fake_runner)
+    assert result == {"ahead": 105}
+
+
+def test_graduation_lag_missing_ref_is_quiet():
+    """graduation_lag returns None+error when a ref is missing, never raises."""
+    class _RunWithError:
+        def __init__(self):
+            self.returncode = 128
+            self.stdout = ""
+            self.stderr = "fatal: unknown revision origin/base\n"
+
+    def fake_runner(argv, **kw):
+        return _RunWithError()
+
+    result = issue_sync.graduation_lag(root="/r", base="base", runner=fake_runner)
+    assert result["ahead"] is None
+    assert "unknown revision" in result["error"]
