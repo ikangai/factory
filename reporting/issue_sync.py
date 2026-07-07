@@ -171,6 +171,15 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     if not old_sha:
         return {"action": "skip", "reason": "no-remote-ref"}
 
+    # No-op guard (Theme 4): never push (or keyword-close an issue for) a change that is empty
+    # once whitespace is ignored. The merge gate only rejects a fully-empty diff, so a
+    # whitespace-only "fix" could otherwise reach production and auto-close a real issue.
+    # `git diff -w --quiet` exits 0 iff there is NO non-whitespace change in the pushed range;
+    # only that certain-no-op case skips — any other exit (has-diff, or a diff error) proceeds.
+    noop = git("diff", "-w", "--quiet", old_sha, "HEAD")
+    if getattr(noop, "returncode", 1) == 0:
+        return {"action": "skip", "reason": "no-op"}
+
     push = git("push", remote, base)                # plain push: a rejected push fails, never forces
     if getattr(push, "returncode", 1) != 0:
         return {"action": "skip", "reason": "push-failed"}

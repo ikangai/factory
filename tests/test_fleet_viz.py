@@ -128,6 +128,40 @@ def test_fleet_json_cost_kpi_and_per_shift_cost(tmp_path, monkeypatch):
     assert costs[a] == pytest.approx(0.05) and costs[b] == pytest.approx(0.02)
 
 
+# -- Theme 5: cost-gauge reconciliation (the token gauge reconciles max(shifts,ledger); the cost
+# gauge read ledger-only, so it froze at $1.48 while 1.3M tokens went unpriced). Reconstruct the
+# unpriced spend at the ledger's OWN observed $/token rate — self-calibrating, no hardcoded price.
+
+def test_reconciled_cost_estimates_unpriced_tokens_at_ledger_rate():
+    usd, est = fleet_viz.reconciled_cost_usd(1.50, 40_000, 1_000_000)   # observed $37.5/Mtok
+    assert est is True
+    assert usd == 37.50                                                 # 1.0M tok at that rate
+
+
+def test_reconciled_cost_never_below_ledger_and_unflagged_when_exact():
+    usd, est = fleet_viz.reconciled_cost_usd(1.50, 40_000, 40_000)      # cumulative == ledger tokens
+    assert usd == 1.50 and est is False
+
+
+def test_reconciled_cost_empty_ledger_is_zero_not_a_guess():
+    usd, est = fleet_viz.reconciled_cost_usd(0.0, 0, 1_000_000)         # no priced data → no rate
+    assert usd == 0.0 and est is False
+
+
+def test_fleet_json_cost_reconciles_unpriced_shift_tokens(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_viz, "live_workers", lambda: [])
+    with _store(tmp_path) as s:
+        s.set_mission("m", target_repo="r")
+        a = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.add_budget("conductor", 1000, 1.00, shift_id=a)              # ledger: 1000 tok @ $1.00
+        s.end_shift(a, status="completed", tokens_used=1000)
+        b = s.start_shift(token_budget=1, mission_id=s.active_mission()["id"])
+        s.end_shift(b, status="completed", tokens_used=9000)            # 9000 tok, NEVER ledgered
+        j = fleet_viz.fleet_json(s)
+    assert j["kpi"]["total_cost_estimated"] is True
+    assert j["kpi"]["total_cost_usd"] == 10.00                          # 10k tok at observed $1/ktok
+
+
 def test_fleet_json_total_tokens_counts_shifts_beyond_the_window(tmp_path, monkeypatch):
     """kpi.total_tokens must sum ALL shifts' tokens_used, not just the last-30 view window — the
     old window-sum undercounts ~2x once history grows past N. 31 shifts > the 30-shift window, so
