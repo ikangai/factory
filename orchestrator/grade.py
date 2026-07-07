@@ -11,10 +11,42 @@ Design: docs/plans/2026-07-07-real-merge-grade-design.md. Config-gated, default 
 """
 from __future__ import annotations
 
+import os
+
 from typing import Callable, Optional
 
 # A safety trip blocks the merge only at these severities (mirrors the promotion gate's intent).
 _BLOCKING_SEVERITIES = frozenset({"high", "critical"})
+
+
+def _load_scenario(row: dict) -> dict:
+    """run_one consumes the authoritative scenario YAML (check / goal / snapshot / members), not
+    the raw store row (which carries `check_path`, not `check`). Reload the YAML from the row's
+    spec_path when present (mirrors the old harness's _scenario_dict); always expose `check` so a
+    store-fetched row runs unchanged. Guarded so hermetic tests (fake rows, no file) still work."""
+    import yaml
+    sc = dict(row)
+    path = row.get("spec_path")
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            sc = yaml.safe_load(fh) or {}
+        sc["id"] = row["id"]
+        sc["partition"] = row.get("partition", "working")
+    sc.setdefault("check", row.get("check_path") or sc.get("check", ""))
+    return sc
+
+
+def _ensure_candidate(store, candidate_id: str) -> None:
+    """runs.candidate_id is an FK to candidates(id); a code-grade has no candidate spec row, so
+    register a lightweight pseudo-candidate once (idempotent) — grade runs then satisfy the FK
+    without polluting the champion's runs. getattr-guarded so hermetic fake stores stay simple."""
+    getc = getattr(store, "get_candidate", None)
+    if getc is None:
+        return
+    if getc(candidate_id) is None:
+        from ..common import paths
+        store.add_candidate(candidate_id, "champion", paths.CHAMPION_YAML,
+                            change_summary="(code-grade evidence)", stage="promoted")
 
 
 def smoke_scores(runs: list[dict]) -> dict:
@@ -32,25 +64,26 @@ def smoke_scores(runs: list[dict]) -> dict:
 
 
 def run_smoke(store, *, clive_root: str, scenario_ids: list[str], spec_path: str,
-              model_entry: dict, candidate_id: str = "code-candidate",
+              model_entry: dict, candidate_id: str = "grade",
               run_one_fn: Optional[Callable] = None) -> list[dict]:
     """Run each smoke-subset scenario against the candidate's clive source (`clive_root`), holding
     the spec constant (the champion config) so only the CODE differs. `run_one_fn` is injectable so
     tests never spawn a real clive. Unknown scenario ids are skipped."""
     if run_one_fn is None:
         from ..runner.runner import run_one as run_one_fn  # noqa: F811 — deferred, avoids a cycle
+    _ensure_candidate(store, candidate_id)
     runs: list[dict] = []
     for sid in scenario_ids:
-        scenario = store.get_scenario(sid)
-        if not scenario:
+        row = store.get_scenario(sid)
+        if not row:
             continue
-        runs.append(run_one_fn(candidate_id, spec_path, scenario, model_entry,
+        runs.append(run_one_fn(candidate_id, spec_path, _load_scenario(row), model_entry,
                                partition="working", store=store, clive_root=clive_root))
     return runs
 
 
 def make_real_grade_fn(store, *, scenario_ids: list[str], spec_path: str, model_entry: dict,
-                       candidate_id: str = "code-candidate",
+                       candidate_id: str = "grade",
                        run_one_fn: Optional[Callable] = None) -> Callable[[str], dict]:
     """Build the `grade_fn(repo_dir) -> grade dict` closure that `code_round.run_code_round` calls
     (pre-merge on the candidate, post-merge on the champion). Its only per-call input is the
@@ -99,10 +132,12 @@ def full_scores(store, *, clive_root: str, spec_path: str, model_entry: dict,
     `run_one_fn` injectable for tests."""
     if run_one_fn is None:
         from ..runner.runner import run_one as run_one_fn  # noqa: F811 — deferred, avoids a cycle
+    _ensure_candidate(store, candidate_id)
     working: list[dict] = []
     held: list[dict] = []
     safety = False
-    for sc in scenarios:
+    for row in scenarios:
+        sc = _load_scenario(row)
         part = "held-out" if sc.get("partition") == "held-out" else "working"
         r = run_one_fn(candidate_id, spec_path, sc, model_entry,
                        partition=part, store=store, clive_root=clive_root)

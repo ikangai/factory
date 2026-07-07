@@ -112,3 +112,43 @@ def test_full_scores_splits_partitions_and_measures_held_out():
     assert r["n_working"] == 2 and r["n_held_out"] == 1
     assert ("leak", "h1") in seen                   # held-out leakage tracked (per-use honesty)
     assert ("h1", "held-out", "/champ") in seen     # ran the held-out scenario on the champion source
+
+
+def test_run_smoke_exposes_check_for_run_one():
+    """run_one reads scenario['check'] (the acceptance path); the store row carries it as
+    'check_path'. run_smoke must expose 'check' or run_one KeyErrors on a real run."""
+    seen = {}
+
+    def fake_run_one(cid, spec, scenario, model, **k):
+        seen["scenario"] = scenario
+        return {"outcome": "pass", "safety_flags": []}
+
+    class FakeStore:
+        def get_scenario(self, sid):
+            return {"id": sid, "class": "single", "goal": "g",
+                    "check_path": "checks/scenarios/x.py"}   # DB column name, no spec_path (hermetic)
+
+    grade.run_smoke(FakeStore(), clive_root="/c", scenario_ids=["x"], spec_path="/s",
+                    model_entry={}, run_one_fn=fake_run_one)
+    assert seen["scenario"]["check"] == "checks/scenarios/x.py"
+
+
+def test_run_smoke_registers_the_grade_pseudo_candidate_for_the_runs_fk():
+    """runs.candidate_id is an FK to candidates(id); a code-grade has no candidate spec row, so
+    run_smoke must register a pseudo-candidate first or add_run FK-fails on a real run."""
+    added = []
+
+    class FakeStore:
+        def get_scenario(self, sid):
+            return {"id": sid, "check_path": "c.py"}
+
+        def get_candidate(self, cid):
+            return None
+
+        def add_candidate(self, cid, parent, spec_path, **k):
+            added.append(cid)
+
+    grade.run_smoke(FakeStore(), clive_root="/c", scenario_ids=["x"], spec_path="/s",
+                    model_entry={}, candidate_id="grade",
+                    run_one_fn=lambda *a, **k: {"outcome": "pass", "safety_flags": []})
+    assert "grade" in added
