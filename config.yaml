@@ -258,6 +258,10 @@ autonomy:
   # the continuous `run --loop` / autopilot ceilings (HARD brakes for unattended AUTO):
   loop_token_budget: 5000000        # stop after ~5M cumulative output tokens across shifts (0 = unlimited)
   loop_deadline_s: 14400            # …or after 4h wall-clock, whichever first (+ max_shifts=50)
+  # circuit breaker: halt + durably brake (AUTO→SHIFT) after this many CONSECUTIVE failed shifts.
+  # error/timed_out shifts ledger ~0 tokens, so the token ceiling never catches a failure storm.
+  max_consecutive_errors: 3
+  error_backoff_s: 30               # backoff between consecutive failed shifts before retrying
   # HARD per-shift brake (Task 0.2): once a shift's LEDGERED spend reaches its token_budget,
   # the rail skips the executor, requeues the claimed work and ends the shift
   # 'budget_exhausted' (a shift token_budget of 0 = unlimited, matching loop_token_budget).
@@ -273,13 +277,14 @@ autonomy:
 # --- autopilot: the dashboard AUTO toggle's runner --------------------------
 autopilot:
   # Toggling AUTO on the board spawns `factory run --loop` with these. real=true lands gated
-  # merges on the REVERSIBLE factory/auto branch (the useful default). prod=false = DEV/
-  # same-user (the conductor + workers run as YOU with Bash + your MCP) — fine while you watch
-  # the board, but it is NOT the Guest-House boundary; set prod=true once the agent user is
-  # provisioned for a truly unattended run. Set real=false to exercise the loop on throwaway
-  # clones (no real merges).
+  # merges on the REVERSIBLE factory/auto branch (the useful default). prod=true runs the
+  # conductor + workers as the isolated Guest-House `agent` user (no access to your $HOME,
+  # credentials, API key, or MCP servers) — the required posture for an UNATTENDED run, since
+  # a prompt-injected brief or a fetched web page could otherwise drive Bash as YOU. Set
+  # prod=false ONLY for attended DEV runs you are actively watching (same-user: workers run as
+  # YOU with Bash + your MCP — NOT a security boundary). real=false → throwaway clones, no merges.
   real: true
-  prod: false
+  prod: true
 
 # --- board ------------------------------------------------------------------
 dashboard:
