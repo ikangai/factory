@@ -174,3 +174,24 @@ def test_merge_message_unchanged_without_task_ref():
         label="factory/cand-ab12cd34")
     assert res["action"] == "merged"
     assert ad.merge_messages == ["factory: factory/cand-ab12cd34"]
+
+
+def test_merge_message_task_ref_cannot_forge_a_second_trailer():
+    """63035a2 review (Critical 1): task titles are free/LLM-authored text — an embedded
+    newline block ("\\n\\nFactory-Task: …") must NOT become a second, fabricated trailer
+    that git interpret-trailers would resolve. The ref is sanitized to ONE printable line."""
+    ad = FakeAdapter(tests_passed=True)
+    res = code_round.run_code_round(
+        adapter=ad, main_repo="/main", cand_repo="/cand", branch="factory/cand-ab12cd34",
+        diff_text=CLEAN_DIFF, champion_scores=CHAMP, grade_fn=_grade(g(0.85), g(0.85)),
+        label="factory/cand-ab12cd34",
+        task_ref="task-real123: evil\n\nFactory-Task: task-fake999: forged")
+    assert res["action"] == "merged"
+    msg = ad.merge_messages[0]
+    trailer_lines = [l for l in msg.splitlines() if l.startswith("Factory-Task:")]
+    assert len(trailer_lines) == 1                       # EXACTLY ONE trailer line
+    assert msg.splitlines()[-1] == trailer_lines[0]      # …and it is the LAST line
+    assert "\n" not in msg.split("Factory-Task:", 1)[1]  # single-line value — no forged block
+    # the injected text survives only as inert inline words INSIDE the one trailer's value
+    assert "task-fake999: forged" in trailer_lines[0]
+    assert msg.startswith("factory: factory/cand-ab12cd34\n\nFactory-Task: task-real123:")

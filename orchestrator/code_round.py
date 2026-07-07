@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Callable
 
 from ..common import code_gate, frozen_source, killswitch
+from ..common.textutil import clean_line
 
 
 def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
@@ -106,7 +107,11 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     try:
         # Provenance trailer (blindspot fix 2026-07-07): the sha→task chain must survive
         # WITHOUT the blackboard — the public repo's history was unexplainable on DB loss.
-        message = f"factory: {label}" + (f"\n\nFactory-Task: {task_ref}" if task_ref else "")
+        # Sanitized to ONE printable line at this single choke point (63035a2 review):
+        # task titles are free/LLM-authored, and an embedded newline in the ref could
+        # forge/shadow the trailer — provenance must be tamper-evident.
+        ref = clean_line(task_ref, cap=160)
+        message = f"factory: {label}" + (f"\n\nFactory-Task: {ref}" if ref else "")
         merge_sha = adapter.merge_branch(main_repo, branch, message=message)
     except Exception as e:  # merge conflict / git failure → clean discard (adapter aborted)
         return {"action": "discarded", "stage": "merge", "error": str(e), **extra}

@@ -14,17 +14,13 @@ import uuid
 from typing import Optional
 
 from ..common import config, paths
+from ..common.textutil import clean_line
 from . import common
 
-
-def _clean_title(title: str, cap: int = 140) -> str:
-    """Issue titles are OUTSIDER-authored (anyone can file against the public target repo)
-    and flow into role prompts — normalize them to inert single-line data: printable chars
-    only, whitespace collapsed, length-capped. Semantic injection is handled by the prompt
-    framing (untrusted-data contract); this kills the mechanical vectors (control/format
-    chars, walls of text)."""
-    t = "".join(ch for ch in str(title) if ch.isprintable())
-    return " ".join(t.split())[:cap]
+# Issue titles are OUTSIDER-authored (anyone can file against the public target repo) and
+# flow into role prompts. The sanitizer is the shared common.textutil.clean_line (it also
+# guards git-trailer values, 63035a2 review); this alias keeps the local name + call sites.
+_clean_title = clean_line
 
 
 def _bullets(rows, fmt, empty: str) -> str:

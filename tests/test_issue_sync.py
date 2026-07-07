@@ -101,6 +101,24 @@ def test_plan_empty_for_no_refs():
     assert issue_sync.plan_sync([_c("a1", "chore: tidy")]) == {}
 
 
+def test_factory_task_trailer_text_never_closes_an_issue():
+    """63035a2 review (Critical 2): Factory-Task trailers carry task-TITLE text (free/
+    LLM-authored) — provenance, not intent. A title phrased 'closes #41' must NOT close
+    a real issue on graduation."""
+    plan = issue_sync.plan_sync(
+        [_c("a1", "factory: factory/cand-ab12cd34",
+            body="Factory-Task: task-abc: closes #41 memory leak")])
+    assert plan == {}                       # no close, no comment — the trailer is inert
+
+
+def test_non_trailer_body_line_still_closes():
+    """Control: a worker's OWN commit-body close keyword (not a trailer line) still syncs."""
+    plan = issue_sync.plan_sync(
+        [_c("a1", "factory: factory/cand-ab12cd34",
+            body="Factory-Task: task-abc: closes #41 memory leak\ncloses #41")])
+    assert plan[41]["action"] == "close"
+
+
 # -- store idempotency -------------------------------------------------------
 def test_issue_sync_seen_roundtrip(tmp_path):
     with _store(tmp_path) as s:

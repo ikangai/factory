@@ -672,6 +672,8 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
     try:
         adapter.clone(main)   # throwaway clone of the target = the test champion
         print(f"[develop-once] champion clone: {main}")
+        # no task_ref (deliberate): a develop-once smoke has no task row, and the merge
+        # lands in a throwaway clone — no Factory-Task provenance trailer to carry.
         res = develop_and_merge(adapter=adapter, main_repo=main, task=task,
                                 champion_scores=champion_scores, grade_fn=grade_fn,
                                 as_user=as_user, claude_bin=claude_bin)

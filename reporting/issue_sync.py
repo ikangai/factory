@@ -35,7 +35,12 @@ def parse_issue_refs(message: str) -> dict:
 
 
 def _commit_text(commit: dict) -> str:
-    return f"{commit.get('subject', '')}\n{commit.get('body', '')}"
+    # Factory-Task trailers carry task-TITLE text (free/LLM-authored) — provenance, not
+    # intent. Scanning them would let a title phrased "closes #41" close a real issue
+    # (63035a2 review). Workers' own dev-commit bodies still sync normally.
+    body = "\n".join(l for l in (commit.get("body") or "").splitlines()
+                     if not l.startswith("Factory-Task:"))
+    return f"{commit.get('subject', '')}\n{body}"
 
 
 def plan_sync(commits: list[dict]) -> dict:
