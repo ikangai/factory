@@ -365,6 +365,19 @@ Wire-up in `cmd_run`, first line inside `if res.get("shift_id"):` (before the mi
 
 **Note:** `_warn_graduation_lag`'s config/adapter access happens inside the `try`, so hermetic tests that inject `lag_fn` never touch config — but confirm sibling tests of `cmd_run` still pass (they may capture stdout; the extra line must not break exact-output assertions; if one does, extend its expected output).
 
+**AS-BUILT DEVIATIONS (2026-07-07/08, all reviewed):** (a) T6b — a SECOND edge was added
+after ground-truthing showed the base edge alone measures the wrong thing: the *publication*
+edge `origin/<release_branch||main>..factory/auto` (origin/main was frozen at the pre-GRAD#1
+tip, 105 behind, while origin/chore/extract-factory was CURRENT — nothing promotes base→main
+on GitHub). The alarm now prints/escalates both edges. (b) The wiring call runs AFTER
+`assess()` (a filed lag task must inform the NEXT shift's backlog, not corrupt this shift's
+mission status/plateau — mirrors `_graduate_after_shift`). (c) Each edge files under its own
+dedup ref (`graduation:lag-base` / `graduation:lag-publication`) via a new `ref` param on
+`_maybe_file_graduation_failure`/`record_graduation_failure`, so one edge's open task can't
+swallow the other's escalation. (d) The catch-all prints `[run] lag alarm skipped
+(non-fatal): …` instead of going silent forever. (e) `target.release_branch` documented in
+config.yaml.
+
 **Step 4: Run the new file + any `cmd_run` tests — expect PASS**
 
 ```bash
@@ -574,6 +587,17 @@ def test_merge_message_unchanged_without_task_ref(...):
 Docstring note on `develop_and_merge`: *"`task_ref` rides into the merge commit as a `Factory-Task:` trailer so provenance survives without the blackboard (blindspot fix: commits were store-dependent)."*
 
 **Gotcha:** injected `develop_fn` fakes in rail tests receive the new kwarg — most take `**kwargs`; fix any that don't. `cmd_develop_once` (orchestrator.py:675) passes no `task_ref` → default `""` → message unchanged there. Grep tests asserting the exact old message (`"factory: "`) and confirm they still pass (they should — trailer only appears when task_ref given).
+
+**AS-BUILT DEVIATIONS (2026-07-08, from the fix-first review of 63035a2, fixed in 6858ba0):**
+the plan's trailer shape was forgeable and leaky — two confirmed Criticals: (a) a task title
+with embedded newlines could FABRICATE a shadowing `Factory-Task:` trailer (git
+interpret-trailers takes the last one) → the trailer value is now sanitized at the
+`run_code_round` choke point via `clean_line(task_ref, cap=160)` from the new shared
+`common/textutil.py` (hoisted from `research_feed._clean_title`, which now aliases it);
+(b) `issue_sync` scanned the trailer as commit body, so a title phrased "closes #41" would
+auto-close a real GitHub issue on graduation → `_commit_text` now drops `Factory-Task:`
+lines before ref scanning (workers' own body keywords still sync — pinned by a control
+test).
 
 **Step 4: Run — expect PASS**
 
