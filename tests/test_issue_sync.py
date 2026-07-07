@@ -217,11 +217,12 @@ def _log(commits):
 
 class _GitFake:
     """Dispatches injected git/gh calls by argv. Records every call for assertions."""
-    def __init__(self, *, branch="base", ff_rc=0, push_rc=0, diff_rc=1,
+    def __init__(self, *, branch="base", ff_rc=0, push_rc=0, diff_rc=1, fetch_rc=0,
                  old="old", new="new", log=""):
         self.calls = []
         self.branch, self.ff_rc, self.push_rc = branch, ff_rc, push_rc
         self.diff_rc = diff_rc          # `git diff --quiet` exit: 1 = has changes (default), 0 = none
+        self.fetch_rc = fetch_rc        # `git fetch` exit: 0 = success (default)
         self.old, self.new, self.log = old, new, log
 
     def __call__(self, argv, **kw):
@@ -229,6 +230,8 @@ class _GitFake:
         a = argv
         if a[0] == "git":
             sub = a[3] if len(a) > 3 else ""
+            if sub == "fetch":
+                return _Run(self.fetch_rc, "")
             if sub == "rev-parse" and "--abbrev-ref" in a:
                 return _Run(0, self.branch)
             if sub == "rev-parse":
@@ -365,6 +368,40 @@ def test_graduate_dry_run_mutates_nothing(tmp_path):
         assert "merge" not in f.git_subcmds() and "push" not in f.git_subcmds()
         assert not any(a[0] == "gh" for a in f.calls)
         assert s.issue_sync_seen(41, "c1") is False
+
+
+# -- fetch-before-read (blindspot fix 2026-07-07: stale-ref reads masked a week of drift) --
+def test_graduate_fetches_remote_base_before_reading_it(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f)
+        assert res["action"] == "synced"
+        fetch_call = ["git", "-C", "/x", "fetch", "origin", "base"]
+        remote_rev_parse_call = ["git", "-C", "/x", "rev-parse", "origin/base"]
+        assert fetch_call in f.calls and remote_rev_parse_call in f.calls
+        assert f.calls.index(fetch_call) < f.calls.index(remote_rev_parse_call)
+
+
+def test_graduate_skips_on_fetch_failure(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", fetch_rc=1,
+                     log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f)
+        assert res == {"action": "skip", "reason": "fetch-failed"}
+        assert "merge" not in f.git_subcmds() and "push" not in f.git_subcmds()
+        assert not any(a[0] == "gh" for a in f.calls)       # never touched the remote or issues
+
+
+def test_dry_run_survives_fetch_failure(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", fetch_rc=1,
+                     log=_log([{"sha": "c1", "subject": "done", "body": "closes #41"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f, dry_run=True)
+        assert res["action"] == "dry_run"
+        assert res["fetch_failed"] is True
 
 
 # -- loop wiring: _graduate_after_shift --------------------------------------
