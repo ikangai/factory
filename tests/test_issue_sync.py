@@ -217,10 +217,11 @@ def _log(commits):
 
 class _GitFake:
     """Dispatches injected git/gh calls by argv. Records every call for assertions."""
-    def __init__(self, *, branch="base", ff_rc=0, push_rc=0,
+    def __init__(self, *, branch="base", ff_rc=0, push_rc=0, diff_rc=1,
                  old="old", new="new", log=""):
         self.calls = []
         self.branch, self.ff_rc, self.push_rc = branch, ff_rc, push_rc
+        self.diff_rc = diff_rc          # `git diff --quiet` exit: 1 = has changes (default), 0 = none
         self.old, self.new, self.log = old, new, log
 
     def __call__(self, argv, **kw):
@@ -236,6 +237,8 @@ class _GitFake:
                 return _Run(self.ff_rc, "")
             if sub == "push":
                 return _Run(self.push_rc, "")
+            if sub == "diff":
+                return _Run(self.diff_rc, "")
             if sub == "log":
                 return _Run(0, self.log)
         if a[0] == "gh":
@@ -291,6 +294,20 @@ def test_graduate_skips_sync_when_push_fails(tmp_path):
                                            store=s, runner=f)
         assert res["reason"] == "push-failed"
         assert not any(a[0] == "gh" for a in f.calls)       # no issue sync after a failed push
+
+
+def test_graduate_skips_a_whitespace_only_noop_before_pushing(tmp_path):
+    """Theme 4: the merge gate only rejects a fully-EMPTY diff, so a whitespace-only 'fix' could
+    reach production and keyword-close a real issue. graduate_and_push must refuse to push (and
+    to sync issues for) a change that is empty once whitespace is ignored."""
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", diff_rc=0,              # `git diff -w --quiet` → no real change
+                     log=_log([{"sha": "c1", "subject": "style (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f)
+        assert res == {"action": "skip", "reason": "no-op"}
+        assert "push" not in f.git_subcmds()                # never pushed a no-op to production
+        assert not any(a[0] == "gh" for a in f.calls)       # never auto-closed an issue for nothing
 
 
 def test_graduate_skips_on_stop(tmp_path):
