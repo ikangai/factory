@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The operator's board (task/shift/EVM view), always-on under the 'factory' user.
+     Install/reload: sudo bash deploy/user-factory/03-install-daemons.sh
+     Secrets (GH_TOKEN etc.) are NOT here — this plist is world-readable; with-env.sh
+     sources them from the 600 ~/.factory-secrets/env file at process start instead. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.board</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/factory/fab/factory/deploy/user-factory/with-env.sh</string>
+    <string>board</string>
+  </array>
+  <key>UserName</key>
+  <string>factory</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-board.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-board.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/factory/fab/factory</string>
+</dict>
+</plist>
