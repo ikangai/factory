@@ -271,10 +271,14 @@ textarea.hq-input{resize:vertical;flex-basis:100%}
 .addform{margin-top:12px;border:1px solid var(--g200);border-radius:8px;padding:8px 12px;background:var(--g50)}
 .addform summary{cursor:pointer;color:var(--blue-700);font-size:12px;font-weight:800}
 .addrow{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
-.addrow input,.addrow select,#wp-overlay{background:#fff;color:var(--g900);border:1px solid var(--g300);
+.addrow input,.addrow select,#wp-overlay,#hq-add-detail{background:#fff;color:var(--g900);border:1px solid var(--g300);
   border-radius:6px;padding:6px 8px;font-size:12px}
 .addrow input{flex:1;min-width:120px}
-#wp-overlay{width:100%;margin-bottom:8px;resize:vertical}
+#wp-overlay,#hq-add-detail{width:100%;margin-bottom:8px;resize:vertical}
+/* inside an addform the notice span must WRAP (base .merr nowraps for the topbar) or a long
+   validation error overflows the card; .ok flips it to a green success receipt */
+.addform .merr{color:var(--red);white-space:normal}
+.addform .merr.ok{color:var(--green-800)}
 .capsrow{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--g100);font-size:12.5px}
 .capsrow label{flex:1}
 .capsrow .ov{font-size:10px;color:var(--amber-800);text-transform:uppercase;font-weight:800}
@@ -370,7 +374,7 @@ code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-
                 <input id="hq-add-acceptance" placeholder="acceptance (optional)">
                 <input id="hq-add-oos" placeholder="out of scope (optional)">
               </div>
-              <div><button class="formbtn" id="hq-add-btn">Add task</button> <span class="merr" style="color:var(--red)" id="hq-add-err"></span></div>
+              <div><button class="formbtn" id="hq-add-btn">Add task</button> <span class="merr" id="hq-add-err"></span></div>
             </details>
           </div>
         </section>
@@ -662,7 +666,9 @@ function headerRender(d){
 // action wiring is ONE delegated listener on #hq-list (below) since cards are re-created on
 // every render, not held onto — the object-list/prof-cards convention used elsewhere.
 function hqKindBadge(kind){const KC={graduation:'violet',publication:'blue'};return tagp(kind||'approval',KC[kind]||'gray');}
-function hqAge(days){return days==null?'—':days.toFixed(1)+'d';}
+// age_days can be null (unparsable ts, see human_queue._age_days) or drift to a non-number
+// on a payload change — render '—', never throw mid-render (a throw blanks the whole list).
+function hqAge(days){return (typeof days==='number'&&isFinite(days))?days.toFixed(1)+'d':'—';}
 function hqEscCard(it){
   return `<div class="hq-card" data-kind="escalation" data-id="${esc(it.id)}">`+
     `<div class="hq-head">${tagp('escalation','red')}<span class="hq-meta">${esc(it.sender)} · ${esc(it.ts)}</span></div>`+
@@ -695,15 +701,63 @@ function hqBlockedCard(it){
     `<div class="hq-err" data-err></div></div>`;
 }
 const HQ_BUILD={escalation:hqEscCard,approval:hqApprCard,blocked:hqBlockedCard};
+// The queue tab ticks every 2s and an innerHTML assignment rebuilds the DOM even for an
+// identical string — which would destroy a half-typed reply (focus lost), wipe a reject
+// note, snap an open reframe panel shut, kill error notices within 2s and swap a disabled
+// in-flight button for an enabled clone (double-POST). Two guards, same intent as the
+// mission editor's `editing` flag: (a) hqBusy() skips the update entirely while the
+// operator is interacting — the trade-off is that a card resolved elsewhere stays visible
+// one interaction longer, which is acceptable; (b) otherwise the string only lands when it
+// actually DIFFERS from the last render (hqLastHtml), so idle identical ticks are no-ops
+// and anything living in the current DOM (notices, an open evidence <details>) survives.
+let hqLastHtml=null;
+let hqPosting=false;   // an action POST is in flight — never rebuild under it
+let hqNotice=null;     // {kind,id,msg,until} — survives rebuilds; hqRender re-injects it
+function hqBusy(){
+  const list=el('hq-list');
+  if(hqPosting)return true;
+  // focus check: disabling a focused button drops focus to <body> in some browsers, so
+  // this alone is not enough — hqPosting and the edit checks below cover those gaps.
+  if(list.contains(document.activeElement)&&document.activeElement!==list)return true;
+  // value!==defaultValue means the operator EDITED the field. A plain non-empty check
+  // would misfire: the reframe title input is PREFILLED, so every blocked card would
+  // read as busy forever and the list would never update again.
+  for(const i of list.querySelectorAll('input,textarea'))if(i.value!==i.defaultValue)return true;
+  for(const b of list.querySelectorAll('.hq-reframe'))if(b.style.display!=='none')return true;
+  return false;
+}
 function hqRender(hq){
   hq=hq||{};const items=hq.items||[],counts=hq.counts||{};
   // counts.total may be absent on a degraded derivation ({items:[],counts:{}}) — fall back
   // to the items length rather than showing a misleading blank/zero header.
   const total=counts.total!=null?counts.total:items.length;
-  el('hq-h').textContent=total?('· '+total+' need you'):'';
-  el('hq-list').innerHTML=items.length?
-    items.map(it=>(HQ_BUILD[it.type]||(()=>''))(it)).join('')
-    :'<div class="muted">no human input needed — the queue is clear.</div>';
+  if(hqNotice&&Date.now()>hqNotice.until)hqNotice=null;   // notices expire, they don't linger
+  const list=el('hq-list');
+  if(!hqBusy()){
+    const html=items.length?
+      items.map(it=>(HQ_BUILD[it.type]||(()=>''))(it)).join('')
+      :'<div class="muted">no human input needed — the queue is clear.</div>';
+    if(html!==hqLastHtml){
+      // preserve open evidence <details> across a real rebuild — the shifts-row convention.
+      const open=new Set(Array.from(list.querySelectorAll('.hq-card')).filter(c=>{
+        const dt=c.querySelector('details');return dt&&dt.open;}).map(c=>c.dataset.kind+':'+c.dataset.id));
+      list.innerHTML=html;hqLastHtml=html;
+      if(open.size)list.querySelectorAll('.hq-card').forEach(c=>{
+        if(open.has(c.dataset.kind+':'+c.dataset.id)){const dt=c.querySelector('details');if(dt)dt.open=true;}});
+    }
+  }
+  // A pending notice outlives the rebuild that would have destroyed its [data-err] node:
+  // re-inject it into its card if the card still exists; when the card is GONE (e.g. a
+  // failed approve resolved the row), surface it in #hq-h — a textContent-driven header
+  // outside the rebuilt list — so "action failed" is actually readable.
+  let head=total?('· '+total+' need you'):'';
+  if(hqNotice){
+    const card=Array.from(list.querySelectorAll('.hq-card')).find(
+      c=>c.dataset.kind===hqNotice.kind&&c.dataset.id===String(hqNotice.id));
+    if(card){const e2=card.querySelector('[data-err]');if(e2)e2.textContent=hqNotice.msg;}
+    else head+=(head?' · ':'')+hqNotice.msg;
+  }
+  el('hq-h').textContent=head;
 }
 
 // ── Work Queue (home) ─────────────────────────────────────────────────────
@@ -985,17 +1039,28 @@ el('shifts').addEventListener('click',e=>{const row=e.target.closest&&e.target.c
 // binding per-card listeners would leak; delegation matches the prof-cards/shifts convention
 // above. Every mutating action re-fetches /api/fleet on success (optimistic-refresh: the
 // server is the source of truth, not a locally-patched card).
+// A SUCCESSFUL action consumed the operator's input — reset the card's fields/panel and
+// drop focus so hqBusy() doesn't read the now-stale edits as "still typing" and pin the
+// resolved card on screen past the refetch that should replace it.
+function hqSettle(card){
+  card.querySelectorAll('input,textarea').forEach(i=>{i.value=i.defaultValue;});
+  const box=card.querySelector('.hq-reframe');if(box)box.style.display='none';
+  if(card.contains(document.activeElement)&&document.activeElement.blur)document.activeElement.blur();
+}
 el('hq-list').addEventListener('click',async e=>{
   const btn=e.target.closest&&e.target.closest('button[data-act]');if(!btn)return;
   const card=btn.closest('.hq-card');if(!card)return;
   const act=btn.dataset.act,id=btn.dataset.id,errEl=card.querySelector('[data-err]');
-  const setErr=m=>{if(errEl)errEl.textContent=m||'';};
+  // setErr both paints the card's [data-err] AND records hqNotice so the message survives
+  // the next rebuild (hqRender re-injects it; if the card vanishes it moves to #hq-h).
+  const setErr=m=>{if(errEl)errEl.textContent=m||'';
+    hqNotice=m?{kind:card.dataset.kind,id:card.dataset.id,msg:m,until:Date.now()+15000}:null;};
   if(act==='reframe-toggle'){                 // pure UI toggle — no network, no disable
     const box=card.querySelector('.hq-reframe');
     if(box)box.style.display=(box.style.display==='none')?'':'none';
     return;
   }
-  btn.disabled=true;setErr('');
+  btn.disabled=true;setErr('');hqPosting=true;
   try{
     let r,j;
     if(act==='answer'){
@@ -1039,11 +1104,13 @@ el('hq-list').addEventListener('click',async e=>{
       j=await r.json().catch(()=>({}));
       if(!r.ok||j.ok===false){setErr((j&&j.error)||('error '+r.status));btn.disabled=false;return;}
     }
+    hqSettle(card);setErr('');   // success: consume the input, clear any stale notice
     refreshQueue();
   }catch(err){setErr('network error');btn.disabled=false;}
+  finally{hqPosting=false;}      // every exit path re-arms the render tick
 });
 el('hq-add-btn').addEventListener('click',async()=>{
-  const err=el('hq-add-err');err.textContent='';
+  const err=el('hq-add-err');err.textContent='';err.classList.remove('ok');
   const title=el('hq-add-title').value.trim();
   if(!title){err.textContent='title required';return;}
   const body={op:'add',title,detail:el('hq-add-detail').value,
@@ -1051,13 +1118,18 @@ el('hq-add-btn').addEventListener('click',async()=>{
               acceptance:el('hq-add-acceptance').value.trim(),
               out_of_scope:el('hq-add-oos').value.trim()};
   const btn=el('hq-add-btn');btn.disabled=true;
+  let j;
   try{
     const r=await fetch('/api/queue/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const j=await r.json().catch(()=>({}));
+    j=await r.json().catch(()=>({}));
     if(!r.ok||j.ok===false){err.textContent=(j&&j.error)||('error '+r.status);btn.disabled=false;return;}
   }catch(e){err.textContent='network error';btn.disabled=false;return;}
   btn.disabled=false;
   el('hq-add-title').value=el('hq-add-detail').value=el('hq-add-target').value=el('hq-add-acceptance').value=el('hq-add-oos').value='';
+  // transient receipt: the created task lands in the BACKLOG (Plan tab), not this list, so
+  // without this line a successful add looks like nothing happened.
+  err.classList.add('ok');err.textContent='added '+(j.task_id||'');
+  setTimeout(()=>{if(err.classList.contains('ok')){err.textContent='';err.classList.remove('ok');}},6000);
   refreshQueue();
 });
 

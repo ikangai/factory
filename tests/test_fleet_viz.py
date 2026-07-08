@@ -728,8 +728,11 @@ def test_queue_tab_badge_hook_exists_and_updates_from_header_render():
     html = _live_page()
     assert 'id="hq-badge"' in html
     # the badge is populated in headerRender (the global tick), not only on a queue-tab
-    # render, so it stays fresh no matter which tab the operator is looking at.
-    header_fn = html[html.index("function headerRender"):html.index("function headerRender") + 2000]
+    # render, so it stays fresh no matter which tab the operator is looking at. Slice to
+    # the function's actual extent (up to the next top-level `function `), not a fixed
+    # char count that a few added lines above the badge would spuriously break.
+    start = html.index("function headerRender")
+    header_fn = html[start:html.index("\nfunction ", start + 1)]
     assert "hq-badge" in header_fn and "human_queue" in header_fn
 
 
@@ -740,3 +743,21 @@ def test_queue_tab_empty_state_and_esc_usage():
     # attacker-influenceable ones (bus escalation text, task titles).
     hq_block = html[html.index("function hqEscCard"):html.index("const HQ_BUILD")]
     assert "esc(it.text)" in hq_block and "esc(it.title)" in hq_block and "esc(it.summary)" in hq_block
+
+
+def test_queue_tab_render_guards_preserve_operator_input():
+    """The 2s queue tick must not clobber in-progress operator input: the page carries a
+    busy guard (skip the rebuild while interacting) and a string-diff guard (identical
+    renders are no-ops). Their removal re-opens the destroys-typed-reply bug."""
+    html = _live_page()
+    assert "function hqBusy" in html                       # the interaction guard
+    assert "hqLastHtml" in html                            # the identical-string no-op guard
+    assert "hqPosting" in html                             # never rebuild under an in-flight POST
+    assert "i.value!==i.defaultValue" in html              # edited-not-prefilled check (reframe title is prefilled)
+
+
+def test_queue_tab_pins_the_preview_stale_contract():
+    """reporting/approvals.py documents that the Queue tab depends on the exact
+    {"ok": False, "error": "preview-stale", "fresh": ...} shape — pin the client half."""
+    html = _live_page()
+    assert "preview-stale" in html
