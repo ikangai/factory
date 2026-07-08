@@ -13,21 +13,18 @@ import os
 import sqlite3
 from typing import Optional
 
-from ..common import paths
+from ..common.bus import bus_db_path
 
 
 def agora_db_path() -> Optional[str]:
-    """Locate the agora bus DB the way the plugin does: $AGORA_DIR/$GROUPCHAT_DIR override,
-    else the repo-local .agora/.groupchat. None when there's no bus."""
-    for env in ("AGORA_DIR", "GROUPCHAT_DIR"):
-        d = os.environ.get(env)
-        if d and os.path.exists(os.path.join(d, "chat.db")):
-            return os.path.join(d, "chat.db")
-    for name in (".agora", ".groupchat"):
-        p = os.path.join(paths.FACTORY_ROOT, name, "chat.db")
-        if os.path.exists(p):
-            return p
-    return None
+    """Locate the agora bus DB — delegates to common.bus.bus_db_path, the ONE resolution
+    point shared with the subprocess-driven bus wrapper (common/bus.py: send/answer/
+    open_questions/who/recent), so the dashboard's read-only sqlite view here and the
+    factory's write side always agree on which bus they're touching. Kept as a named
+    function (not inlined at call sites) so tests can keep monkeypatching
+    `collab.agora_db_path` directly (see tests/test_collab.py) — behavior with no
+    monkeypatch is unchanged from before this delegation."""
+    return bus_db_path()
 
 
 def _alive(pid) -> bool:
