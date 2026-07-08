@@ -402,6 +402,24 @@ def test_task_estimate_and_profile_columns(store):
     assert t["est_tokens"] == 60_000 and t["profile"] == "python-dev"
 
 
+def test_reframe_task_updates_title_and_detail_reopens_and_clears_result(store):
+    store.add_task("task-x", "old title", source="worker", detail="old detail")
+    store.set_task_status("task-x", "blocked", result="no_candidate: boom")
+    store.reframe_task("task-x", title="new title", detail="new detail")
+    t = store.get_task("task-x")
+    assert t["title"] == "new title" and t["detail"] == "new detail"
+    assert t["status"] == "open" and t["result"] == ""
+
+
+def test_reframe_task_partial_update_leaves_the_other_field_untouched(store):
+    store.add_task("task-y", "keep me", source="worker", detail="keep detail too")
+    store.set_task_status("task-y", "dropped", result="operator dropped it")
+    store.reframe_task("task-y", detail="narrower brief")   # title omitted
+    t = store.get_task("task-y")
+    assert t["title"] == "keep me" and t["detail"] == "narrower brief"
+    assert t["status"] == "open" and t["result"] == ""
+
+
 def test_milestone_effort_estimated_vs_actual(store):
     m = store.set_mission("reliable recovery")
     mid = store.add_milestone("M1", mission_id=m, budget_tokens=100_000)

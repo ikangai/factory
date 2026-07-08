@@ -142,7 +142,10 @@ def test_restart_if_auto_respects_brakes_and_debounce(monkeypatch):
 
 def test_fleet_state_poll_drives_the_watchdog(monkeypatch):
     """The dashboard's ~2s /api/fleet poll drives the self-heal: fleet_state() calls
-    restart_if_auto(). Hermetic — the watchdog and store are stubbed, nothing spawns."""
+    restart_if_auto(). Hermetic — the watchdog and store are stubbed, nothing spawns.
+    fleet_state() also folds in the human_queue payload (Task 6) — stubbed here too so
+    this test stays about the watchdog wiring, not the queue derivation (that's
+    tests/test_fleet_queue_endpoints.py's job)."""
     import types as _types
     from factory.dashboard import fleet_server
 
@@ -150,6 +153,9 @@ def test_fleet_state_poll_drives_the_watchdog(monkeypatch):
     monkeypatch.setattr(autopilot, "restart_if_auto", lambda: seen.append(True))
     monkeypatch.setattr(fleet_server, "fleet_viz",
                         _types.SimpleNamespace(fleet_json=lambda s: {"ok": True}))
+    monkeypatch.setattr(fleet_server, "human_queue",
+                        _types.SimpleNamespace(
+                            derive_human_queue=lambda s: {"items": [], "counts": {}}))
 
     class _Store:
         def __enter__(self):
@@ -162,7 +168,8 @@ def test_fleet_state_poll_drives_the_watchdog(monkeypatch):
             pass
 
     monkeypatch.setattr(fleet_server, "Blackboard", lambda: _Store())
-    assert fleet_server.fleet_state() == {"ok": True} and seen == [True]
+    assert (fleet_server.fleet_state() == {"ok": True, "human_queue": {"items": [], "counts": {}}}
+           and seen == [True])
 
 
 def test_clear_pid_if_mine_only_removes_own(tmp_path, monkeypatch):

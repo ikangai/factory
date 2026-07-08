@@ -432,6 +432,22 @@ class Blackboard:
         params.append(id)
         self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
 
+    def reframe_task(self, id: str, *, title: Optional[str] = None,
+                     detail: Optional[str] = None) -> None:
+        """Operator reframe from the dashboard Queue tab (Task 6, docs/plans/2026-07-08-
+        factory-owned-bus-human-queue.md §2): rewrite title and/or detail (either, both, or
+        neither — callers guard "at least one" before calling), clear the stale result
+        (`result` is NOT NULL — the schema default '' is the clear value, same convention as
+        set_task_status's retry path) and REOPEN the task (status -> 'open') so the next
+        shift picks it back up instead of staying blocked/dropped under a now-stale brief."""
+        sets, params = ["status = ?", "result = ?", "updated_at = ?"], ["open", "", now_iso()]
+        if title is not None:
+            sets.append("title = ?"); params.append(title)
+        if detail is not None:
+            sets.append("detail = ?"); params.append(detail)
+        params.append(id)
+        self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+
     # -- shifts: bounded sessions that resume -------------------------------
     def start_shift(self, *, token_budget: int, mission_id: Optional[int] = None) -> int:
         cur = self._exec(
