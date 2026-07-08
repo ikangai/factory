@@ -190,6 +190,26 @@ def test_pending_publication_approval_summary_and_n_commits(store, tmp_path):
 
 # -- section degradation -------------------------------------------------------------------
 
+def test_blocked_naive_timestamp_still_appears_with_numeric_age(store, tmp_path):
+    # Real stores carry naive (space-separated, no offset) timestamps from the documented
+    # operator reframe procedure's manual in-store UPDATEs — e.g. sqlite's datetime('now').
+    # _age_days must treat these as UTC (matching now_iso()'s convention) rather than raise
+    # "can't subtract offset-naive and offset-aware datetimes", which previously escaped
+    # _age_days entirely and got the whole row skipped in _blocked_items.
+    store.add_task("task-9cd0d66d", "naive timestamp task", source="worker")
+    store.set_task_status("task-9cd0d66d", "blocked", result="no_candidate (tests): boom")
+    store.conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?",
+                        ("2026-06-30 14:16:20", "task-9cd0d66d"))
+    store.conn.commit()
+
+    q = human_queue.derive_human_queue(store, bus_dir=str(tmp_path), now=NOW)
+    blocked = [it for it in q["items"] if it["type"] == "blocked"]
+    assert [b["task_id"] for b in blocked] == ["task-9cd0d66d"]
+    blk = blocked[0]
+    assert isinstance(blk["age_days"], float)
+    assert blk["age_days"] is not None
+
+
 def test_bus_dir_missing_degrades_escalations_only(store, tmp_path, capsys):
     store.add_pending_approval("graduation", {"n_commits": 1})
     store.add_task("task-x", "x", source="worker")

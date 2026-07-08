@@ -48,6 +48,14 @@ def _age_days(ts: Optional[str], now: datetime) -> Optional[float]:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
             return None
+        # Real stores carry naive (space-separated, no offset) timestamps too — e.g. sqlite's
+        # datetime('now') from the documented operator reframe procedure's manual in-store
+        # UPDATEs. fromisoformat happily parses those as naive, and subtracting a naive dt
+        # from an aware `now` raises TypeError *outside* this function's try blocks, which
+        # gets a whole row silently skipped upstream. Treat naive as UTC (matching
+        # now_iso()'s convention) — an age slightly off beats a silently hidden queue item.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
     return (now - dt).total_seconds() / 86400.0
 
 
