@@ -44,7 +44,7 @@ if [ ! -f "$ENV_FILE" ]; then
           "# factory secrets — sourced by the LaunchDaemon wrapper (with-env.sh) and this user's shell." \
           "# 600 by construction (umask 077 at creation). Never commit, never put in a plist."
         printf 'export GH_TOKEN=%q\n' "$GH_PAT"
-        printf '%s\n' "# export CLAUDE_CODE_OAUTH_TOKEN=...  # filled by runbook §3 (claude setup-token)"
+        printf '%s\n' "# export CLAUDE_CODE_OAUTH_TOKEN=...  # OPTIONAL fallback — only if the no-session auth check fails (runbook §3)"
       } > "$ENV_FILE"
     )
     unset GH_PAT
@@ -150,7 +150,7 @@ if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; th
 else
     echo "  claude CLI already present — skipping install"
 fi
-echo "  MANUAL next (runbook §3, via fast user switching): 'claude login', 'claude setup-token', agora plugin install."
+echo "  MANUAL next (runbook §3, via fast user switching): 'claude login' (+ the no-session auth check), agora plugin install."
 
 # --- 8. blackboard seed (optional) --------------------------------------------------------
 echo "[8/10] blackboard seed ..."
@@ -199,7 +199,7 @@ cat <<'EOF'
 
 ============================================================
  Bootstrap complete. Next:
-   - runbook §3: manual logins (claude login, claude setup-token, agora plugin)
+   - runbook §3: manual logins (claude login + no-session auth check, agora plugin)
    - runbook §4: supervised smoke shift
    docs/runbooks/factory-user-deployment.md
 ============================================================

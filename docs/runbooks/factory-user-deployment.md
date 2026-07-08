@@ -127,8 +127,15 @@ the `factory` account (⌘ from the login window, or Apple menu → Fast User Sw
    ```bash
    claude -p "say ok"
    ```
-2. **`claude setup-token`** — mints `CLAUDE_CODE_OAUTH_TOKEN` for headless/daemon use. Paste
-   the result into `/Users/factory/.factory-secrets/env`, uncommenting the placeholder line:
+2. **No-session auth check** — usually NO token is needed: on this setup `claude login`'s
+   credential proved reachable outside the login session (verified live 2026-07-08). Confirm
+   on yours: log the `factory` user fully OUT, then from the operator's terminal:
+   ```bash
+   sudo -u factory -H bash -c 'cd ~ && ~/.local/bin/claude -p "say ok"'
+   ```
+   Answers → skip the token, the daemons authenticate with the plain login. FALLBACK if it
+   fails only without a session: `claude setup-token` (still your subscription — it just
+   bypasses the keychain), pasted into `/Users/factory/.factory-secrets/env`, uncommenting:
    ```
    export CLAUDE_CODE_OAUTH_TOKEN=<paste>
    ```
