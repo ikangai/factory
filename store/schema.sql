@@ -307,8 +307,11 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS pending_approvals (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     kind         TEXT CHECK (kind IN ('graduation','publication')),
+    -- 'executing' = an operator's Approve is mid-push (claim_approval's atomic
+    -- pending→executing transition makes a double-click / two-dashboard race impossible);
+    -- it reverts to 'pending' on a failed/stale attempt, resolves to 'approved' on success.
     status       TEXT NOT NULL DEFAULT 'pending'   -- one live 'pending' row per kind (supersede-first)
-                   CHECK (status IN ('pending','approved','rejected','stale','superseded')),
+                   CHECK (status IN ('pending','executing','approved','rejected','stale','superseded')),
     payload_json TEXT NOT NULL,               -- dry-run preview: range/commits/subjects/…
     note         TEXT NOT NULL DEFAULT '',    -- the operator's approve/reject rationale
     created_at   TEXT NOT NULL,

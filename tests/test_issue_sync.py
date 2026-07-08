@@ -494,6 +494,49 @@ def test_graduate_after_shift_swallows_errors_to_protect_the_loop(tmp_path, monk
         assert res["action"] == "error"        # swallowed, did not propagate
 
 
+def test_graduate_after_shift_gate_off_skips_benignly_when_lock_busy(tmp_path, monkeypatch):
+    """Cross-process push lock (quality review fix 3): another pusher (an Approve click,
+    `factory graduate`) holds the repo lock → the gate-off real call is skipped
+    'lock-busy' and treated as BENIGN (the push IS happening — elsewhere), never escalated
+    through the failure seam."""
+    from factory.common import filelock
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": False, "failure_tasks": True}})
+    monkeypatch.setattr(filelock, "DEFAULT_TIMEOUT_S", 0.05)
+    with _store(tmp_path) as s:
+        g = _Recorder()
+        with filelock.repo_lock("/x"):                     # the "other pusher"
+            res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                             repo="o/r", root="/x", base="base")
+        assert res == {"action": "skip", "reason": "lock-busy"}
+        assert g.calls == []                               # never pushed under contention
+        assert s.list_tasks(status="open") == []           # benign — no failure task
+
+
+def test_graduate_after_shift_gate_off_real_call_runs_under_the_lock(tmp_path, monkeypatch):
+    """The gate-off push actually HOLDS the repo lock while graduate_fn runs — a second
+    acquisition from inside the call must see it busy."""
+    from factory.common import filelock
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": False}})
+    monkeypatch.setattr(filelock, "DEFAULT_TIMEOUT_S", 0.05)
+    with _store(tmp_path) as s:
+        seen = {}
+
+        def g(**kw):
+            try:
+                with filelock.repo_lock("/x"):
+                    seen["held"] = False                   # acquired → the caller did NOT hold it
+            except filelock.LockBusyError:
+                seen["held"] = True
+            return {"action": "synced", "n_commits": 1, "synced": []}
+
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res["action"] == "synced"
+        assert seen["held"] is True
+
+
 # -- push_approval gate: proposes instead of pushing when ON -----------------
 def _gate_on(monkeypatch):
     monkeypatch.setattr(orch.config, "load_config",
@@ -731,3 +774,23 @@ def test_promote_to_release_skips_on_push_failure(tmp_path):
     res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
     assert res == {"action": "skip", "reason": "push-failed"}
     assert any(c[3:5] == ["worktree", "remove"] for c in f.calls if c[0] == "git")
+
+
+def test_promote_to_release_prunes_after_the_dir_is_gone(tmp_path):
+    """Cleanup ordering (quality review, minor 4): rmtree BEFORE the final prune, so that
+    even when `worktree remove --force` fails, the directory is already gone by prune time
+    and prune can drop the dangling .git/worktrees metadata (pruning first would leave it
+    behind forever)."""
+    observed = {}
+
+    class _F(_PromoteFake):
+        def __call__(self, argv, **kw):
+            if list(argv[3:5]) == ["worktree", "prune"]:
+                wt = next(c[6] for c in self.calls
+                          if c[3:6] == ["worktree", "add", "--detach"])
+                observed["exists_at_prune"] = os.path.exists(wt)
+            return super().__call__(argv, **kw)
+
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=_F())
+    assert res["action"] == "promoted"
+    assert observed["exists_at_prune"] is False            # rmtree already ran

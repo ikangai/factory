@@ -136,6 +136,86 @@ def test_pending_approvals_payload_parsed_for_every_row(store):
     assert rows[0]["payload"] == {"x": 1}
 
 
+# -- atomic claim (quality review fix: approve must execute at most once) --------
+
+def test_claim_approval_transitions_pending_to_executing(store):
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.claim_approval(aid) is True
+    assert store.get_approval(aid)["status"] == "executing"
+
+
+def test_claim_approval_second_claim_loses_the_race(store):
+    """The double-click race: exactly ONE of two claims wins; the loser gets False."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.claim_approval(aid) is True
+    assert store.claim_approval(aid) is False              # already executing
+    assert store.get_approval(aid)["status"] == "executing"
+
+
+def test_claim_approval_refuses_resolved_rows_and_unknown_ids(store):
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.resolve_approval(aid, "rejected") is True
+    assert store.claim_approval(aid) is False
+    assert store.claim_approval(9999) is False
+
+
+def test_unclaim_approval_reverts_executing_to_pending(store):
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    store.claim_approval(aid)
+    assert store.unclaim_approval(aid) is True
+    assert store.get_approval(aid)["status"] == "pending"
+
+
+def test_unclaim_approval_only_from_executing(store):
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.unclaim_approval(aid) is False            # pending, not executing
+    store.resolve_approval(aid, "approved")
+    assert store.unclaim_approval(aid) is False            # resolved rows are immutable
+
+
+def test_supersede_never_touches_an_executing_row(store):
+    """An executing row must survive a concurrent shift-end refile of the same kind —
+    supersede-first only retires 'pending' rows, never one that is mid-push."""
+    executing_id = store.add_pending_approval("graduation", {"n": 1})
+    store.claim_approval(executing_id)
+    fresh_id = store.add_pending_approval("graduation", {"n": 2})
+    assert store.get_approval(executing_id)["status"] == "executing"  # survived
+    assert store.get_approval(fresh_id)["status"] == "pending"
+
+
+def test_resolve_approval_from_executing_succeeds(store):
+    """The atomic-claim flow's happy end: executing → approved (and executing → rejected
+    is equally legal — resolve accepts both live states)."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    store.claim_approval(aid)
+    assert store.resolve_approval(aid, "approved", note="pushed") is True
+    row = store.get_approval(aid)
+    assert row["status"] == "approved" and row["note"] == "pushed" and row["resolved_at"]
+
+
+# -- update_approval_payload (stale-preview refresh) ------------------------------
+
+def test_update_approval_payload_on_pending_row(store):
+    aid = store.add_pending_approval("graduation", {"n_commits": 2})
+    assert store.update_approval_payload(aid, {"n_commits": 5}) is True
+    assert store.get_approval(aid)["payload"] == {"n_commits": 5}
+
+
+def test_update_approval_payload_on_executing_row(store):
+    aid = store.add_pending_approval("graduation", {"n_commits": 2})
+    store.claim_approval(aid)
+    assert store.update_approval_payload(aid, {"n_commits": 7}) is True
+    assert store.get_approval(aid)["payload"] == {"n_commits": 7}
+
+
+def test_update_approval_payload_refuses_resolved_rows(store):
+    """A resolved row's payload is part of the immutable decision record."""
+    aid = store.add_pending_approval("graduation", {"n_commits": 2})
+    assert store.resolve_approval(aid, "approved") is True
+    assert store.update_approval_payload(aid, {"n_commits": 9}) is False
+    assert store.get_approval(aid)["payload"] == {"n_commits": 2}  # unchanged
+
+
 # -- operator_actions ------------------------------------------------------------
 
 def test_record_operator_action_round_trip(store):

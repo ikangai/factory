@@ -1242,14 +1242,21 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     sync the target's GitHub issues for the pushed commits (keyword-gated close).
     --dry-run previews the range + issue actions, mutating nothing."""
     from ..reporting import issue_sync
+    from ..common import filelock
     repo = config.target_repo_slug()
     if not repo:
         print("[graduate] no target repo resolved (set target.repo in config.yaml) — skipping.")
         return None
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
-    res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
-                                       test_fn=_graduation_test_fn(), dry_run=dry_run)
+    try:
+        # Same cross-process push lock as execute_approval / the gate-off shift-end path:
+        # every actor that pushes this repo outward serializes on it.
+        with filelock.repo_lock(root):
+            res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
+                                               test_fn=_graduation_test_fn(), dry_run=dry_run)
+    except filelock.LockBusyError:
+        res = {"action": "skip", "reason": "lock-busy"}
     action = res.get("action")
     if action in ("synced", "dry_run"):
         synced = res.get("synced", [])
@@ -1351,7 +1358,7 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         return {"action": "skip", "reason": "not-real-or-nothing-shipped"}
     try:
         from ..reporting import issue_sync, approvals
-        from ..common import killswitch
+        from ..common import killswitch, filelock
         graduate_fn = graduate_fn or issue_sync.graduate_and_push
         repo = repo if repo is not None else config.target_repo_slug()
         if not repo:
@@ -1378,13 +1385,21 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             # abnormal-skip escalation a real push's skip would get, below.
             res = preview
         else:
-            res = graduate_fn(root=root, base=base, repo=repo, store=store,
-                              stop_check=sc, test_fn=test_fn)
+            # Gate OFF pushes for real → serialize with every other push-side actor
+            # (an operator's Approve executing in the dashboard process, a manual
+            # `factory graduate`) via the cross-process repo lock.
+            try:
+                with filelock.repo_lock(root):
+                    res = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                      stop_check=sc, test_fn=test_fn)
+            except filelock.LockBusyError:
+                res = {"action": "skip", "reason": "lock-busy"}
         # A silent abnormal skip is how a broken graduation pipeline stays invisible
         # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
         # broken" through the same deduped failure seam as a raised graduate error;
-        # benign: stop = operator brake, no-op = nothing worth pushing.
-        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op"):
+        # benign: stop = operator brake, no-op = nothing worth pushing, lock-busy =
+        # another pusher holds the repo lock (the push IS happening — just elsewhere).
+        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op", "lock-busy"):
             _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
         return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop

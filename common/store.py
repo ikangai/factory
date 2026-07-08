@@ -911,14 +911,54 @@ class Blackboard:
         return self._with_payload(
             self._one("SELECT * FROM pending_approvals WHERE id = ?", (approval_id,)))
 
+    def claim_approval(self, approval_id: int) -> bool:
+        """ATOMICALLY claim a pending approval for execution (pending → 'executing').
+        The rowcount-guarded single UPDATE is the whole race defense: of two concurrent
+        Approve clicks (double-click, two dashboards, dashboard + CLI) exactly one call
+        observes status='pending' and wins; the loser gets False and must not push.
+        Returns True iff THIS call performed the transition."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = 'executing' "
+            "WHERE id = ? AND status = 'pending'", (approval_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unclaim_approval(self, approval_id: int) -> bool:
+        """Revert a claimed approval (executing → 'pending') after a failed or
+        stale-preview execution attempt, so the operator can retry the SAME card.
+        Corner case, accepted: if a shift-end refile added a NEW pending row of the same
+        kind while this one was executing (supersede only touches 'pending' rows), the
+        unclaim briefly yields two pending rows of that kind — the next
+        add_pending_approval supersedes both, so the invariant self-heals."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = 'pending' "
+            "WHERE id = ? AND status = 'executing'", (approval_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_approval_payload(self, approval_id: int, payload: dict) -> bool:
+        """Refresh a live approval's preview payload in place (the stale-preview path:
+        reality moved since the card was filed, so the card is re-rendered from a fresh
+        dry-run rather than approved on outdated consent). Only legal while the row is
+        still live ('pending' or 'executing') — a resolved row's payload is part of the
+        immutable decision record. Returns True iff a row was updated."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET payload_json = ? "
+            "WHERE id = ? AND status IN ('pending','executing')",
+            (json.dumps(payload), approval_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def resolve_approval(self, approval_id: int, status: str, note: str = "") -> bool:
-        """Resolve a pending approval (approved/rejected/stale). Only legal FROM 'pending' —
-        a resolved row is immutable, so a duplicate or late resolution attempt changes
-        nothing and returns False rather than silently overwriting an earlier decision.
-        Returns True iff the row was 'pending' and got resolved."""
+        """Resolve a live approval (approved/rejected/stale). Legal FROM 'pending' or
+        'executing' (the atomic-claim flow resolves executing→approved after a successful
+        push) — a resolved row is immutable, so a duplicate or late resolution attempt
+        changes nothing and returns False rather than silently overwriting an earlier
+        decision. Returns True iff the row was live and got resolved."""
         cur = self.conn.execute(
             "UPDATE pending_approvals SET status = ?, note = ?, resolved_at = ? "
-            "WHERE id = ? AND status = 'pending'", (status, note, now_iso(), approval_id))
+            "WHERE id = ? AND status IN ('pending','executing')",
+            (status, note, now_iso(), approval_id))
         self.conn.commit()
         return cur.rowcount > 0
 

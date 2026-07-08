@@ -276,6 +276,12 @@ def promote_to_release(*, root: str, base: str, release: str = "main", remote: s
     if getattr(count, "returncode", 1) != 0 or n_commits <= 0:
         return {"action": "skip", "reason": "nothing-to-promote"}
 
+    # Exposure note (bounded, pre-existing): only push-side actors share the
+    # common.filelock push lock — the develop rail's own worktree operations on this repo
+    # are NOT serialized with this function. The risk is bounded by distinct worktree
+    # namespaces (the rail's candidate worktrees live under its own dirs; this one is a
+    # fresh mkdtemp), so the only shared surface is .git/worktrees metadata, which git
+    # guards with its own internal locks.
     wt = tempfile.mkdtemp(prefix="factory-promote-")
     try:
         added = git("worktree", "add", "--detach", wt, f"{remote}/{release}")
@@ -295,6 +301,12 @@ def promote_to_release(*, root: str, base: str, release: str = "main", remote: s
         new_sha = (git("rev-parse", "HEAD", cwd=wt).stdout or "").strip()
         return {"action": "promoted", "sha": new_sha, "n_commits": n_commits}
     finally:
+        # Ordering matters: remove → rmtree → prune. rmtree BEFORE the prune, so that when
+        # `worktree remove --force` fails (locked/dirty tree) the directory is still gone
+        # by prune time and prune can actually drop the dangling .git/worktrees metadata —
+        # pruning first would leave that metadata behind forever. rmtree also matters under
+        # a faked test runner, whose git calls never touch disk (the real mkdtemp dir
+        # would otherwise leak in every test).
         git("worktree", "remove", "--force", wt)          # best-effort: return code not checked
+        shutil.rmtree(wt, ignore_errors=True)
         git("worktree", "prune")
-        shutil.rmtree(wt, ignore_errors=True)             # real cleanup even when `runner` is faked
