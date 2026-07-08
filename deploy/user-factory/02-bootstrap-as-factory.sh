@@ -27,13 +27,25 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "[1/10] creating $ENV_FILE ..."
     read -rs -p "Paste the GitHub fine-grained PAT for ikangai/clive (runbook §2): " GH_PAT
     echo
+    # Sanitize the paste: clipboards routinely smuggle \r or stray whitespace into the
+    # hidden prompt, and one control char makes every Authorization header invalid
+    # ("invalid header field value"). PATs are [A-Za-z0-9_]+ — stripping all whitespace
+    # is always safe. %q writes the value shell-safe into the sourced env file.
+    GH_PAT="$(printf %s "$GH_PAT" | tr -d '[:space:]')"
+    if [ -z "$GH_PAT" ]; then
+        echo "ERROR: empty token — copy it fresh from the GitHub token page and rerun." >&2
+        exit 1
+    fi
+    case "$GH_PAT" in
+        *[!A-Za-z0-9_]*) echo "ERROR: token contains unexpected characters after sanitizing — paste it fresh (a PAT is letters/digits/underscores only)." >&2; exit 1 ;;
+    esac
     ( umask 077
-      cat > "$ENV_FILE" <<EOF
-# factory secrets — sourced by the LaunchDaemon wrapper (with-env.sh) and this user's shell.
-# 600 by construction (umask 077 at creation). Never commit, never put in a plist.
-export GH_TOKEN=$GH_PAT
-# export CLAUDE_CODE_OAUTH_TOKEN=...  # filled by runbook §3 (claude setup-token)
-EOF
+      { printf '%s\n' \
+          "# factory secrets — sourced by the LaunchDaemon wrapper (with-env.sh) and this user's shell." \
+          "# 600 by construction (umask 077 at creation). Never commit, never put in a plist."
+        printf 'export GH_TOKEN=%q\n' "$GH_PAT"
+        printf '%s\n' "# export CLAUDE_CODE_OAUTH_TOKEN=...  # filled by runbook §3 (claude setup-token)"
+      } > "$ENV_FILE"
     )
     unset GH_PAT
     chmod 600 "$ENV_FILE"
