@@ -873,3 +873,63 @@ class Blackboard:
             "INSERT OR REPLACE INTO issue_sync(issue_number, commit_sha, action, url, "
             "created_at) VALUES (?,?,?,?,?)",
             (issue_number, commit_sha, action, url, now_iso()))
+
+    # -- human work queue: approval gate + operator action audit ------------
+    # (design: docs/plans/2026-07-08-factory-owned-bus-human-queue-design.md)
+    @staticmethod
+    def _with_payload(row: Optional[dict]) -> Optional[dict]:
+        if row is not None:
+            try:
+                row["payload"] = json.loads(row.get("payload_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty payload
+                row["payload"] = {}
+        return row
+
+    def add_pending_approval(self, kind: str, payload: dict) -> int:
+        """File a new approval proposal (a graduation/publication dry-run preview).
+        SUPERSEDE-FIRST: any existing 'pending' row of the SAME kind is marked 'superseded'
+        (resolved_at stamped) in the same transaction before the new row lands — one live
+        proposal per kind, so a stale proposal can never be approved once a fresher one
+        exists. Returns the new row's id."""
+        self.conn.execute(
+            "UPDATE pending_approvals SET status = 'superseded', resolved_at = ? "
+            "WHERE kind = ? AND status = 'pending'", (now_iso(), kind))
+        cur = self.conn.execute(
+            "INSERT INTO pending_approvals(kind, status, payload_json, note, created_at) "
+            "VALUES (?, 'pending', ?, '', ?)", (kind, json.dumps(payload), now_iso()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def pending_approvals(self, status: str = "pending") -> list[dict]:
+        """Approval rows in `status`, newest first (id DESC — monotonic, stable within a
+        tick), payload parsed back to a dict under "payload"."""
+        rows = self._all(
+            "SELECT * FROM pending_approvals WHERE status = ? ORDER BY id DESC", (status,))
+        return [self._with_payload(r) for r in rows]
+
+    def get_approval(self, approval_id: int) -> Optional[dict]:
+        return self._with_payload(
+            self._one("SELECT * FROM pending_approvals WHERE id = ?", (approval_id,)))
+
+    def resolve_approval(self, approval_id: int, status: str, note: str = "") -> bool:
+        """Resolve a pending approval (approved/rejected/stale). Only legal FROM 'pending' —
+        a resolved row is immutable, so a duplicate or late resolution attempt changes
+        nothing and returns False rather than silently overwriting an earlier decision.
+        Returns True iff the row was 'pending' and got resolved."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = ?, note = ?, resolved_at = ? "
+            "WHERE id = ? AND status = 'pending'", (status, note, now_iso(), approval_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def record_operator_action(self, action: str, item_ref: str, detail: str = "") -> int:
+        """Append one audit row for an action taken from the dashboard's Queue tab."""
+        cur = self._exec(
+            "INSERT INTO operator_actions(action, item_ref, detail, created_at) "
+            "VALUES (?,?,?,?)", (action, item_ref, detail, now_iso()))
+        return cur.lastrowid
+
+    def recent_operator_actions(self, limit: int = 50) -> list[dict]:
+        """The last `limit` operator actions, newest first."""
+        return self._all(
+            "SELECT * FROM operator_actions ORDER BY id DESC LIMIT ?", (limit,))
