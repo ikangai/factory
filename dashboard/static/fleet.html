@@ -142,6 +142,24 @@ tbody tr:hover td{background:var(--g50)}
 .object-type{color:var(--g500);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
 .object-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 
+/* human queue — the operator's inbox: escalations/approvals/blocked each need a DECISION,
+   distinct from the derived action list below (which is navigation, not a work item). */
+.hq-list{display:grid;gap:10px;margin-bottom:12px}
+.hq-card{border:1px solid var(--g200);border-radius:8px;background:#fff;padding:10px 12px}
+.hq-card.hq-stale{border-color:var(--red);background:var(--red-50)}
+.hq-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.hq-head strong{font-size:12.5px}
+.hq-meta{color:var(--g500);font-size:11px}
+.hq-body{font-size:12.5px;line-height:1.45;margin:2px 0 8px;white-space:pre-wrap;word-break:break-word}
+.hq-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.hq-input{flex:1;min-width:140px;background:#fff;color:var(--g900);border:1px solid var(--g300);
+  border-radius:6px;padding:5px 8px;font-size:12px}
+textarea.hq-input{resize:vertical;flex-basis:100%}
+.hq-err{color:var(--red);font-size:11px;min-height:14px}
+.hq-reframe{margin-top:8px;padding-top:8px;border-top:1px dashed var(--g200);display:grid;gap:6px}
+.hq-ev summary{cursor:pointer;color:var(--g500);font-size:11px}
+.tabbtn .hq-badge{margin-left:6px;vertical-align:1px}
+
 /* momentum spark */
 .spark{display:flex;align-items:flex-end;gap:4px;height:52px;margin:6px 0 10px}
 .spark .s{flex:1;min-width:5px;background:linear-gradient(180deg,#60a5fa,var(--blue));border-radius:3px 3px 0 0;position:relative;transition:height .5s}
@@ -291,7 +309,7 @@ code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-
 <header class="topbar">
   <div><span class="brand">🏭 HARNESS FACTORY</span><span class="version">mission control</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation">
-    <button class="tabbtn active" data-tab="queue">Queue</button>
+    <button class="tabbtn active" data-tab="queue">Queue<span class="tag red hq-badge" id="hq-badge" style="display:none"></span></button>
     <button class="tabbtn" data-tab="plan">Plan</button>
     <button class="tabbtn" data-tab="execution">Execution</button>
     <button class="tabbtn" data-tab="resources">Resources</button>
@@ -336,6 +354,26 @@ code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-
             <div class="screen-sub">The operator starts from required actions, not from scattered tables. Each item opens the surface that owns the object.</div></div>
           <div class="actions"><button class="btn" data-goto="plan">Open plan</button><button class="btn primary" data-goto="report">Steering report</button></div>
         </div>
+        <!-- Human queue FIRST: escalations/approvals/blocked are the operator's own decisions,
+             above the derived action list (which only navigates to the surface that owns it). -->
+        <section class="card" id="hq-section">
+          <div class="card-head"><div><div class="card-title">Human queue</div>
+            <div class="card-sub">Escalations, pending approvals and blocked tasks — each needs a decision only you can make.</div></div>
+            <span class="muted" id="hq-h"></span></div>
+          <div class="card-body">
+            <div class="hq-list" id="hq-list"><div class="muted">connecting…</div></div>
+            <details class="addform" id="hq-addform"><summary>+ add a task</summary>
+              <div class="addrow"><input id="hq-add-title" placeholder="title (required)"></div>
+              <textarea id="hq-add-detail" rows="2" maxlength="4000" placeholder="detail (optional)"></textarea>
+              <div class="addrow">
+                <input id="hq-add-target" placeholder="target surface (optional)">
+                <input id="hq-add-acceptance" placeholder="acceptance (optional)">
+                <input id="hq-add-oos" placeholder="out of scope (optional)">
+              </div>
+              <div><button class="formbtn" id="hq-add-btn">Add task</button> <span class="merr" style="color:var(--red)" id="hq-add-err"></span></div>
+            </details>
+          </div>
+        </section>
         <div class="queue-grid">
           <section class="card">
             <div class="card-head"><div><div class="card-title">Action queue</div>
@@ -600,6 +638,11 @@ function headerRender(d){
   }else{aps.textContent='';aps.className='apstat';}
   if(d.halted){sb.textContent='▶ Resume';sb.dataset.halted='1';sb.classList.add('halted');}
   else{sb.textContent='⛔ Stop';sb.dataset.halted='0';sb.classList.remove('halted');}
+  // Human-queue tab badge lives in the HEADER tick (not just the queue tab's own refresh) so
+  // it stays current no matter which tab the operator is looking at — an escalation landing
+  // while they're on Finance still shows up within one 10s tick.
+  const hqBadge=el('hq-badge'),hqc=(d.human_queue||{}).counts||{},hqTotal=hqc.total||0;
+  if(hqBadge){hqBadge.style.display=hqTotal?'':'none';hqBadge.textContent=hqTotal;}
   const q=d.queue||[],openN=q.filter(a=>a.severity!=='green').length;
   el('kpis').innerHTML=
     kpi('📋 Open actions',openN,openN?'the Work Queue needs you':'all clear',openN?'tint-amber':'tint-green')+
@@ -614,10 +657,60 @@ function headerRender(d){
   el('stamp').textContent='updated '+new Date().toLocaleTimeString();
 }
 
+// ── Human queue — the operator's inbox (escalations/approvals/blocked) ─────
+// Card builders are pure string-templates like every other render* function on this page;
+// action wiring is ONE delegated listener on #hq-list (below) since cards are re-created on
+// every render, not held onto — the object-list/prof-cards convention used elsewhere.
+function hqKindBadge(kind){const KC={graduation:'violet',publication:'blue'};return tagp(kind||'approval',KC[kind]||'gray');}
+function hqAge(days){return days==null?'—':days.toFixed(1)+'d';}
+function hqEscCard(it){
+  return `<div class="hq-card" data-kind="escalation" data-id="${esc(it.id)}">`+
+    `<div class="hq-head">${tagp('escalation','red')}<span class="hq-meta">${esc(it.sender)} · ${esc(it.ts)}</span></div>`+
+    `<div class="hq-body">${esc(it.text)}</div>`+
+    `<div class="hq-row"><textarea class="hq-input" rows="2" placeholder="reply…" data-role="answer-text"></textarea></div>`+
+    `<div class="hq-row"><button class="btn small primary" data-act="answer" data-id="${esc(it.id)}">Answer</button></div>`+
+    `<div class="hq-err" data-err></div></div>`;
+}
+function hqApprCard(it){
+  return `<div class="hq-card ${it.stale?'hq-stale':''}" data-kind="approval" data-id="${esc(it.approval_id)}">`+
+    `<div class="hq-head">${hqKindBadge(it.kind)}${it.stale?tagp('STALE','red'):''}<span class="hq-meta">waiting ${hqAge(it.age_days)}</span></div>`+
+    `<div class="hq-body">${esc(it.summary)}</div>`+
+    `<div class="hq-row"><button class="btn small primary" data-act="approve" data-id="${esc(it.approval_id)}">Approve</button>`+
+    `<input class="hq-input" type="text" placeholder="reject note (optional)" data-role="reject-note">`+
+    `<button class="btn small" data-act="reject" data-id="${esc(it.approval_id)}">Reject</button></div>`+
+    `<div class="hq-err" data-err></div></div>`;
+}
+function hqBlockedCard(it){
+  const ev=it.evidence_head?`<details class="hq-ev"><summary>evidence</summary><div class="hq-body">${esc(it.evidence_head)}</div></details>`:'';
+  return `<div class="hq-card" data-kind="blocked" data-id="${esc(it.task_id)}">`+
+    `<div class="hq-head">${tagp('blocked','gray')}<strong>${esc(it.title)}</strong><span class="hq-meta">${esc(it.task_id)} · ${hqAge(it.age_days)}</span></div>`+
+    `<div class="hq-body">${esc(it.reason||'(no reason recorded)')}</div>${ev}`+
+    `<div class="hq-row"><button class="btn small" data-act="retry" data-id="${esc(it.task_id)}">Retry</button>`+
+    `<button class="btn small" data-act="drop" data-id="${esc(it.task_id)}">Drop</button>`+
+    `<button class="btn small" data-act="reframe-toggle" data-id="${esc(it.task_id)}">Reframe</button></div>`+
+    `<div class="hq-reframe" style="display:none">`+
+    `<input class="hq-input" data-role="reframe-title" value="${esc(it.title)}" placeholder="new title">`+
+    `<textarea class="hq-input" rows="2" data-role="reframe-detail" placeholder="new detail (leave blank to keep the current detail)"></textarea>`+
+    `<button class="btn small primary" data-act="reframe-confirm" data-id="${esc(it.task_id)}">Save reframe</button></div>`+
+    `<div class="hq-err" data-err></div></div>`;
+}
+const HQ_BUILD={escalation:hqEscCard,approval:hqApprCard,blocked:hqBlockedCard};
+function hqRender(hq){
+  hq=hq||{};const items=hq.items||[],counts=hq.counts||{};
+  // counts.total may be absent on a degraded derivation ({items:[],counts:{}}) — fall back
+  // to the items length rather than showing a misleading blank/zero header.
+  const total=counts.total!=null?counts.total:items.length;
+  el('hq-h').textContent=total?('· '+total+' need you'):'';
+  el('hq-list').innerHTML=items.length?
+    items.map(it=>(HQ_BUILD[it.type]||(()=>''))(it)).join('')
+    :'<div class="muted">no human input needed — the queue is clear.</div>';
+}
+
 // ── Work Queue (home) ─────────────────────────────────────────────────────
 const SEVC={red:'red',amber:'amber',blue:'blue',green:'green'};
 const SEVL={red:'Act now',amber:'Action',blue:'FYI',green:'OK'};
 function queueRender(d){
+  hqRender(d.human_queue);
   const q=d.queue||[],mo=d.momentum||{},k=d.kpi||{};
   el('queue-h').textContent=q.length?('· '+q.filter(a=>a.severity!=='green').length+' open'):'';
   el('queue-list').innerHTML=q.length?q.map(a=>
@@ -886,6 +979,87 @@ el('caps-save').addEventListener('click',async()=>{
 });
 // Execution tab — click a shift row to expand the full report.
 el('shifts').addEventListener('click',e=>{const row=e.target.closest&&e.target.closest('.shift-row');if(row)row.classList.toggle('open');});
+
+// Human queue — ONE delegated listener over #hq-list handles every card action (answer /
+// approve / reject / retry / drop / reframe). Cards are rebuilt wholesale on each refresh, so
+// binding per-card listeners would leak; delegation matches the prof-cards/shifts convention
+// above. Every mutating action re-fetches /api/fleet on success (optimistic-refresh: the
+// server is the source of truth, not a locally-patched card).
+el('hq-list').addEventListener('click',async e=>{
+  const btn=e.target.closest&&e.target.closest('button[data-act]');if(!btn)return;
+  const card=btn.closest('.hq-card');if(!card)return;
+  const act=btn.dataset.act,id=btn.dataset.id,errEl=card.querySelector('[data-err]');
+  const setErr=m=>{if(errEl)errEl.textContent=m||'';};
+  if(act==='reframe-toggle'){                 // pure UI toggle — no network, no disable
+    const box=card.querySelector('.hq-reframe');
+    if(box)box.style.display=(box.style.display==='none')?'':'none';
+    return;
+  }
+  btn.disabled=true;setErr('');
+  try{
+    let r,j;
+    if(act==='answer'){
+      const text=card.querySelector('[data-role="answer-text"]').value.trim();
+      if(!text){setErr('enter a reply');btn.disabled=false;return;}
+      r=await fetch('/api/queue/answer',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:Number(id),text})});
+      j=await r.json().catch(()=>({}));
+      if(!r.ok){setErr(j.error||('error '+r.status));btn.disabled=false;return;}
+      // bus.answer never raises — ok:false means the bus itself is unreachable, NOT that the
+      // escalation is gone; keep the card (and the operator's typed reply) so they can retry.
+      if(j.ok===false){setErr('bus unreachable — reply not delivered, try again');btn.disabled=false;return;}
+    }else if(act==='approve'||act==='reject'){
+      const body={approval_id:Number(id),op:act};
+      if(act==='reject'){const note=card.querySelector('[data-role="reject-note"]');body.note=note?note.value.trim():'';}
+      r=await fetch('/api/queue/approval',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      j=await r.json().catch(()=>({}));
+      if(!r.ok){setErr(j.error||('error '+r.status));btn.disabled=false;return;}
+      if(j.ok===false){
+        // The pinned-consent special case (approvals.py): reality moved since the card was
+        // rendered, the row's payload was refreshed server-side and reverted to pending —
+        // refetch so the TRUE range/count replaces this stale card for a re-click.
+        setErr(j.error==='preview-stale'?'preview was stale — card refreshed, review and re-approve'
+              :(j.error||(j.result&&(j.result.error||j.result.reason))||'action failed — see logs'));
+        refreshQueue();return;
+      }
+    }else if(act==='retry'||act==='drop'){
+      r=await fetch('/api/queue/task',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({op:act,task_id:id})});
+      j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false){setErr((j&&j.error)||('error '+r.status));btn.disabled=false;return;}
+    }else if(act==='reframe-confirm'){
+      const box=card.querySelector('.hq-reframe');
+      const title=box.querySelector('[data-role="reframe-title"]').value.trim();
+      const detail=box.querySelector('[data-role="reframe-detail"]').value;
+      const body={op:'reframe',task_id:id};
+      if(title)body.title=title;
+      if(detail.trim())body.detail=detail;
+      if(!body.title&&!body.detail){setErr('change the title or detail first');btn.disabled=false;return;}
+      r=await fetch('/api/queue/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false){setErr((j&&j.error)||('error '+r.status));btn.disabled=false;return;}
+    }
+    refreshQueue();
+  }catch(err){setErr('network error');btn.disabled=false;}
+});
+el('hq-add-btn').addEventListener('click',async()=>{
+  const err=el('hq-add-err');err.textContent='';
+  const title=el('hq-add-title').value.trim();
+  if(!title){err.textContent='title required';return;}
+  const body={op:'add',title,detail:el('hq-add-detail').value,
+              target_surface:el('hq-add-target').value.trim(),
+              acceptance:el('hq-add-acceptance').value.trim(),
+              out_of_scope:el('hq-add-oos').value.trim()};
+  const btn=el('hq-add-btn');btn.disabled=true;
+  try{
+    const r=await fetch('/api/queue/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false){err.textContent=(j&&j.error)||('error '+r.status);btn.disabled=false;return;}
+  }catch(e){err.textContent='network error';btn.disabled=false;return;}
+  btn.disabled=false;
+  el('hq-add-title').value=el('hq-add-detail').value=el('hq-add-target').value=el('hq-add-acceptance').value=el('hq-add-oos').value='';
+  refreshQueue();
+});
 
 // The header stays live on EVERY tab via a slow global tick; the active tab drives its own content.
 async function headerTick(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);}catch(e){el('off').style.display='flex';}}

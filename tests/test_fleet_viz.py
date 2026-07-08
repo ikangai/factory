@@ -674,3 +674,69 @@ def test_factory_viz_selfcheck_exit_code(tmp_path, monkeypatch, capsys):
                         lambda *a, **k: dict(bad, ok=True, placeholders=[]))
     assert orchestrator.main(["viz", "--selfcheck"]) == 0
     capsys.readouterr()                                              # swallow the report prints
+
+
+# --------------------------------------------------------------------------- #
+# Task 7 — Queue tab UI: human-queue cards on the live dashboard.              #
+# These assert the shipped page's load-bearing HOOKS (ids/POST-path literals/  #
+# form fields), not exact markup — the visual_check gate above already proves #
+# the inline JS parses; this proves the specific wiring Task 7 promised.       #
+# --------------------------------------------------------------------------- #
+def _live_page() -> str:
+    from factory.checks.visual_check import DEFAULT_PAGE
+    with open(DEFAULT_PAGE, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_queue_tab_has_the_human_queue_container_above_the_derived_list():
+    html = _live_page()
+    hq_at = html.index('id="hq-list"')
+    grid_at = html.index('class="queue-grid"')
+    tab_at = html.index('id="tab-queue"')
+    # the human-queue block sits INSIDE tab-queue and BEFORE the derived action list
+    # (queue-grid) — it's the operator's own decisions, not navigation.
+    assert tab_at < hq_at < grid_at
+
+
+def test_queue_tab_posts_to_the_three_task6_endpoints():
+    html = _live_page()
+    for path in ("/api/queue/answer", "/api/queue/task", "/api/queue/approval"):
+        assert path in html
+
+
+def test_queue_tab_renders_all_three_card_kinds_and_their_actions():
+    html = _live_page()
+    # escalation: answer
+    assert 'data-act="answer"' in html and 'data-role="answer-text"' in html
+    # approval: approve / reject(+note), stale badge
+    assert 'data-act="approve"' in html and 'data-act="reject"' in html
+    assert 'data-role="reject-note"' in html and 'STALE' in html
+    # blocked: retry / drop / reframe (title+detail, prefilled)
+    assert 'data-act="retry"' in html and 'data-act="drop"' in html
+    assert 'data-act="reframe-toggle"' in html and 'data-act="reframe-confirm"' in html
+    assert 'data-role="reframe-title"' in html and 'data-role="reframe-detail"' in html
+
+
+def test_queue_tab_has_the_add_task_form_fields():
+    html = _live_page()
+    for hook in ("hq-add-title", "hq-add-detail", "hq-add-target",
+                "hq-add-acceptance", "hq-add-oos", "hq-add-btn"):
+        assert f'id="{hook}"' in html
+
+
+def test_queue_tab_badge_hook_exists_and_updates_from_header_render():
+    html = _live_page()
+    assert 'id="hq-badge"' in html
+    # the badge is populated in headerRender (the global tick), not only on a queue-tab
+    # render, so it stays fresh no matter which tab the operator is looking at.
+    header_fn = html[html.index("function headerRender"):html.index("function headerRender") + 2000]
+    assert "hq-badge" in header_fn and "human_queue" in header_fn
+
+
+def test_queue_tab_empty_state_and_esc_usage():
+    html = _live_page()
+    assert "no human input needed" in html
+    # every server-derived field on a human-queue card must go through esc() — spot-check the
+    # attacker-influenceable ones (bus escalation text, task titles).
+    hq_block = html[html.index("function hqEscCard"):html.index("const HQ_BUILD")]
+    assert "esc(it.text)" in hq_block and "esc(it.title)" in hq_block and "esc(it.summary)" in hq_block
