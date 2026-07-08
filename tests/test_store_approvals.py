@@ -295,8 +295,9 @@ def test_reap_orphaned_approvals_resolves_stale_executing_rows(store):
     may not have landed — verify with git ls-remote, never assume success)."""
     aid = store.add_pending_approval("graduation", {"n_commits": 2, "tip_sha": "t0"})
     assert store.claim_approval(aid) is True               # now 'executing'
-    # backdate created_at past the age floor (a fresh row is spared — see next test)
-    store.conn.execute("UPDATE pending_approvals SET created_at = ? WHERE id = ?",
+    # backdate claimed_at past the age floor (Fix B: the floor keys on CLAIM time, not
+    # proposal time — a fresh claim is spared, see next test)
+    store.conn.execute("UPDATE pending_approvals SET claimed_at = ? WHERE id = ?",
                        ("2000-01-01T00:00:00.000000Z", aid))
     store.conn.commit()
 
@@ -329,3 +330,97 @@ def test_reap_orphaned_approvals_ignores_pending_and_resolved_rows(store):
     assert store.reap_orphaned_approvals() == []
     assert store.get_approval(pend)["status"] == "pending"
     assert store.get_approval(done)["status"] == "approved"
+
+
+# -- reap_orphaned_approvals keys on CLAIM time, not proposal time (Fix B) --------
+
+def test_claim_approval_stamps_claimed_at(store):
+    """claim_approval now stamps WHEN the row was claimed — the reaper's age floor reads
+    this, not created_at (proposal time)."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.get_approval(aid)["claimed_at"] is None    # unclaimed: NULL
+    store.claim_approval(aid)
+    assert store.get_approval(aid)["claimed_at"]             # stamped, non-empty
+
+
+def test_reap_orphaned_approvals_spares_a_recently_claimed_old_card(store):
+    """Fix B: an operator can Approve a card that was PROPOSED hours ago — nothing wrong
+    with that, it just sat in the queue. That click starts a BRAND NEW push right now. The
+    old code keyed the age floor on created_at (proposal time), so this in-flight (or just-
+    succeeded) push got reaped out from under it and mislabeled 'crashed'. Keying on
+    claimed_at instead spares it: the card is old, but the CLAIM is fresh."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    store.conn.execute("UPDATE pending_approvals SET created_at = ? WHERE id = ?",
+                       ("2000-01-01T00:00:00.000000Z", aid))
+    store.conn.commit()
+    assert store.claim_approval(aid) is True                 # claimed_at stamped NOW
+    assert store.reap_orphaned_approvals() == []              # spared — claimed recently
+    assert store.get_approval(aid)["status"] == "executing"
+
+
+def test_reap_orphaned_approvals_reaps_a_card_claimed_over_an_hour_ago(store):
+    """The genuinely-stuck case still reaps: claimed long ago and never resolved."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.claim_approval(aid) is True
+    store.conn.execute("UPDATE pending_approvals SET claimed_at = ? WHERE id = ?",
+                       ("2000-01-01T00:00:00.000000Z", aid))
+    store.conn.commit()
+    reaped = store.reap_orphaned_approvals()
+    assert [r["id"] for r in reaped] == [aid]
+    assert store.get_approval(aid)["status"] == "stale"
+
+
+def test_reap_orphaned_approvals_pre_migration_row_falls_back_to_created_at(store):
+    """A row claimed before this column existed has claimed_at NULL — COALESCE falls back
+    to created_at, exactly as the reaper behaved before Fix B."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    assert store.claim_approval(aid) is True
+    store.conn.execute(
+        "UPDATE pending_approvals SET claimed_at = NULL, created_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00.000000Z", aid))
+    store.conn.commit()
+    reaped = store.reap_orphaned_approvals()
+    assert [r["id"] for r in reaped] == [aid]
+
+
+def test_migrate_claimed_at_idempotent_on_already_migrated_store(store):
+    """Re-running init_db() (e.g. a process restart) against a store that already has
+    claimed_at must not raise (sqlite3 has no ADD COLUMN IF NOT EXISTS — the `if cols and
+    'claimed_at' not in cols` guard in _migrate is what makes this safe)."""
+    aid = store.add_pending_approval("graduation", {"n": 1})
+    store.claim_approval(aid)
+    store.init_db()                                           # re-migrate — must not raise
+    cols = [r[1] for r in store.conn.execute(
+        "PRAGMA table_info(pending_approvals)").fetchall()]
+    assert cols.count("claimed_at") == 1                       # not duplicated
+    assert store.get_approval(aid)["claimed_at"]                # data survived the re-run
+
+
+def test_migrate_adds_claimed_at_to_old_pending_approvals_table(tmp_path):
+    """A DB created before claimed_at existed (pre-Fix-B) gains it via _migrate — the
+    ALTER TABLE pattern (common/store.py) that backfills every other additive column."""
+    import sqlite3
+    from factory.common.store import Blackboard
+
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE pending_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "kind TEXT, status TEXT NOT NULL DEFAULT 'pending', payload_json TEXT NOT NULL, "
+        "note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, resolved_at TEXT)")
+    conn.execute(
+        "INSERT INTO pending_approvals(kind, status, payload_json, created_at) "
+        "VALUES ('graduation', 'executing', '{}', '2000-01-01T00:00:00.000000Z')")
+    conn.commit()
+    conn.close()
+    with Blackboard(db) as s:
+        s.init_db()                                           # must migrate, not crash
+        cols = {r[1] for r in s.conn.execute(
+            "PRAGMA table_info(pending_approvals)").fetchall()}
+        assert "claimed_at" in cols
+        row = s.get_approval(1)
+        assert row["claimed_at"] is None                       # backfilled NULL
+        # the pre-migration row (claimed_at NULL, created_at ancient) still reaps via the
+        # COALESCE fallback
+        reaped = s.reap_orphaned_approvals()
+        assert [r["id"] for r in reaped] == [1]

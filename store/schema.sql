@@ -315,6 +315,12 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     payload_json TEXT NOT NULL,               -- dry-run preview: range/commits/subjects/…
     note         TEXT NOT NULL DEFAULT '',    -- the operator's approve/reject rationale
     created_at   TEXT NOT NULL,
+    -- stamped by claim_approval (pending->executing), NULL until claimed. The reaper's age
+    -- floor keys on THIS, not created_at (Fix B, final adversarial re-verification): an
+    -- operator approving a card proposed hours ago starts a fresh push right now, and
+    -- reap_orphaned_approvals must not mislabel that in-flight (or just-succeeded) push
+    -- "crashed" just because the PROPOSAL was old.
+    claimed_at   TEXT,
     resolved_at  TEXT                          -- stamped on approve/reject/stale/supersede
 );
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_kind_status ON pending_approvals(kind, status);

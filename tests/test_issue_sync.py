@@ -763,6 +763,50 @@ def test_cmd_graduate_gate_on_files_approval_and_does_not_push(tmp_path, monkeyp
         assert "graduation proposed" in out and "autonomy.push_approval" in out
 
 
+def test_cmd_graduate_gate_on_suppresses_identical_rejection(tmp_path, monkeypatch, capsys):
+    """Fix C (final adversarial re-verification): `_graduate_after_shift`'s gate-ON branch
+    already refuses to re-file a graduation the operator REJECTED unchanged (Fix 3b above),
+    but `cmd_graduate`'s own propose path (a conductor-invoked `factory graduate` — it has
+    Bash) never consulted that same check, so it could re-propose the IDENTICAL card the
+    operator just declined. A fresh preview matching the latest rejected row (same count +
+    both endpoint SHAs) must file nothing."""
+    with _store(tmp_path) as s:
+        rej = s.add_pending_approval("graduation",
+            {"range": "origin/basebr..factory/auto", "n_commits": 3, "base_sha": "b0", "tip_sha": "t0"})
+        s.resolve_approval(rej, "rejected", note="not yet")
+
+        def fake_grad(**kw):
+            return {"action": "dry_run", "range": "origin/basebr..factory/auto", "n_commits": 3,
+                    "base_sha": "b0", "tip_sha": "t0", "synced": []}
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=True)
+        res = orch.cmd_graduate(s)                              # NO --dry-run
+        assert res == {"action": "skip", "reason": "rejected-unchanged"}
+        assert s.pending_approvals() == []                      # NO new pending card
+        assert "unchanged since operator rejection" in capsys.readouterr().out
+
+
+def test_cmd_graduate_gate_on_reproposes_after_a_new_commit(tmp_path, monkeypatch):
+    """A DIFFERENT preview after a rejection (the tip moved) proposes normally through
+    cmd_graduate too — suppression is scoped to the EXACT rejected endpoints, mirroring
+    `_graduate_after_shift`'s sibling test."""
+    with _store(tmp_path) as s:
+        rej = s.add_pending_approval("graduation",
+            {"range": "origin/basebr..factory/auto", "n_commits": 3, "base_sha": "b0", "tip_sha": "t0"})
+        s.resolve_approval(rej, "rejected", note="not yet")
+
+        def fake_grad(**kw):
+            return {"action": "dry_run", "range": "origin/basebr..factory/auto", "n_commits": 4,
+                    "base_sha": "b0", "tip_sha": "t9", "synced": []}   # tip moved
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=True)
+        res = orch.cmd_graduate(s)
+        assert res["action"] == "proposed" and res["n_commits"] == 4
+        assert len(s.pending_approvals()) == 1
+
+
 def test_cmd_graduate_gate_on_zero_commits_files_nothing(tmp_path, monkeypatch):
     """Gate ON but nothing to graduate: no empty approval card, no push."""
     with _store(tmp_path) as s:

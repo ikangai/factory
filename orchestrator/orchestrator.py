@@ -1282,6 +1282,18 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         if n <= 0:
             print("[graduate] nothing to graduate — base is already current.")
             return {"action": "skip", "reason": "no-op"}
+        # Fix C (final adversarial re-verification): `_graduate_after_shift`'s gate-ON
+        # branch already skips re-filing when the fresh preview is IDENTICAL (count + both
+        # endpoint SHAs, `_same_graduation`) to the latest REJECTED graduation — otherwise a
+        # rejection nags forever, re-filed by the very next shift. This CLI path files
+        # through the SAME propose_graduation but never consulted that check, so a
+        # conductor-invoked `factory graduate` (it has Bash) could re-propose the identical
+        # card the operator just declined. Reuse `_same_graduation` (module-level, this
+        # file) rather than re-deriving the compare — one source of truth for "unchanged".
+        rej = store.latest_rejected_approval("graduation")
+        if rej is not None and _same_graduation(rej.get("payload") or {}, res):
+            print("[graduate] unchanged since operator rejection — not re-proposing")
+            return {"action": "skip", "reason": "rejected-unchanged"}
         approval_id = approvals.propose_graduation(store, preview=res)
         print(f"graduation proposed → approval #{approval_id} pending (autonomy.push_approval)"
               f" — approve in the fleet GUI or set autonomy.push_approval: false")

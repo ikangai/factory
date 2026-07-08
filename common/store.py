@@ -128,6 +128,17 @@ class Blackboard:
         if lcols and "blocked_after" not in lcols:
             self.conn.execute(
                 "ALTER TABLE learnings ADD COLUMN blocked_after INTEGER NOT NULL DEFAULT 0")
+        # pending_approvals gained a claim timestamp (Fix B, final adversarial re-
+        # verification): reap_orphaned_approvals used to key its 1h age floor on created_at
+        # (proposal time). An operator approving a >1h-old card while the loop is mid-shift
+        # starts a fresh push right now — keying on proposal time reaped that SUCCESSFUL
+        # push and mislabeled it "crashed — verify with git ls-remote". claim_approval now
+        # stamps this on pending->executing; the reaper keys on it instead (falling back to
+        # created_at for pre-migration rows that were claimed before this column existed).
+        pcols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(pending_approvals)").fetchall()}
+        if pcols and "claimed_at" not in pcols:
+            self.conn.execute("ALTER TABLE pending_approvals ADD COLUMN claimed_at TEXT")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -716,14 +727,23 @@ class Blackboard:
         whether the push actually reached origin, so the note tells the operator to VERIFY
         with `git ls-remote` — never assume success (a false 'approved' would let a
         half-finished push masquerade as done). The age floor spares a legitimately in-flight
-        execution running in a SEPARATE process from being reaped mid-push. Returns the reaped
-        rows (payload parsed) for the caller's report."""
+        execution running in a SEPARATE process from being reaped mid-push.
+
+        The floor keys on COALESCE(claimed_at, created_at) — CLAIM time, not proposal time
+        (Fix B, final adversarial re-verification). created_at alone was a false-positive
+        generator: an operator can Approve a card that sat in the queue for hours — nothing
+        wrong with that — and that click starts a BRAND NEW push right now. Keying on the
+        card's age instead of the execution's age let a push seconds from completing (e.g. a
+        shift starting mid-approve) get reaped out from under it and mislabeled "crashed",
+        even though it went on to succeed. claimed_at is NULL only for rows claimed before
+        this column existed, so those still fall back to created_at exactly as before.
+        Returns the reaped rows (payload parsed) for the caller's report."""
         from datetime import timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ")
         orphans = self._all(
-            "SELECT * FROM pending_approvals WHERE status = 'executing' AND created_at < ? "
-            "ORDER BY id", (cutoff,))
+            "SELECT * FROM pending_approvals WHERE status = 'executing' "
+            "AND COALESCE(claimed_at, created_at) < ? ORDER BY id", (cutoff,))
         note = ("execution crashed before it resolved; the push may or may not have reached "
                 "origin — verify with `git ls-remote` before trusting it")
         for r in orphans:
@@ -960,10 +980,12 @@ class Blackboard:
         The rowcount-guarded single UPDATE is the whole race defense: of two concurrent
         Approve clicks (double-click, two dashboards, dashboard + CLI) exactly one call
         observes status='pending' and wins; the loser gets False and must not push.
-        Returns True iff THIS call performed the transition."""
+        Stamps claimed_at (Fix B) — reap_orphaned_approvals' age floor keys on THIS, not
+        created_at, so a card proposed hours ago but claimed just now is not mistaken for a
+        stale/crashed execution. Returns True iff THIS call performed the transition."""
         cur = self.conn.execute(
-            "UPDATE pending_approvals SET status = 'executing' "
-            "WHERE id = ? AND status = 'pending'", (approval_id,))
+            "UPDATE pending_approvals SET status = 'executing', claimed_at = ? "
+            "WHERE id = ? AND status = 'pending'", (now_iso(), approval_id))
         self.conn.commit()
         return cur.rowcount > 0
 

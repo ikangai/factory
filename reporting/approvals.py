@@ -104,6 +104,10 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
     Outcomes:
     - success ('synced'/'promoted') → row resolves executing→'approved' with a short
       note + an 'approve' audit row; returns {"ok": True, "result": ...}.
+    - lag cleared (fresh n_commits/ahead <= 0 — everything landed by other means) → NO
+      push; row resolves executing→'stale' with an 'approve-stale-cleared' audit row
+      (Fix A / Fix 4c); returns {"ok": False, "error": "lag-cleared"} rather than
+      re-pending a 0-count card that could never clear.
     - stale preview (fresh dry-run/lag differs from the stored payload) → NO push; the
       row's payload is refreshed in place, the claim reverts to 'pending', an
       'approve-stale-refreshed' audit row is written; returns
@@ -143,6 +147,28 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     _fail_attempt(store, approval_id,
                                   f"preview failed: {_result_note(fresh)}")
                     return {"ok": False, "result": fresh}
+                if fresh.get("n_commits", 0) <= 0:
+                    # Fix A (final adversarial re-verification), symmetric with the
+                    # publication ahead<=0 case (Fix 4c) just below: everything the card
+                    # covers already landed by other means (another approval, a manual push)
+                    # — there is NOTHING left to graduate. This check sits BEFORE the
+                    # mismatch/consent compare below so it catches BOTH shapes of the loop:
+                    # (1) the stale-refresh path — the stored payload still pins a real
+                    # count, but reality is now 0. The OLD code fell through to the mismatch
+                    # branch, rewrote the card's payload to n_commits:0, and reverted it to
+                    # pending; approving that 0-commit card then ran graduate_fn for real,
+                    # which no-ops on 0 commits, so _fail_attempt reverted it to pending
+                    # AGAIN — a card that can never clear without a manual Reject.
+                    # (2) a DIRECT approve where the fresh preview already MATCHES a pinned
+                    # 0-commit payload (e.g. a second click after (1), or any other path that
+                    # produced a 0-commit card) — the old mismatch check saw no difference and
+                    # would have run the same no-op-then-repend loop.
+                    # Resolve 'stale' instead so the row leaves the queue for good.
+                    store.resolve_approval(approval_id, "stale", note="nothing left to graduate")
+                    store.record_operator_action(
+                        "approve-stale-cleared", ref,
+                        "graduation lag cleared (base already current — nothing to graduate)")
+                    return {"ok": False, "error": "lag-cleared"}
                 # Consent match: count + BOTH endpoint SHAs (Fix 2 — the range alone is a
                 # constant literal). The range comparison is kept as a config-drift guard
                 # (branch-name change), but a same-count amend/force-push now trips the SHAs.

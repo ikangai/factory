@@ -156,6 +156,52 @@ def test_execute_approval_graduation_stale_when_only_tip_sha_moved(tmp_path, mon
         assert s.recent_operator_actions()[0]["action"] == "approve-stale-refreshed"
 
 
+def test_execute_approval_graduation_lag_cleared_resolves_not_repends(tmp_path, monkeypatch):
+    """Fix A (final adversarial re-verification), symmetric with the publication ahead<=0
+    fix (Fix 4c) below: everything the card covers already landed by OTHER means (another
+    approval, a manual push) — the fresh preview has 0 commits left. The OLD code fell into
+    the mismatch branch, rewrote the card's payload to n_commits:0 and re-pended it;
+    approving THAT card then ran graduate_fn for real, which no-ops on 0 commits, so
+    _fail_attempt reverted it to pending again — a card that could never clear without a
+    manual Reject. Resolve 'stale' instead, with no real (non-dry-run) graduate call ever
+    made."""
+    _fake_config(monkeypatch)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("graduation", {"range": "a..b", "n_commits": 5,
+                                                    "base_sha": "b0", "tip_sha": "t0"})
+        calls = []
+        fn = _grad_fn(calls, preview={"action": "dry_run", "range": "a..a", "n_commits": 0,
+                                      "base_sha": "b9", "tip_sha": "t0", "synced": []})
+        res = approvals.execute_approval(s, aid, graduate_fn=fn)
+        assert res == {"ok": False, "error": "lag-cleared"}
+        assert len(calls) == 1 and calls[0]["dry_run"] is True   # the REAL push never ran
+
+        row = s.get_approval(aid)
+        assert row["status"] == "stale"                          # resolved, NOT re-pended
+        assert "nothing left to graduate" in row["note"]
+        assert s.pending_approvals() == []                       # gone from the queue
+        assert s.recent_operator_actions()[0]["action"] == "approve-stale-cleared"
+
+
+def test_execute_approval_graduation_already_zero_commits_resolves_without_running(tmp_path, monkeypatch):
+    """The OTHER shape of the same loop: a card is ALREADY pinned at 0 commits (e.g. a
+    second Approve click after the refresh above, or any other path that produced a
+    0-commit card) and the fresh preview MATCHES it exactly — no mismatch would ever be
+    detected by the consent compare. Must still resolve 'stale' rather than running
+    graduate_fn for real and looping on the no-op."""
+    _fake_config(monkeypatch)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("graduation", {"range": "a..a", "n_commits": 0,
+                                                    "base_sha": "b0", "tip_sha": "t0"})
+        calls = []
+        fn = _grad_fn(calls, preview={"action": "dry_run", "range": "a..a", "n_commits": 0,
+                                      "base_sha": "b0", "tip_sha": "t0", "synced": []})
+        res = approvals.execute_approval(s, aid, graduate_fn=fn)
+        assert res == {"ok": False, "error": "lag-cleared"}
+        assert len(calls) == 1 and calls[0]["dry_run"] is True   # the REAL push never ran
+        assert s.get_approval(aid)["status"] == "stale"
+
+
 def test_execute_approval_graduation_failure_leaves_row_pending(tmp_path, monkeypatch):
     """A real-push skip (e.g. a red retest or rejected push) must NOT resolve the row —
     the operator needs to be able to fix the cause and retry the SAME approval."""

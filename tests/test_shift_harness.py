@@ -78,7 +78,9 @@ def test_run_shift_reaps_orphaned_executing_approvals_at_startup(tmp_path, monke
         m = s.set_mission("x")
         aid = s.add_pending_approval("graduation", {"n_commits": 1})
         assert s.claim_approval(aid) is True                       # stranded 'executing'
-        s.conn.execute("UPDATE pending_approvals SET created_at = '2000-01-01T00:00:00.000000Z' "
+        # backdate claimed_at (Fix B: the reaper's age floor keys on CLAIM time, not
+        # proposal/created_at time) so this row reads as stuck beyond the age floor
+        s.conn.execute("UPDATE pending_approvals SET claimed_at = '2000-01-01T00:00:00.000000Z' "
                        "WHERE id = ?", (aid,))
         s.conn.commit()
         shiftmod.run_shift(s, token_budget=10, mission="x",
