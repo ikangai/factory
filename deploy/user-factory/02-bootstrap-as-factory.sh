@@ -104,8 +104,17 @@ fi
 # The clive.factory-auto worktree is created automatically on the first real shift.
 git -C "$FAB/clive" checkout chore/extract-factory
 
-# --- 4. deploy branch + local-only config overlay ----------------------------------------
-echo "[4/10] deploy branch + config overlay ..."
+# --- 4. python deps (BEFORE the overlay — apply-config-overlay.py imports yaml) -----------
+echo "[4/10] python dependencies ..."
+python3 -m pip install --user -r "$FAB/factory/requirements.txt" \
+    || python3 -m pip install --user --break-system-packages -r "$FAB/factory/requirements.txt"
+if [ -f "$FAB/clive/requirements.txt" ]; then
+    python3 -m pip install --user -r "$FAB/clive/requirements.txt" \
+        || python3 -m pip install --user --break-system-packages -r "$FAB/clive/requirements.txt"
+fi
+
+# --- 5. deploy branch + local-only config overlay ----------------------------------------
+echo "[5/10] deploy branch + config overlay ..."
 cd "$FAB/factory"
 if git rev-parse --verify deploy >/dev/null 2>&1; then
     git checkout deploy
@@ -122,15 +131,6 @@ if [ -n "$(git status --porcelain)" ]; then
     git commit -m "deploy: local config overlay (prod=false, same-user workers, board port 9787)"
 else
     echo "  config.yaml already matches the deploy overlay — nothing to commit"
-fi
-
-# --- 5. python deps -----------------------------------------------------------------------
-echo "[5/10] python dependencies ..."
-python3 -m pip install --user -r "$FAB/factory/requirements.txt" \
-    || python3 -m pip install --user --break-system-packages -r "$FAB/factory/requirements.txt"
-if [ -f "$FAB/clive/requirements.txt" ]; then
-    python3 -m pip install --user -r "$FAB/clive/requirements.txt" \
-        || python3 -m pip install --user --break-system-packages -r "$FAB/clive/requirements.txt"
 fi
 
 # --- 6. git identity (commits made by this user's factory bot) ---------------------------
