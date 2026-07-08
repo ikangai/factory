@@ -1365,6 +1365,16 @@ def _graduation_test_fn():
     return lambda root: config.get_adapter().run_tests(root)
 
 
+def _same_graduation(payload: dict, preview: dict) -> bool:
+    """True iff a fresh graduation preview pins the SAME consent-critical endpoints as a
+    stored payload (Fix 3b re-proposal suppression): the commit COUNT and BOTH endpoint SHAs
+    (base_sha/tip_sha, Fix 2). The `range` string is a constant symbolic literal, so it is
+    deliberately NOT part of the identity — only the actual endpoints are."""
+    return (payload.get("n_commits") == preview.get("n_commits")
+            and payload.get("base_sha", "") == preview.get("base_sha", "")
+            and payload.get("tip_sha", "") == preview.get("tip_sha", ""))
+
+
 def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                           graduate_fn=None, repo: Optional[str] = None,
                           root: Optional[str] = None, base: Optional[str] = None,
@@ -1405,6 +1415,16 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                 n = preview.get("n_commits", 0)
                 if n <= 0:                        # nothing to propose — quiet, like a real no-op
                     return {"action": "skip", "reason": "no-op"}
+                # Fix 3b (final whole-branch review): don't re-propose a graduation the
+                # operator already REJECTED unchanged — the reject used to land only in
+                # operator_actions, so the next shift re-filed the identical card and the
+                # reject nagged forever. Compare the fresh preview's pinned endpoints (count
+                # + SHAs, Fix 2) against the most recent rejected row; identical → skip
+                # filing. Any difference (new commit, moved tip) proposes normally.
+                rej = store.latest_rejected_approval("graduation")
+                if rej is not None and _same_graduation(rej.get("payload") or {}, preview):
+                    print("[run] graduation unchanged since operator rejection — not re-proposing")
+                    return {"action": "skip", "reason": "rejected-unchanged"}
                 approval_id = approvals.propose_graduation(store, preview=preview)
                 print(f"[run] graduation proposed → approval #{approval_id} pending "
                       f"(autonomy.push_approval)")
@@ -1499,7 +1519,16 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                 # check is needed here.
                 gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
                 if gate_on:
-                    store.add_pending_approval("publication", {"ahead": p, "release": release})
+                    # Fix 3b (final whole-branch review): suppress re-filing a publication the
+                    # operator REJECTED unchanged (same ahead + release) — else the reject
+                    # (which lives only in operator_actions) nagged with the identical card
+                    # every shift. A changed lag / different release proposes normally.
+                    rej = store.latest_rejected_approval("publication")
+                    rp = (rej.get("payload") or {}) if rej is not None else {}
+                    if rej is not None and rp.get("ahead") == p and rp.get("release") == release:
+                        print("[run] publication unchanged since operator rejection — not re-proposing")
+                    else:
+                        store.add_pending_approval("publication", {"ahead": p, "release": release})
         return {**lag, "publication": pub}
     except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
         print(f"[run] lag alarm skipped (non-fatal): {e}")

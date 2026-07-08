@@ -978,6 +978,30 @@ class Blackboard:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def latest_resolved_approval(self, kind: Optional[str] = None) -> Optional[dict]:
+        """The most recently RESOLVED approval (resolved_at stamped — i.e. no longer
+        pending/executing: approved/rejected/stale/superseded), optionally filtered by kind,
+        newest-first by id. The conductor's {RESUME} seam reads this to surface a rejection
+        so a rejected outward-push proposal feeds back into planning instead of being
+        silently re-filed (design §3; final whole-branch review Fix 3a). A newer resolved
+        row of the same kind wins, so the feedback stops nagging once the operator moves on."""
+        if kind is None:
+            return self._with_payload(self._one(
+                "SELECT * FROM pending_approvals WHERE resolved_at IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1"))
+        return self._with_payload(self._one(
+            "SELECT * FROM pending_approvals WHERE kind = ? AND resolved_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (kind,)))
+
+    def latest_rejected_approval(self, kind: str) -> Optional[dict]:
+        """The most recent REJECTED approval of `kind` (newest-first by id), or None. The
+        proposal sites compare a fresh preview against this row's pinned payload to skip
+        re-filing an UNCHANGED proposal the operator already declined (final whole-branch
+        review Fix 3b) — any difference (new commits, moved tip, changed lag) proposes anew."""
+        return self._with_payload(self._one(
+            "SELECT * FROM pending_approvals WHERE kind = ? AND status = 'rejected' "
+            "ORDER BY id DESC LIMIT 1", (kind,)))
+
     def record_operator_action(self, action: str, item_ref: str, detail: str = "") -> int:
         """Append one audit row for an action taken from the dashboard's Queue tab."""
         cur = self._exec(

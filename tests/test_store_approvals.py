@@ -69,6 +69,43 @@ def test_supersede_does_not_touch_already_resolved_rows(store):
     assert store.get_approval(new_id)["status"] == "pending"
 
 
+# -- latest_resolved_approval / latest_rejected_approval (Fix 3) ---------------
+
+def test_latest_resolved_approval_returns_most_recent_terminal_row(store):
+    """Fix 3a (final whole-branch review): the {RESUME} seam reads the MOST RECENTLY resolved
+    approval of a kind so a rejection feeds back into planning."""
+    a1 = store.add_pending_approval("graduation", {"n": 1})
+    store.resolve_approval(a1, "rejected", note="not yet")
+    assert store.latest_resolved_approval("graduation")["id"] == a1
+
+    a2 = store.add_pending_approval("graduation", {"n": 2})
+    store.resolve_approval(a2, "approved", note="shipped")
+    row = store.latest_resolved_approval("graduation")
+    assert row["id"] == a2 and row["status"] == "approved"   # the newer decision wins
+
+
+def test_latest_resolved_approval_ignores_live_rows(store):
+    """A still-pending row (resolved_at NULL) is not 'resolved' — the latest RESOLVED row is
+    the prior rejection, not the fresh pending proposal."""
+    a1 = store.add_pending_approval("graduation", {"n": 1})
+    store.resolve_approval(a1, "rejected", note="no")
+    store.add_pending_approval("publication", {"ahead": 3})   # unrelated, still pending
+    assert store.latest_resolved_approval("graduation")["id"] == a1
+    assert store.latest_resolved_approval("publication") is None
+
+
+def test_latest_rejected_approval_only_matches_rejections(store):
+    """Fix 3b: re-proposal suppression compares against the most recent REJECTED row only."""
+    a1 = store.add_pending_approval("graduation", {"n_commits": 1, "tip_sha": "t0"})
+    store.resolve_approval(a1, "rejected", note="no")
+    assert store.latest_rejected_approval("graduation")["id"] == a1
+    a2 = store.add_pending_approval("graduation", {"n_commits": 2, "tip_sha": "t1"})
+    store.resolve_approval(a2, "approved")
+    # a later APPROVED row does not become the "latest rejected"
+    assert store.latest_rejected_approval("graduation")["id"] == a1
+    assert store.latest_rejected_approval("publication") is None
+
+
 # -- resolve_approval ----------------------------------------------------------
 
 def test_resolve_approval_from_pending_succeeds_and_sets_resolved_at(store):

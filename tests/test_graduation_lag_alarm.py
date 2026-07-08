@@ -138,6 +138,25 @@ def test_publication_lag_above_threshold_files_an_approval_when_gate_on(capsys, 
     assert len(store.pending_approvals(status="superseded")) == 1
 
 
+def test_publication_lag_suppressed_when_operator_rejected_it_unchanged(capsys, store, monkeypatch):
+    """Fix 3b (final whole-branch review): once the operator rejects a publication proposal,
+    the next shift's alarm must NOT re-file the identical card (same ahead + release) — it
+    would just nag with what the operator already declined. A changed lag proposes normally."""
+    _fake_config(monkeypatch, target={"base_branch": "chore"})
+    monkeypatch.setattr(orch.config, "load_config", lambda: {"autonomy": {"push_approval": True}})
+    rej = store.add_pending_approval("publication", {"ahead": 105, "release": "main"})
+    store.resolve_approval(rej, "rejected", note="promote manually this week")
+    lag_fn = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 105}})
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn, file_fn=_collector([]))
+    assert store.pending_approvals() == []                  # identical → not re-proposed
+    assert "publication unchanged since operator rejection" in capsys.readouterr().out
+    # the lag GROWS → a genuinely new proposal is filed
+    lag_fn2 = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 200}})
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn2, file_fn=_collector([]))
+    rows = store.pending_approvals()
+    assert len(rows) == 1 and rows[0]["payload"] == {"ahead": 200, "release": "main"}
+
+
 def test_publication_lag_zero_is_silent(capsys, store, monkeypatch):
     _fake_config(monkeypatch, target={"base_branch": "chore"})
     calls = []

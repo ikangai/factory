@@ -55,6 +55,27 @@ def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
+def _append_rejection_feedback(store, resume: str) -> str:
+    """Fix 3a (final whole-branch review): a rejected outward-push proposal used to land ONLY
+    in operator_actions (which nothing reads), so the next shift re-filed the identical card
+    — design §3 promised the rejection surfaces HERE, in the conductor's {RESUME} seam.
+    Append one line per push kind whose MOST RECENT resolved approval was a rejection,
+    carrying the operator's note (an empty note still states the rejection). A newer
+    approval/supersede of that kind makes it no longer the latest resolved → the line drops,
+    so it stops nagging once the operator has moved on. Never raises — the bus/store may be
+    momentarily unavailable, and a planning seam must not take down prompt assembly."""
+    lines = []
+    for kind in ("graduation", "publication"):
+        try:
+            row = store.latest_resolved_approval(kind)
+        except Exception:  # noqa: BLE001 — feedback is a nicety, never a build dependency
+            row = None
+        if row and row.get("status") == "rejected":
+            note = (row.get("note") or "").strip()
+            lines.append(f'operator rejected the last {kind} proposal: "{note}"')
+    return resume + "\n" + "\n".join(lines) if lines else resume
+
+
 def _evm_header(store) -> str:
     """Task 1.5: one EVM header line for the {PLAN} seam — CPI (earned ÷ actual tokens),
     percent complete, overhead share of the whole ledger. This is the factory's only
@@ -143,6 +164,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
     from .research_feed import fetch_issues
     prior = store.prior_shift(shift_id)
     resume = (prior.get("resume_note") if prior else "") or "(first shift — no prior note)"
+    resume = _append_rejection_feedback(store, resume)
     backlog = _bullets(
         store.list_tasks(status="open"),
         lambda t: f"- [{t['source']}{('/' + t['source_ref']) if t['source_ref'] else ''}] "

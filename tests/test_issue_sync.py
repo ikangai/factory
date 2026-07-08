@@ -611,6 +611,41 @@ def test_graduate_after_shift_gate_on_abnormal_preview_falls_through_to_escalati
         assert s.pending_approvals() == []
 
 
+# -- Fix 3b: suppress re-proposing a graduation the operator rejected unchanged ----
+def test_graduate_after_shift_gate_on_suppresses_identical_rejection(tmp_path, monkeypatch, capsys):
+    """Fix 3b (final whole-branch review): a graduation the operator already REJECTED and
+    that is UNCHANGED (same count + endpoint SHAs) must not be re-filed next shift — it would
+    just nag with the identical card. Depends on Fix 2's pinned SHAs."""
+    _gate_on(monkeypatch)
+    with _store(tmp_path) as s:
+        rej = s.add_pending_approval("graduation",
+            {"range": "origin/base..factory/auto", "n_commits": 3, "base_sha": "b0", "tip_sha": "t0"})
+        s.resolve_approval(rej, "rejected", note="not yet")
+        g = _Recorder(result={"action": "dry_run", "range": "origin/base..factory/auto",
+                              "n_commits": 3, "base_sha": "b0", "tip_sha": "t0", "synced": []})
+        res = orch._graduate_after_shift(s, real=True, shipped=2, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res["action"] == "skip" and res["reason"] == "rejected-unchanged"
+        assert s.pending_approvals() == []                 # NO new pending card
+        assert "graduation unchanged since operator rejection" in capsys.readouterr().out
+
+
+def test_graduate_after_shift_gate_on_reproposes_after_a_new_commit(tmp_path, monkeypatch):
+    """A DIFFERENT preview after a rejection (a new commit → the tip moved) proposes normally
+    — suppression is scoped to the EXACT rejected endpoints."""
+    _gate_on(monkeypatch)
+    with _store(tmp_path) as s:
+        rej = s.add_pending_approval("graduation",
+            {"range": "origin/base..factory/auto", "n_commits": 3, "base_sha": "b0", "tip_sha": "t0"})
+        s.resolve_approval(rej, "rejected", note="not yet")
+        g = _Recorder(result={"action": "dry_run", "range": "origin/base..factory/auto",
+                              "n_commits": 4, "base_sha": "b0", "tip_sha": "t9", "synced": []})
+        res = orch._graduate_after_shift(s, real=True, shipped=2, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res["action"] == "proposed"
+        assert len(s.pending_approvals()) == 1
+
+
 # -- cmd_graduate (CLI glue) -------------------------------------------------
 def test_cmd_graduate_resolves_config_and_calls_graduate(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
