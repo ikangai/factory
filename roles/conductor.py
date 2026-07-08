@@ -172,7 +172,10 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{BLOCKED}", blocked)
             .replace("{PLAN}", _plan_bullets(store))
             .replace("{WORKERS}", _workers_bullets(store))
-            .replace("{DIGESTS}", digests))
+            .replace("{DIGESTS}", digests)
+            # See roles/common.py:develop_candidate — same reason: no SessionStart hook to
+            # supply the vendored bus path in the deployed factory user.
+            .replace("{FACTORY_ROOT}", paths.FACTORY_ROOT))
 
 
 def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,

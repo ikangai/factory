@@ -64,7 +64,10 @@ def build_research_prompt(store, mission: dict, *, limit: int, issues: str = "")
             .replace("{DIGESTS}", digests)
             .replace("{BACKLOG}", backlog)
             .replace("{MEMORY}", factory_memory.memory_card(store, "researcher"))
-            .replace("{LIMIT}", str(limit)))
+            .replace("{LIMIT}", str(limit))
+            # See roles/common.py:develop_candidate — same reason: no SessionStart hook to
+            # supply the vendored bus path in the deployed factory user.
+            .replace("{FACTORY_ROOT}", paths.FACTORY_ROOT))
 
 
 def propose_directions(store, *, limit: int = 5, as_user: Optional[str] = None,

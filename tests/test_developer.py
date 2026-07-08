@@ -2,6 +2,7 @@
 runs in a clone of the target toward a task, makes a bounded code change, gets the
 target's tests green, and commits to a branch. Hermetic — claude_super is monkeypatched
 to capture the assembled prompt and the toolset; no live agent is spawned."""
+from factory.common import paths
 from factory.roles import common
 
 
@@ -70,6 +71,17 @@ def test_develop_candidate_is_a_full_instance_with_web_and_own_squad(monkeypatch
                         lambda prompt, **k: captured2.update(k) or ("done", 1, 0.0))
     common.develop_candidate("/clone", task="t", branch="factory/cand-bbb222", test_cmd="pytest", frozen=[])
     assert captured2["extra_env"]["AGORA_SQUAD"] != env["AGORA_SQUAD"]   # parallel workers → distinct squads
+
+
+def test_develop_candidate_substitutes_factory_root(monkeypatch):
+    """Task 8: the prompt's {FACTORY_ROOT} seam must resolve to the real absolute path — an
+    unreplaced literal reaching the LLM would be a broken command in its final report."""
+    captured = {}
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: captured.update(prompt=prompt) or ("done", 1, 0.0))
+    common.develop_candidate("/clone", task="t", branch="b", test_cmd="pytest", frozen=[])
+    assert paths.FACTORY_ROOT in captured["prompt"]
+    assert "{FACTORY_ROOT}" not in captured["prompt"]
 
 
 def test_develop_candidate_runs_as_guest_house_user_when_configured(monkeypatch):

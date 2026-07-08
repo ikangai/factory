@@ -290,7 +290,11 @@ def develop_candidate(clone_dir: str, *, task: str, branch: str, test_cmd: str,
               .replace("{PROFILE}", profile_overlay or "(generalist — no specialization)")
               .replace("{BRANCH}", branch)
               .replace("{TEST_CMD}", test_cmd)
-              .replace("{FROZEN}", ", ".join(frozen) or "(none declared)"))
+              .replace("{FROZEN}", ", ".join(frozen) or "(none declared)")
+              # The vendored bus lives at a real absolute path, not something the deployed
+              # factory user's SessionStart hook provides (there is no agora plugin) — so
+              # the prompt states the send command with this filled in explicitly.
+              .replace("{FACTORY_ROOT}", paths.FACTORY_ROOT))
     reply, tokens, cost = claude_super(
         prompt, workdir=clone_dir, allowed_tools=tools, as_user=as_user,
         claude_bin=claude_bin, settings=settings, extra_env=extra_env, timeout=timeout,

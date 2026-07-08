@@ -152,6 +152,16 @@ def test_build_research_prompt_includes_the_open_issues(tmp_path):
         assert "#41: do a thing" in p and "OPEN ISSUES" in p             # the researcher sees real issues
 
 
+def test_build_research_prompt_substitutes_factory_root(tmp_path):
+    """Task 8: {FACTORY_ROOT} must resolve to the real absolute path — the deployed factory
+    user has no agora-plugin SessionStart hook to supply the vendored bus path otherwise."""
+    with _store(tmp_path) as s:
+        s.set_mission("make clive reliable", target_repo="ikangai/clive")
+        p = research_feed.build_research_prompt(s, s.active_mission(), limit=5)
+        assert paths.FACTORY_ROOT in p
+        assert "{FACTORY_ROOT}" not in p
+
+
 def test_propose_directions_no_mission_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "claude_super", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("must not spawn a researcher with no mission")))

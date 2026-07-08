@@ -16,6 +16,19 @@ PY="${FACTORY_PYTHON:-python3}"
 case "${1:-}" in
   board)  exec "$PY" -m factory.dashboard.server ;;
   smoke)  shift; exec "$PY" -m factory.smoke_test "$@" ;;
+  bus)    shift
+          # Passthrough to the vendored bus (no plugin/marketplace dependency). Default
+          # AGORA_DIR to the FACTORY's own bus dir — mirrors roles/common.py:factory_agora_dir()
+          # — so the operator hits the same bus workers post to regardless of cwd; an
+          # operator-set AGORA_DIR (e.g. a scratch bus for testing) is never overridden.
+          if [ -z "${AGORA_DIR:-}" ]; then
+              if [ -d "$HERE/../.agora" ]; then
+                  export AGORA_DIR="$HERE/../.agora"
+              else
+                  export AGORA_DIR="$HERE/../.groupchat"
+              fi
+          fi
+          exec "$PY" "$HERE/../vendor/agora/chat.py" "$@" ;;
   "")     cat >&2 <<'USAGE'
 usage: factory <command>
   loop     : init | reset | baseline | propose | evaluate <cid> | round <cid> | holdout-check <cid>
@@ -25,6 +38,7 @@ usage: factory <command>
   corpus   : mine | staging | show-scenario <id> | synth-check <id> | promote-scenario <id> [--partition working|held-out]
   inspect  : status | board | report [--mission "..."]
   demos    : smoke | demo
+  bus      : bus <send|log|...>          # drive the team bus (wraps the vendored vendor/agora/chat.py)
 USAGE
           exit 2 ;;
   *)      exec "$PY" -m factory.orchestrator.orchestrator "$@" ;;

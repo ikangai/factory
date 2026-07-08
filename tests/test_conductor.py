@@ -73,6 +73,19 @@ def test_build_conductor_prompt_includes_the_workforce(tmp_path, monkeypatch):
     assert "--profile" in p                                              # assign a profile per task
 
 
+def test_build_conductor_prompt_substitutes_factory_root(tmp_path, monkeypatch):
+    """Task 8: {FACTORY_ROOT} must resolve to the real absolute path — the deployed factory
+    user has no agora-plugin SessionStart hook to supply the vendored bus path otherwise."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert paths.FACTORY_ROOT in p
+    assert "{FACTORY_ROOT}" not in p
+
+
 def test_build_conductor_prompt_empty_plan_prompts_to_draft(tmp_path, monkeypatch):
     from factory.roles import research_feed
     monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")

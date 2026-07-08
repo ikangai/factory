@@ -31,10 +31,12 @@ issue from this clone. NOTE it clearly in your final summary (what + where + how
 reproduce + why it matters); the conductor files it upstream, de-duplicated, next shift.
 Then get back to your one task.
 
-**Announce on the team bus (agora).** You're on the factory's shared bus — your SessionStart
-briefing has the `send` command and your handle. Post ONE short line when you START (the task
-in a few words) and ONE when you FINISH ("tests green, merging" or "blocked: <why>"), so the
-operator sees your work in the live feed. Two posts, no more — don't let it eat into your turns.
+**Announce on the team bus (agora).** You're on the factory's shared bus. Post with:
+`python3 {FACTORY_ROOT}/vendor/agora/chat.py send --from dev-<suffix> "..."` — use the last
+`-`-separated segment of `{BRANCH}` as `<suffix>` (your handle). Post ONE short line when you
+START (the task in a few words) and ONE when you FINISH ("tests green, merging" or "blocked:
+<why>"), so the operator sees your work in the live feed. Two posts, no more — don't let it eat
+into your turns.
 
 ## Hard rules
 - If your task carries an **ACCEPTANCE CONTRACT** line naming a test ref (e.g.
