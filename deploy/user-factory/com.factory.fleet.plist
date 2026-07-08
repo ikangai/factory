@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The fleet/mission-control visualization server, always-on under the 'factory' user.
+     Install/reload: sudo bash deploy/user-factory/03-install-daemons.sh
+     This daemon IS the autopilot supervisor — its poll loop respawns the run-loop runner
+     according to .factory-mode (shift/auto) and STOP, same as the operator's own board does. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.fleet</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/factory/fab/factory/deploy/user-factory/with-env.sh</string>
+    <string>viz</string>
+    <string>--serve</string>
+    <string>--port</string>
+    <string>9788</string>
+    <string>--no-open</string>
+  </array>
+  <key>UserName</key>
+  <string>factory</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-fleet.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-fleet.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/factory/fab/factory</string>
+</dict>
+</plist>

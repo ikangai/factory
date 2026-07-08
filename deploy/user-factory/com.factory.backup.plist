@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Recurring WAL-safe blackboard backup for the 'factory' deployment. A DAEMON (not a
+     per-user LaunchAgent) because the factory user has no interactive login session for a
+     LaunchAgent to run under — it's headless, always-on.
+     Install/reload: sudo bash deploy/user-factory/03-install-daemons.sh -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/factory/fab/factory/scripts/backup_blackboard.sh</string>
+  </array>
+  <key>UserName</key>
+  <string>factory</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/factory</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>10800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/factory/fab/factory/logs/daemon-backup.log</string>
+</dict>
+</plist>
