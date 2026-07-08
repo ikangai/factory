@@ -160,7 +160,13 @@ if [ -f "$DB" ]; then
 elif [ -f "$SNAPSHOT" ]; then
     echo "  seeding from $SNAPSHOT (DB only — STOP/.autopilot.pid* are never carried over)"
     install -d -m 755 "$(dirname "$DB")"
-    sqlite3 "$SNAPSHOT" ".backup '$DB'"
+    # The snapshot is a QUIESCED backup artifact (made by sqlite .backup, no live writers,
+    # no -wal sidecar), so a plain cp is safe — and necessary: sqlite opening a WAL-mode
+    # DB even read-only must create -shm next to it, which this user can't do in the
+    # operator-owned seed dir ("attempt to write a readonly database"). The integrity
+    # check below runs on OUR copy, where WAL sidecars are creatable.
+    cp "$SNAPSHOT" "$DB"
+    chmod 600 "$DB"
     if [ "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" != "ok" ]; then
         echo "ERROR: integrity check failed for seeded $DB" >&2
         exit 1
