@@ -74,7 +74,9 @@ sudo -u "$INVOKER" git -C "$OPERATOR_REPO" push deploy main
 
 # --- 5. seed drop point: where an operator-side blackboard snapshot lands for step 02 ----
 echo "[5/7] preparing the seed drop point /Users/Shared/factory-seed ..."
-install -d -m 755 /Users/Shared/factory-seed
+# OPERATOR-owned (-o): the operator cp's the snapshot in as themselves; root ownership
+# here broke that with permission-denied (same class as the bare-repo ownership bug).
+install -d -m 755 -o "$INVOKER" /Users/Shared/factory-seed
 echo "  to carry over existing learnings/history into the deployment, run AS THE OPERATOR:"
 echo "    bash scripts/backup_blackboard.sh"
 echo "    cp \"\$(ls -t ~/factory-db-backups/blackboard-*.db | head -1)\" /Users/Shared/factory-seed/blackboard.db"
