@@ -192,7 +192,13 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         allowed_tools=CONDUCTOR_TOOLS,
         as_user=as_user, claude_bin=claude_bin,
         settings=sw.get("settings", "user"),               # full instance: agora + diary + MCP
-        extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor")},
+        # AGORA_DIR pin: the prompt tells the conductor to post via the raw vendored chat.py,
+        # which resolves the bus from the shell's CURRENT cwd — and the conductor's persistent
+        # Bash cwd can wander into a target clone mid-shift, where an unpinned post would land
+        # on the clone's throwaway bus and be silently lost (the trap factory_agora_dir()'s
+        # docstring warns about). Same plumbing developer/researcher get via worker_bus_env().
+        extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor"),
+                   "AGORA_DIR": common.factory_agora_dir()},
         max_turns=int(sw.get("conductor_max_turns", 60)),  # it loops internally across the shift
         timeout=wall_clock_s)
     # Ledger the shift lead's own spend (Task 0.4). Placed BEFORE the sentinel branch so both

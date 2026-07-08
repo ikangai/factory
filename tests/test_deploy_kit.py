@@ -1,7 +1,10 @@
 """Task 8 (design: docs/plans/2026-07-08-factory-owned-bus-human-queue.md): the deployment
 kit must stop telling the operator to install the agora plugin (the bus is now vendored into
 the repo — nothing to install) and must document the human queue as part of steering.
-Hermetic: reads the shipped kit files directly off disk, no shell/daemon spun up."""
+Hermetic: reads the shipped kit files directly off disk, no shell/daemon spun up (the only
+subprocess is a read-only `bash -n` syntax pass)."""
+import subprocess
+
 from factory.common import paths
 
 
@@ -17,10 +20,11 @@ def test_bootstrap_script_drops_the_agora_plugin_install_step():
 
 
 def test_bootstrap_script_still_syntax_checks():
-    """bash -n would be the natural check, but this test module stays pure-python/hermetic
-    per the suite's convention (no subprocess dependency on a bash interpreter)."""
-    text = _read("deploy", "user-factory", "02-bootstrap-as-factory.sh")
-    assert text.startswith("#!/usr/bin/env bash") or text.startswith("#!/bin/bash")
+    """A real `bash -n` pass — same discipline as tests/test_bin_factory_bus.py — so an edit
+    to the bootstrap script can never ship a shell syntax error."""
+    script = paths.factory("deploy", "user-factory", "02-bootstrap-as-factory.sh")
+    r = subprocess.run(["bash", "-n", script], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
 
 
 def test_runbook_drops_the_agora_plugin_install_step():

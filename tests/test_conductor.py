@@ -122,6 +122,22 @@ def test_run_conductor_spawns_a_full_lead_and_parses_its_result(tmp_path, monkey
     assert captured["extra_env"]["AGORA_SQUAD"]                  # its own squad → no barrier hang
 
 
+def test_run_conductor_pins_agora_dir_to_the_factory_bus(tmp_path, monkeypatch):
+    """Task 8 follow-up: the conductor posts with the raw vendored chat.py command, which
+    resolves the bus from the shell's CURRENT cwd — without this pin, a post issued while its
+    persistent Bash cwd sits inside a target clone would land on the clone's throwaway bus
+    and be silently lost. Same AGORA_DIR plumbing developer/researcher get via worker_bus_env()."""
+    captured = {}
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: captured.update(k) or ("done", 1, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=10)
+    assert captured["extra_env"]["AGORA_DIR"] == common.factory_agora_dir()
+
+
 def test_run_conductor_falls_back_when_reply_has_no_json(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "claude_super",
                         lambda prompt, **k: ("just prose, no fenced block", 5, 0.0))
