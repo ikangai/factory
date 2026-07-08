@@ -80,6 +80,13 @@ echo "  ikangai/clive is reachable"
 # --- 3. clones: factory from the shared bare repo, clive from GitHub --------------------
 echo "[3/10] clones ..."
 install -d -m 755 "$FAB"
+# The bare repo is OPERATOR-owned by design (one-way code handoff), so git's
+# dubious-ownership guard blocks this cross-user read until it's whitelisted —
+# consciously, for exactly this one path. Covers clone now and update.sh fetches later.
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$BARE"; then
+    git config --global --add safe.directory "$BARE"
+    echo "  whitelisted $BARE as a git safe.directory for this user"
+fi
 if [ ! -d "$FAB/factory/.git" ]; then
     echo "  cloning factory <- $BARE"
     git clone "$BARE" "$FAB/factory"
