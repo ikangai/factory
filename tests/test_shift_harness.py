@@ -69,6 +69,23 @@ def test_run_shift_reaps_crashed_shift_before_starting(tmp_path, monkeypatch):
         assert s.conn.execute("SELECT status FROM shifts WHERE id=?", (crashed,)).fetchone()[0] == "error"
 
 
+def test_run_shift_reaps_orphaned_executing_approvals_at_startup(tmp_path, monkeypatch):
+    """Fix 4d (final whole-branch review): run_shift reaps orphaned 'executing' approvals
+    alongside crashed shifts, so a push that crashed between claim and resolve can't leave an
+    invisible, unapprovable row forever."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        aid = s.add_pending_approval("graduation", {"n_commits": 1})
+        assert s.claim_approval(aid) is True                       # stranded 'executing'
+        s.conn.execute("UPDATE pending_approvals SET created_at = '2000-01-01T00:00:00.000000Z' "
+                       "WHERE id = ?", (aid,))
+        s.conn.commit()
+        shiftmod.run_shift(s, token_budget=10, mission="x",
+                           conductor=lambda *a, **k: {"status": "completed"})
+        assert s.get_approval(aid)["status"] == "stale"            # reconciled before the shift ran
+
+
 def test_run_shift_halted_by_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: True)
     with _store(tmp_path) as s:

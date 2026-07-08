@@ -24,6 +24,8 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     shipped}. Always leaves the store clean: a crashed shift is reaped first, and the shift
     row is always closed."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
+    store.reap_orphaned_approvals()                # + push approvals stranded 'executing' by a
+                                                   #   crash between claim and resolve (Fix 4d)
 
     if killswitch.is_halted():                     # the brake: don't even start
         return {"action": "halted", "shift_id": None, "reaped": len(reaped), "shipped": 0}

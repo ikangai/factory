@@ -222,12 +222,45 @@ def test_bus_db_path_none_when_nothing_found(tmp_path, monkeypatch):
     assert bus.bus_db_path() is None
 
 
-def test_default_bus_dir_matches_roles_resolution():
-    """Pin the deliberate duplication: common/bus._default_bus_dir must resolve the same
-    dir as roles/common.factory_agora_dir (duplicated because common/ is the base layer
-    and must not import roles/ — this test is where the two are held together)."""
+def test_default_bus_dir_matches_roles_resolution(monkeypatch):
+    """Pin the deliberate duplication: with NO env override, common/bus._default_bus_dir must
+    resolve the same factory-local dir as roles/common.factory_agora_dir (duplicated because
+    common/ is the base layer and must not import roles/ — this test is where the two fallback
+    resolutions are held together). Env is cleared because _default_bus_dir now honors it
+    (Fix 4b) while factory_agora_dir does not — they agree only on the fallback."""
+    monkeypatch.delenv("AGORA_DIR", raising=False)
+    monkeypatch.delenv("GROUPCHAT_DIR", raising=False)
     from factory.roles import common as roles_common   # imported HERE, not in common/bus.py
     assert bus._default_bus_dir() == roles_common.factory_agora_dir()
+
+
+def test_default_bus_dir_honors_env_override(tmp_path, monkeypatch):
+    """Fix 4b (final whole-branch review): WRITES (_run → _default_bus_dir) must honor
+    AGORA_DIR/GROUPCHAT_DIR exactly as reads (bus_db_path) do — before this, writes ignored
+    the env, so a mixed-env process read bus A but answered to bus B and the escalation on A
+    never cleared. AGORA_DIR wins over GROUPCHAT_DIR, mirroring bus_db_path's order."""
+    monkeypatch.setenv("AGORA_DIR", str(tmp_path / "envbus"))
+    monkeypatch.setenv("GROUPCHAT_DIR", str(tmp_path / "gcbus"))
+    assert bus._default_bus_dir() == str(tmp_path / "envbus")
+    monkeypatch.delenv("AGORA_DIR")
+    assert bus._default_bus_dir() == str(tmp_path / "gcbus")
+
+
+def test_write_honors_env_over_a_populated_factory_local_bus(tmp_path, monkeypatch):
+    """The exact mismatch the fix closes end-to-end: AGORA_DIR points at bus A while a
+    factory-local bus B (with its own chat.db) also exists. Reads always followed the env to
+    A; writes ignored it and hit B. Now a `send` with no explicit bus_dir follows the env to
+    A — proven by A seeing the message and B not."""
+    envbus = tmp_path / "A"
+    local = tmp_path / "factory"
+    (local / ".groupchat").mkdir(parents=True)
+    monkeypatch.setattr(paths, "FACTORY_ROOT", str(local))
+    bus._run(["send", "--from", "seed", "seed B"], bus_dir=str(local / ".groupchat"))  # bus B exists
+    monkeypatch.delenv("GROUPCHAT_DIR", raising=False)
+    monkeypatch.setenv("AGORA_DIR", str(envbus))
+    assert bus.send("@human hello A", frm="tester") is True    # no explicit bus_dir → env A
+    assert any("hello A" in m["text"] for m in bus.recent(bus_dir=str(envbus)))
+    assert not any("hello A" in m["text"] for m in bus.recent(bus_dir=str(local / ".groupchat")))
 
 
 # --------------------------------------------------------------------------------------- #

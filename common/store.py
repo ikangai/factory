@@ -705,6 +705,34 @@ class Blackboard:
                            tokens_used=max(int(sh["tokens_used"] or 0), ledgered))
         return orphans
 
+    def reap_orphaned_approvals(self, *, max_age_hours: float = 1.0) -> list[dict]:
+        """Crash recovery for the approval gate, called on startup alongside
+        reap_orphaned_shifts (final whole-branch review Fix 4d). execute_approval claims a row
+        'executing' for the duration of ONE synchronous push (seconds–minutes) in the
+        dashboard process; a crash BETWEEN the push and resolve_approval strands it in
+        'executing' forever — invisible (the queue lists only 'pending') and unapprovable
+        (claim_approval refuses a non-pending row). Resolve rows stuck 'executing' longer than
+        `max_age_hours` to a terminal 'stale'. FAIL-SAFE by design: we cannot know from here
+        whether the push actually reached origin, so the note tells the operator to VERIFY
+        with `git ls-remote` — never assume success (a false 'approved' would let a
+        half-finished push masquerade as done). The age floor spares a legitimately in-flight
+        execution running in a SEPARATE process from being reaped mid-push. Returns the reaped
+        rows (payload parsed) for the caller's report."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+        orphans = self._all(
+            "SELECT * FROM pending_approvals WHERE status = 'executing' AND created_at < ? "
+            "ORDER BY id", (cutoff,))
+        note = ("execution crashed before it resolved; the push may or may not have reached "
+                "origin — verify with `git ls-remote` before trusting it")
+        for r in orphans:
+            self._exec(
+                "UPDATE pending_approvals SET status = 'stale', note = ?, resolved_at = ? "
+                "WHERE id = ? AND status = 'executing'", (note, now_iso(), r["id"]))
+            self.record_operator_action("reap-orphaned-approval", f"approval-{r['id']}", note)
+        return [self._with_payload(r) for r in orphans]
+
     # -- digests: the research<->dev feedback loop --------------------------
     def add_digest(self, *, shift_id: Optional[int], shipped: list,
                    summary: str = "") -> int:

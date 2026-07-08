@@ -283,3 +283,49 @@ def test_recent_operator_actions_newest_first_and_limit(store):
 
     limited = store.recent_operator_actions(limit=2)
     assert [r["item_ref"] for r in limited] == ["msg-4", "msg-3"]
+
+
+# -- reap_orphaned_approvals (Fix 4d) ------------------------------------------
+
+def test_reap_orphaned_approvals_resolves_stale_executing_rows(store):
+    """Fix 4d (final whole-branch review): a crash between claim (pending→executing) and
+    resolve strands a row in 'executing' — invisible (the queue lists only 'pending') and
+    unapprovable (claim_approval refuses a non-pending row). The startup reaper resolves rows
+    stuck 'executing' beyond the age floor to 'stale' with a FAIL-SAFE note (the push may or
+    may not have landed — verify with git ls-remote, never assume success)."""
+    aid = store.add_pending_approval("graduation", {"n_commits": 2, "tip_sha": "t0"})
+    assert store.claim_approval(aid) is True               # now 'executing'
+    # backdate created_at past the age floor (a fresh row is spared — see next test)
+    store.conn.execute("UPDATE pending_approvals SET created_at = ? WHERE id = ?",
+                       ("2000-01-01T00:00:00.000000Z", aid))
+    store.conn.commit()
+
+    reaped = store.reap_orphaned_approvals()
+    assert [r["id"] for r in reaped] == [aid]
+    row = store.get_approval(aid)
+    assert row["status"] == "stale"
+    assert row["resolved_at"]
+    assert "git ls-remote" in row["note"]                  # fail-safe: verify, don't assume
+    assert store.recent_operator_actions()[0]["action"] == "reap-orphaned-approval"
+
+
+def test_reap_orphaned_approvals_spares_a_recent_in_flight_execution(store):
+    """The age floor protects a legitimately in-flight execution in a SEPARATE process from
+    being reaped mid-push: a freshly-claimed row is left alone."""
+    aid = store.add_pending_approval("graduation", {"n_commits": 2})
+    assert store.claim_approval(aid) is True               # 'executing', created just now
+    assert store.reap_orphaned_approvals() == []
+    assert store.get_approval(aid)["status"] == "executing"
+
+
+def test_reap_orphaned_approvals_ignores_pending_and_resolved_rows(store):
+    """Only 'executing' rows are orphan candidates — a pending card and a resolved decision
+    are untouched no matter how old."""
+    pend = store.add_pending_approval("graduation", {"n": 1})
+    done = store.add_pending_approval("publication", {"ahead": 3})
+    store.resolve_approval(done, "approved")
+    store.conn.execute("UPDATE pending_approvals SET created_at = '2000-01-01T00:00:00.000000Z'")
+    store.conn.commit()
+    assert store.reap_orphaned_approvals() == []
+    assert store.get_approval(pend)["status"] == "pending"
+    assert store.get_approval(done)["status"] == "approved"

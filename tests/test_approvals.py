@@ -257,6 +257,31 @@ def test_execute_approval_publication_stale_lag_refuses_and_refreshes(tmp_path, 
         assert s.recent_operator_actions()[0]["action"] == "approve-stale-refreshed"
 
 
+def test_execute_approval_publication_lag_cleared_resolves_not_repends(tmp_path, monkeypatch):
+    """Fix 4c (final whole-branch review): when the fresh publication lag is <= 0 the base
+    branch already contains everything — re-pending an ahead=0 card would create an approval
+    that can NEVER clear (approve → promote skips 'nothing-to-promote' → the stale-check
+    re-pends 0 again, a loop). Resolve the row 'stale' with a note instead."""
+    _fake_config(monkeypatch)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("publication", {"ahead": 5, "release": "main"})
+        promoted = {"n": 0}
+
+        def promote_fn(**kw):
+            promoted["n"] += 1
+            return {"action": "promoted"}
+
+        res = approvals.execute_approval(s, aid, promote_fn=promote_fn,
+                                         lag_fn=lambda **kw: {"ahead": 0})
+        assert res["ok"] is False and res["error"] == "lag-cleared"
+        assert promoted["n"] == 0                          # never promoted
+        row = s.get_approval(aid)
+        assert row["status"] == "stale"                    # resolved, NOT re-pended
+        assert "publication lag cleared" in row["note"]
+        assert s.pending_approvals() == []                 # gone from the queue
+        assert s.recent_operator_actions()[0]["action"] == "approve-stale-cleared"
+
+
 def test_execute_approval_publication_unmeasurable_lag_fails_closed(tmp_path, monkeypatch):
     """Can't verify consent (lag unmeasurable) → no promote, row back to pending."""
     _fake_config(monkeypatch)

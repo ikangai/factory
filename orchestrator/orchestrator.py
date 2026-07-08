@@ -1409,8 +1409,17 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
 
         gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
         if gate_on:
-            preview = graduate_fn(root=root, base=base, repo=repo, store=store,
-                                  stop_check=sc, test_fn=test_fn, dry_run=True)
+            # Fix 4a (final whole-branch review): the gate-ON preview FETCHES, and
+            # execute_approval holds this SAME lock across its re-derivation + push — so the
+            # preview must take it too, or a shift-end preview could interleave a fetch with
+            # an in-flight Approve. Lock-busy is a benign skip (a preview isn't worth queueing
+            # behind a full push+retest), exactly like the gate-OFF real path below.
+            try:
+                with filelock.repo_lock(root):
+                    preview = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                          stop_check=sc, test_fn=test_fn, dry_run=True)
+            except filelock.LockBusyError:
+                return {"action": "skip", "reason": "lock-busy"}
             if preview.get("action") == "dry_run":
                 n = preview.get("n_commits", 0)
                 if n <= 0:                        # nothing to propose — quiet, like a real no-op

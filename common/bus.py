@@ -52,10 +52,20 @@ _CODE_SPAN_RE = re.compile(r"(`+)(?:.*?)\1", re.DOTALL)
 
 
 def _default_bus_dir() -> str:
-    """Where the factory's OWN bus lives on disk, absent an explicit override. Mirrors
+    """The ONE bus-DIR resolver, absent an explicit override — shared by the WRITE path
+    (`_run`) and the READ path (`bus_db_path`). Fix 4b (final whole-branch review): reads
+    honored AGORA_DIR/GROUPCHAT_DIR but writes ignored the env, so a mixed-env process READ
+    bus A and ANSWERED to bus B — the escalation on A never cleared. Order: the
+    AGORA_DIR/GROUPCHAT_DIR env override first (a deployment/test points the whole factory at
+    one bus), else the factory-local .agora/.groupchat fallback. The fallback mirrors
     roles/common.py:factory_agora_dir() — duplicated rather than imported: common/ is the
-    base layer every plane depends on (ARCHITECTURE.md), so it must not import from
-    roles/. tests/test_bus.py pins the two resolutions equal."""
+    base layer every plane depends on (ARCHITECTURE.md), so it must not import from roles/;
+    tests/test_bus.py pins the two FALLBACK resolutions equal (env cleared, since
+    factory_agora_dir does not read the env)."""
+    for env in ("AGORA_DIR", "GROUPCHAT_DIR"):
+        d = os.environ.get(env)
+        if d:
+            return d
     for name in (".agora", ".groupchat"):
         d = paths.factory(name)
         if os.path.isdir(d):
@@ -69,23 +79,14 @@ def bus_db_path(bus_dir: Optional[str] = None) -> Optional[str]:
     always agrees on which bus it's touching. An explicit `bus_dir` means THAT bus or
     nothing — no fall-through to the env/factory-local search (falling through would make
     a read against an empty/misconfigured override silently answer from the REAL factory
-    bus: wrong data in production, a hermeticity leak in tests). With no override, this
-    matches the bus-resolution order collab.py used before this module existed: AGORA_DIR
-    / GROUPCHAT_DIR env override, else the factory-local .agora/.groupchat. None when no
-    chat.db exists in the searched location(s) — callers must degrade gracefully (no bus
-    on disk is a normal, expected state, e.g. before the first `send`)."""
-    if bus_dir:
-        p = os.path.join(bus_dir, "chat.db")
-        return p if os.path.exists(p) else None
-    for env in ("AGORA_DIR", "GROUPCHAT_DIR"):
-        d = os.environ.get(env)
-        if d and os.path.exists(os.path.join(d, "chat.db")):
-            return os.path.join(d, "chat.db")
-    for name in (".agora", ".groupchat"):
-        p = paths.factory(name, "chat.db")
-        if os.path.exists(p):
-            return p
-    return None
+    bus: wrong data in production, a hermeticity leak in tests). With no override, the dir
+    is resolved by `_default_bus_dir()` — the SAME resolver the write path uses (Fix 4b), so
+    reads and writes can never disagree on which bus this process touches. None when no
+    chat.db exists at the resolved location — callers must degrade gracefully (no bus on
+    disk is a normal, expected state, e.g. before the first `send`)."""
+    d = bus_dir or _default_bus_dir()
+    p = os.path.join(d, "chat.db")
+    return p if os.path.exists(p) else None
 
 
 def _run(args, *, bus_dir: Optional[str] = None, runner=subprocess.run, timeout: int = 30):

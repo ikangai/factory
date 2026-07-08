@@ -583,6 +583,50 @@ def test_graduate_after_shift_proposes_instead_of_pushing_when_gate_on(tmp_path,
         assert row["payload"]["synced_preview"][0]["issue"] == 9
 
 
+def test_graduate_after_shift_gate_on_preview_runs_under_the_lock(tmp_path, monkeypatch):
+    """Fix 4a (final whole-branch review): the gate-ON dry-run preview FETCHES, and
+    execute_approval holds the repo lock across its own re-derivation + push — so a shift-end
+    preview must take the SAME lock or it could interleave a fetch with an in-flight Approve.
+    A second acquisition from inside the preview must see the lock held."""
+    from factory.common import filelock
+    _gate_on(monkeypatch)
+    monkeypatch.setattr(filelock, "DEFAULT_TIMEOUT_S", 0.05)
+    with _store(tmp_path) as s:
+        seen = {}
+
+        def g(**kw):
+            try:
+                with filelock.repo_lock("/x"):
+                    seen["held"] = False
+            except filelock.LockBusyError:
+                seen["held"] = True
+            return {"action": "dry_run", "range": "a..b", "n_commits": 1,
+                    "base_sha": "b0", "tip_sha": "t0", "synced": []}
+
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res["action"] == "proposed"
+        assert seen["held"] is True
+
+
+def test_graduate_after_shift_gate_on_preview_skips_benignly_when_lock_busy(tmp_path, monkeypatch):
+    """Another pusher holds the repo lock during a gate-ON shift end → the preview is a benign
+    lock-busy skip (not worth queueing behind a push+retest), never escalated, no card filed."""
+    from factory.common import filelock
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": True, "failure_tasks": True}})
+    monkeypatch.setattr(filelock, "DEFAULT_TIMEOUT_S", 0.05)
+    with _store(tmp_path) as s:
+        g = _Recorder(result={"action": "dry_run", "n_commits": 1, "synced": []})
+        with filelock.repo_lock("/x"):
+            res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                             repo="o/r", root="/x", base="base")
+        assert res == {"action": "skip", "reason": "lock-busy"}
+        assert g.calls == []                               # never previewed under contention
+        assert s.pending_approvals() == []
+        assert s.list_tasks(status="open") == []           # benign — no failure task
+
+
 def test_graduate_after_shift_gate_on_zero_commits_is_quiet_no_row(tmp_path, monkeypatch):
     """A dry-run preview with nothing to graduate must not spam an empty approval card."""
     _gate_on(monkeypatch)

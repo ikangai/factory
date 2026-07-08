@@ -173,6 +173,17 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     note = f"lag unmeasurable: {fresh_lag.get('error', '')}"
                     _fail_attempt(store, approval_id, note)
                     return {"ok": False, "result": {"action": "error", "error": note}}
+                if ahead <= 0:
+                    # Fix 4c (final whole-branch review): the base branch already contains
+                    # everything (or more) — there is nothing to promote. Re-pending an
+                    # ahead=0 card would create an approval that can NEVER clear (approve →
+                    # promote_to_release skips 'nothing-to-promote' → the stale-check re-pends
+                    # 0 again, a loop). Resolve it 'stale' so it leaves the queue for good.
+                    store.resolve_approval(approval_id, "stale", note="publication lag cleared")
+                    store.record_operator_action(
+                        "approve-stale-cleared", ref,
+                        "publication lag cleared (base already current — nothing to promote)")
+                    return {"ok": False, "error": "lag-cleared"}
                 if ahead != payload.get("ahead"):
                     fresh_payload = {"ahead": ahead, "release": release}
                     store.update_approval_payload(approval_id, fresh_payload)
