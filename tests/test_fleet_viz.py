@@ -750,10 +750,12 @@ def test_queue_tab_render_guards_preserve_operator_input():
     busy guard (skip the rebuild while interacting) and a string-diff guard (identical
     renders are no-ops). Their removal re-opens the destroys-typed-reply bug."""
     html = _live_page()
-    assert "function hqBusy" in html                       # the interaction guard
-    assert "hqLastHtml" in html                            # the identical-string no-op guard
+    assert "function hqBusy" in html                       # the interaction guard exists...
+    assert "const busy=hqBusy()" in html                   # ...and hqRender actually CONSULTS it
+    assert "!==hqLastHtml" in html                         # the identical-string no-op guard, at its call site
     assert "hqPosting" in html                             # never rebuild under an in-flight POST
     assert "i.value!==i.defaultValue" in html              # edited-not-prefilled check (reframe title is prefilled)
+    assert "paused while editing" in html                  # held renders are visibly diagnosable, not a silent freeze
 
 
 def test_queue_tab_pins_the_preview_stale_contract():

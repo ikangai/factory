@@ -716,9 +716,13 @@ let hqNotice=null;     // {kind,id,msg,until} — survives rebuilds; hqRender re
 function hqBusy(){
   const list=el('hq-list');
   if(hqPosting)return true;
-  // focus check: disabling a focused button drops focus to <body> in some browsers, so
-  // this alone is not enough — hqPosting and the edit checks below cover those gaps.
-  if(list.contains(document.activeElement)&&document.activeElement!==list)return true;
+  // focus check — TEXT FIELDS ONLY: a focused button holds no typed state (double-click
+  // protection is hqPosting's job), and after a reframe toggle-close the clicked button
+  // keeps focus in most browsers — counting it would hold renders until the operator
+  // happened to click elsewhere. The caret in an input/textarea is what a rebuild would
+  // actually destroy, so that is what pins the list.
+  const ae=document.activeElement;
+  if(ae&&list.contains(ae)&&(ae.tagName==='INPUT'||ae.tagName==='TEXTAREA'))return true;
   // value!==defaultValue means the operator EDITED the field. A plain non-empty check
   // would misfire: the reframe title input is PREFILLED, so every blocked card would
   // read as busy forever and the list would never update again.
@@ -733,7 +737,8 @@ function hqRender(hq){
   const total=counts.total!=null?counts.total:items.length;
   if(hqNotice&&Date.now()>hqNotice.until)hqNotice=null;   // notices expire, they don't linger
   const list=el('hq-list');
-  if(!hqBusy()){
+  const busy=hqBusy();
+  if(!busy){
     const html=items.length?
       items.map(it=>(HQ_BUILD[it.type]||(()=>''))(it)).join('')
       :'<div class="muted">no human input needed — the queue is clear.</div>';
@@ -751,6 +756,9 @@ function hqRender(hq){
   // failed approve resolved the row), surface it in #hq-h — a textContent-driven header
   // outside the rebuilt list — so "action failed" is actually readable.
   let head=total?('· '+total+' need you'):'';
+  // held renders must be VISIBLE: without this cue a stuck-busy bug looks like a live list
+  // that just never changes (the badge keeps ticking) — with it, it's user-diagnosable.
+  if(busy)head+=(head?' · ':'')+'paused while editing';
   if(hqNotice){
     const card=Array.from(list.querySelectorAll('.hq-card')).find(
       c=>c.dataset.kind===hqNotice.kind&&c.dataset.id===String(hqNotice.id));
@@ -1057,7 +1065,17 @@ el('hq-list').addEventListener('click',async e=>{
     hqNotice=m?{kind:card.dataset.kind,id:card.dataset.id,msg:m,until:Date.now()+15000}:null;};
   if(act==='reframe-toggle'){                 // pure UI toggle — no network, no disable
     const box=card.querySelector('.hq-reframe');
-    if(box)box.style.display=(box.style.display==='none')?'':'none';
+    if(box){
+      if(box.style.display==='none')box.style.display='';
+      else{
+        // close = CANCEL: discard the panel's edits when hiding it. A hidden edited field
+        // still trips hqBusy()'s value!==defaultValue scan (it checks all inputs, visible
+        // or not) — without this reset the list would silently stop updating forever
+        // behind an invisible panel while the header badge kept ticking.
+        box.querySelectorAll('input,textarea').forEach(i=>{i.value=i.defaultValue;});
+        box.style.display='none';
+      }
+    }
     return;
   }
   btn.disabled=true;setErr('');hqPosting=true;
@@ -1085,6 +1103,11 @@ el('hq-list').addEventListener('click',async e=>{
         // refetch so the TRUE range/count replaces this stale card for a re-click.
         setErr(j.error==='preview-stale'?'preview was stale — card refreshed, review and re-approve'
               :(j.error||(j.result&&(j.result.error||j.result.reason))||'action failed — see logs'));
+        // A typed reject note was aimed at the preview that just died — clear it, or the
+        // edited field keeps hqBusy() true, the refetch's rebuild never lands, and the
+        // "card refreshed" message lies over a stale card with a still-disabled Approve.
+        const note=card.querySelector('[data-role="reject-note"]');
+        if(note)note.value=note.defaultValue;
         refreshQueue();return;
       }
     }else if(act==='retry'||act==='drop'){
