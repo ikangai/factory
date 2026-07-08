@@ -15,7 +15,9 @@ Design: docs/plans/2026-06-27-factory-auto-issue-sync-design.md
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import tempfile
 
 # A close keyword immediately followed by an (optionally gh-prefixed) issue ref.
 # \b anchors the keyword to a word start so 'prefix #9' does not read as 'fix #9'.
@@ -239,3 +241,60 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     commits = commits_in_range(root, rng, runner=runner)
     synced = sync_issues(repo, commits, store=store, runner=runner)
     return {"action": "synced", "range": rng, "n_commits": len(commits), "synced": synced}
+
+
+def promote_to_release(*, root: str, base: str, release: str = "main", remote: str = "origin",
+                       runner=subprocess.run) -> dict:
+    """Mechanizes the manual 2026-07-08 promotion procedure: merge the graduated `base`
+    branch into the target's default/`release` branch and push it — the SECOND hop after
+    `graduate_and_push` lands work on `base` (`origin/<base>..origin/<release>` is exactly
+    the "publication lag" `graduation_lag`/`_warn_graduation_lag` measure). Runs entirely
+    in a detached temp worktree so the caller's own checkout of `root` is never touched or
+    switched. Fails CLOSED at every step, mirroring `graduate_and_push`: a fetch failure,
+    nothing to promote (release already has everything base has), a failed worktree add,
+    or a merge conflict all skip without mutating the remote — never forced, never a
+    partial push. `runner(argv, …)` runs git; injected for tests. The temp worktree is
+    always removed (git-side `worktree remove` + a real `shutil.rmtree` — the latter matters
+    under a faked runner, whose git calls never touch disk, so the real `tempfile.mkdtemp()`
+    dir would otherwise leak in every test)."""
+    def git(*args, cwd=None):
+        return runner(["git", "-C", cwd or root, *args], capture_output=True, text=True, timeout=60)
+
+    fetched_base = git("fetch", remote, base)
+    fetched_release = git("fetch", remote, release)
+    if (getattr(fetched_base, "returncode", 1) != 0
+            or getattr(fetched_release, "returncode", 1) != 0):
+        return {"action": "skip", "reason": "fetch-failed"}
+
+    count = git("rev-list", "--count", f"{remote}/{release}..{remote}/{base}")
+    try:
+        n_commits = int((count.stdout or "").strip())
+    except ValueError:
+        n_commits = 0
+    # A failed rev-list is folded into the same skip as a genuine zero — either way there
+    # is nothing we can safely promote.
+    if getattr(count, "returncode", 1) != 0 or n_commits <= 0:
+        return {"action": "skip", "reason": "nothing-to-promote"}
+
+    wt = tempfile.mkdtemp(prefix="factory-promote-")
+    try:
+        added = git("worktree", "add", "--detach", wt, f"{remote}/{release}")
+        if getattr(added, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "worktree-failed"}
+
+        msg = f"Merge {base} into {release}: factory promotion (approved via human queue)"
+        merged = git("merge", "--no-ff", f"{remote}/{base}", "-m", msg, cwd=wt)
+        if getattr(merged, "returncode", 1) != 0:
+            git("merge", "--abort", cwd=wt)              # best-effort — never leaves a conflicted worktree
+            return {"action": "skip", "reason": "merge-conflict"}
+
+        pushed = git("push", remote, f"HEAD:{release}", cwd=wt)   # plain push: never forced
+        if getattr(pushed, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "push-failed"}
+
+        new_sha = (git("rev-parse", "HEAD", cwd=wt).stdout or "").strip()
+        return {"action": "promoted", "sha": new_sha, "n_commits": n_commits}
+    finally:
+        git("worktree", "remove", "--force", wt)          # best-effort: return code not checked
+        git("worktree", "prune")
+        shutil.rmtree(wt, ignore_errors=True)             # real cleanup even when `runner` is faked

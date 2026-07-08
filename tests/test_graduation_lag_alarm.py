@@ -102,6 +102,10 @@ def test_lag_alarm_never_raises(capsys, store, monkeypatch):
 def test_publication_lag_prints_warns_and_files_above_threshold(capsys, store, monkeypatch):
     """The 2026-07-07 real-world shape: base pushes current (0) but origin/main 105 behind."""
     _fake_config(monkeypatch, target={"base_branch": "chore"})   # release defaults to "main"
+    # push_approval pinned OFF: this test is about the print/file alarm, not the Task 5.5
+    # approval-proposal side effect (covered separately, gate-on, below) — pinning also
+    # decouples it from config.yaml's live push_approval default (ON as of 2026-07-08).
+    monkeypatch.setattr(orch.config, "load_config", lambda: {"autonomy": {"push_approval": False}})
     calls = []
     lag_fn = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 105}})
     res = orch._warn_graduation_lag(
@@ -113,6 +117,25 @@ def test_publication_lag_prints_warns_and_files_above_threshold(capsys, store, m
     assert calls[0][1] == "graduation:lag-publication"     # its own dedup ref, not the base edge's
     assert res == {"ahead": 0, "publication": {"ahead": 105}}
     assert lag_fn.seen == ["chore", "main"]
+    assert store.pending_approvals() == []                 # gate OFF — no proposal filed
+
+
+def test_publication_lag_above_threshold_files_an_approval_when_gate_on(capsys, store, monkeypatch):
+    """Task 5.5: the SAME above-threshold publication lag, but with autonomy.push_approval
+    ON — files a pending 'publication' approval alongside the existing failure-task alarm,
+    so the operator can promote base→release from the dashboard's Queue tab."""
+    _fake_config(monkeypatch, target={"base_branch": "chore"})
+    monkeypatch.setattr(orch.config, "load_config", lambda: {"autonomy": {"push_approval": True}})
+    lag_fn = _dispatch({"chore": {"ahead": 0}, "main": {"ahead": 105}})
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn, file_fn=_collector([]))
+    rows = store.pending_approvals()
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "publication" and rows[0]["status"] == "pending"
+    assert rows[0]["payload"] == {"ahead": 105, "release": "main"}
+    # a second alarm (lag persists) supersedes rather than piling up a second live row
+    orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn, file_fn=_collector([]))
+    assert len(store.pending_approvals()) == 1
+    assert len(store.pending_approvals(status="superseded")) == 1
 
 
 def test_publication_lag_zero_is_silent(capsys, store, monkeypatch):
@@ -149,8 +172,10 @@ def test_both_edges_file_distinct_tasks_and_dedup_within_edge(capsys, store, mon
     must file TWO distinct open tasks (edge-specific source_refs — an open base-edge task
     must not swallow the publication escalation); a second run files none (per-edge dedup)."""
     _fake_config(monkeypatch, target={"base_branch": "chore"})
+    # push_approval pinned OFF: this test is scoped to the failure-task escalation seam,
+    # not the Task 5.5 approval-proposal side effect (covered separately).
     monkeypatch.setattr(orch.config, "load_config",
-                        lambda: {"autonomy": {"failure_tasks": True}})
+                        lambda: {"autonomy": {"failure_tasks": True, "push_approval": False}})
     lag_fn = _dispatch({"chore": {"ahead": 100}, "main": {"ahead": 105}})
     orch._warn_graduation_lag(store, threshold=12, lag_fn=lag_fn)
     refs = sorted(t.get("source_ref") for t in store.list_tasks(status="open"))

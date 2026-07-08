@@ -4,6 +4,8 @@ Pure-logic + injected-runner tests — no real git/gh/network. The whole point o
 the design is that `runner` is injectable, so every test drives the code with a
 fake git/gh and asserts on the calls it would have made.
 """
+import os
+
 import pytest
 
 from factory.common.store import Blackboard
@@ -436,7 +438,16 @@ class _Recorder:
         return self.result
 
 
-def test_graduate_after_shift_runs_when_real_and_shipped(tmp_path):
+def _gate_off(monkeypatch):
+    """autonomy.push_approval: false — reproduces the pre-2026-07-08 behavior (a real
+    push, not a proposal) so these tests keep exercising _graduate_after_shift's ORIGINAL
+    contract without depending on the live config.yaml default (which is ON)."""
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": False}})
+
+
+def test_graduate_after_shift_runs_when_real_and_shipped(tmp_path, monkeypatch):
+    _gate_off(monkeypatch)
     with _store(tmp_path) as s:
         g = _Recorder()
         res = orch._graduate_after_shift(s, real=True, shipped=2, graduate_fn=g,
@@ -444,6 +455,7 @@ def test_graduate_after_shift_runs_when_real_and_shipped(tmp_path):
         assert res["action"] == "synced"
         assert g.calls[0]["repo"] == "o/r" and g.calls[0]["base"] == "base"
         assert g.calls[0]["root"] == "/x" and g.calls[0]["store"] is s
+        assert "dry_run" not in g.calls[0]                     # the REAL call, not a preview
 
 
 def test_graduate_after_shift_skips_when_not_real(tmp_path):
@@ -473,12 +485,72 @@ def test_graduate_after_shift_skips_without_a_repo(tmp_path):
         assert g.calls == []
 
 
-def test_graduate_after_shift_swallows_errors_to_protect_the_loop(tmp_path):
+def test_graduate_after_shift_swallows_errors_to_protect_the_loop(tmp_path, monkeypatch):
+    _gate_off(monkeypatch)
     with _store(tmp_path) as s:
         g = _Recorder(raises=True)
         res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
                                          repo="o/r", root="/x", base="base")
         assert res["action"] == "error"        # swallowed, did not propagate
+
+
+# -- push_approval gate: proposes instead of pushing when ON -----------------
+def _gate_on(monkeypatch):
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": True}})
+
+
+def test_graduate_after_shift_proposes_instead_of_pushing_when_gate_on(tmp_path, monkeypatch):
+    """The correctness-critical assertion: with the gate ON, the injected graduate_fn is
+    called ONLY with dry_run=True — never for a real push — and the row lands in
+    pending_approvals rather than anything reaching origin."""
+    _gate_on(monkeypatch)
+    with _store(tmp_path) as s:
+        g = _Recorder(result={"action": "dry_run", "range": "a..b", "n_commits": 3,
+                              "synced": [{"issue": 9, "action": "comment", "commits": ["c1"]}]})
+        res = orch._graduate_after_shift(s, real=True, shipped=2, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res["action"] == "proposed"
+        assert res["n_commits"] == 3
+        assert isinstance(res["approval_id"], int)
+        # exactly one call, and it was a preview — never a real push
+        assert len(g.calls) == 1
+        assert g.calls[0]["dry_run"] is True
+        assert g.calls[0]["repo"] == "o/r" and g.calls[0]["base"] == "base"
+        rows = s.pending_approvals()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["kind"] == "graduation" and row["status"] == "pending"
+        assert row["payload"]["range"] == "a..b" and row["payload"]["n_commits"] == 3
+        assert row["payload"]["synced_preview"][0]["issue"] == 9
+
+
+def test_graduate_after_shift_gate_on_zero_commits_is_quiet_no_row(tmp_path, monkeypatch):
+    """A dry-run preview with nothing to graduate must not spam an empty approval card."""
+    _gate_on(monkeypatch)
+    with _store(tmp_path) as s:
+        g = _Recorder(result={"action": "dry_run", "range": "a..a", "n_commits": 0, "synced": []})
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res == {"action": "skip", "reason": "no-op"}
+        assert s.pending_approvals() == []
+
+
+def test_graduate_after_shift_gate_on_abnormal_preview_falls_through_to_escalation(tmp_path, monkeypatch):
+    """When the injected graduate_fn ignores dry_run and returns a real skip/action instead
+    of 'dry_run', that's treated as an abnormal result and routed through the SAME
+    abnormal-skip escalation a real push's skip gets — not silently dropped."""
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": True, "failure_tasks": True}})
+    with _store(tmp_path) as s:
+        g = _Recorder(result={"action": "skip", "reason": "push-failed"})
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
+                                         repo="o/r", root="/x", base="base")
+        assert res == {"action": "skip", "reason": "push-failed"}
+        tasks = s.list_tasks(status="open")
+        assert len(tasks) == 1
+        assert "graduate skipped: push-failed" in tasks[0]["detail"]
+        assert s.pending_approvals() == []
 
 
 # -- cmd_graduate (CLI glue) -------------------------------------------------
@@ -537,3 +609,125 @@ def test_graduation_lag_missing_ref_is_quiet():
     result = issue_sync.graduation_lag(root="/r", base="base", runner=fake_runner)
     assert result["ahead"] is None
     assert "unknown revision" in result["error"]
+
+
+# -- promote_to_release (Task 5, 2026-07-08): base→release merge-push, mechanized ---------
+class _PromoteFake:
+    """Dispatches promote_to_release's git calls by subcommand; records every call (in
+    order, full argv) for assertions. Each step's return code is independently scriptable
+    so every skip reason is reachable."""
+    def __init__(self, *, fetch_rc=0, count="3", worktree_add_rc=0, merge_rc=0, push_rc=0,
+                head="newsha"):
+        self.calls = []
+        self.fetch_rc = fetch_rc
+        self.count = count
+        self.worktree_add_rc = worktree_add_rc
+        self.merge_rc = merge_rc
+        self.push_rc = push_rc
+        self.head = head
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        a = argv
+        sub = a[3] if len(a) > 3 else ""
+        if sub == "fetch":
+            return _Run(self.fetch_rc, "")
+        if sub == "rev-list":
+            return _Run(0, self.count)
+        if sub == "worktree" and len(a) > 4 and a[4] == "add":
+            return _Run(self.worktree_add_rc, "")
+        if sub == "worktree":                      # remove / prune — always best-effort ok
+            return _Run(0, "")
+        if sub == "merge" and "--abort" in a:
+            return _Run(0, "")
+        if sub == "merge":
+            return _Run(self.merge_rc, "")
+        if sub == "push":
+            return _Run(self.push_rc, "")
+        if sub == "rev-parse":
+            return _Run(0, self.head)
+        return _Run(0, "")
+
+    def git_subcmds(self):
+        return [c[3] for c in self.calls if c[0] == "git" and len(c) > 3]
+
+
+def test_promote_to_release_happy_path(tmp_path):
+    f = _PromoteFake(count="3", head="newsha")
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "promoted", "sha": "newsha", "n_commits": 3}
+    assert f.git_subcmds() == ["fetch", "fetch", "rev-list", "worktree", "merge", "push",
+                               "rev-parse", "worktree", "worktree"]
+    add_call = f.calls[3]
+    assert add_call[2] == "/x"                       # worktree add itself runs -C root
+    assert add_call[4] == "add" and add_call[5] == "--detach"
+    wt = add_call[6]
+    assert add_call[7] == "origin/main"
+    # merge/push/rev-parse HEAD all run INSIDE the detached temp worktree — never on root
+    assert f.calls[4][2] == wt and f.calls[5][2] == wt and f.calls[6][2] == wt
+    assert f.calls[4][3:] == ["merge", "--no-ff", "origin/base", "-m",
+                              "Merge base into main: factory promotion (approved via human queue)"]
+    assert f.calls[5][3:] == ["push", "origin", "HEAD:main"]
+    assert f.calls[6][3:] == ["rev-parse", "HEAD"]
+    # cleanup (finally) runs with -C root, not the (now-removed) worktree
+    assert f.calls[7][2] == "/x" and f.calls[7][3:] == ["worktree", "remove", "--force", wt]
+    assert f.calls[8][3:] == ["worktree", "prune"]
+    assert not os.path.exists(wt)                    # the real mkdtemp dir is cleaned up
+
+
+def test_promote_to_release_push_never_forces(tmp_path):
+    f = _PromoteFake()
+    issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    push_calls = [c for c in f.calls if c[0] == "git" and c[3] == "push"]
+    assert len(push_calls) == 1
+    assert "--force" not in push_calls[0] and "-f" not in push_calls[0]
+
+
+def test_promote_to_release_skips_on_fetch_failure(tmp_path):
+    f = _PromoteFake(fetch_rc=1)
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "fetch-failed"}
+    assert "worktree" not in f.git_subcmds() and "merge" not in f.git_subcmds()
+    assert "push" not in f.git_subcmds()
+
+
+def test_promote_to_release_skips_when_nothing_to_promote(tmp_path):
+    f = _PromoteFake(count="0")
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "nothing-to-promote"}
+    assert "worktree" not in f.git_subcmds()
+
+
+def test_promote_to_release_skips_on_unparsable_count(tmp_path):
+    """A rev-list failure/garbage count is folded into the same fail-closed skip as a
+    genuine zero — never treated as 'infinite commits, promote anyway'."""
+    f = _PromoteFake(count="not-a-number")
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "nothing-to-promote"}
+    assert "worktree" not in f.git_subcmds()
+
+
+def test_promote_to_release_skips_on_worktree_add_failure(tmp_path):
+    f = _PromoteFake(worktree_add_rc=1)
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "worktree-failed"}
+    assert "merge" not in f.git_subcmds() and "push" not in f.git_subcmds()
+    # cleanup still attempted (finally) even though the add itself failed
+    assert any(c[3:5] == ["worktree", "remove"] for c in f.calls if c[0] == "git")
+
+
+def test_promote_to_release_aborts_and_skips_on_merge_conflict(tmp_path):
+    f = _PromoteFake(merge_rc=1)
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "merge-conflict"}
+    merges = [c for c in f.calls if c[0] == "git" and c[3] == "merge"]
+    assert len(merges) == 2 and merges[1][4] == "--abort"      # attempted, then aborted
+    assert "push" not in f.git_subcmds()
+    assert any(c[3:5] == ["worktree", "remove"] for c in f.calls if c[0] == "git")
+
+
+def test_promote_to_release_skips_on_push_failure(tmp_path):
+    f = _PromoteFake(push_rc=1)
+    res = issue_sync.promote_to_release(root="/x", base="base", release="main", runner=f)
+    assert res == {"action": "skip", "reason": "push-failed"}
+    assert any(c[3:5] == ["worktree", "remove"] for c in f.calls if c[0] == "git")

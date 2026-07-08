@@ -1108,6 +1108,10 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
                               if r.get("action") in ("comment", "close"))
                 print(f"[run] graduated → pushed {grad.get('n_commits', 0)} commit(s) to origin; "
                       f"{touched} issue(s) synced")
+            elif grad.get("action") == "proposed":
+                print(f"[run] graduation proposed for approval — #{grad.get('approval_id')} "
+                      f"({grad.get('n_commits', 0)} commit(s)) — approve from the dashboard "
+                      f"Queue tab (autonomy.push_approval)")
             elif grad.get("action") in ("skip", "error"):
                 print(f"[run] graduate: {grad['action']} "
                       f"({grad.get('reason') or grad.get('error', '')})")
@@ -1333,11 +1337,20 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
     origin + sync the target's GitHub issues (design:
     docs/plans/2026-06-27-factory-auto-issue-sync-design.md). Fail-CLOSED and NEVER
     raises — any graduate/sync error is logged and swallowed so it cannot kill the
-    autonomous loop. Skips entirely unless real AND something shipped."""
+    autonomous loop. Skips entirely unless real AND something shipped.
+
+    Gated by `autonomy.push_approval` (default ON, config.yaml-only — see design:
+    docs/plans/2026-07-08-factory-owned-bus-human-queue-design.md §3): when the gate is
+    ON this function NEVER pushes. It instead calls `graduate_fn` with `dry_run=True`,
+    turns the preview into a `pending_approvals` row (`reporting.approvals.
+    propose_graduation`) and returns `{"action": "proposed", ...}` — the real push only
+    happens later, from a SEPARATE call (`reporting.approvals.execute_approval`) when the
+    operator approves it from the dashboard's Queue tab. Gate OFF reproduces the
+    pre-2026-07-08 behavior exactly (calls `graduate_fn` for real, as before)."""
     if not (real and shipped):
         return {"action": "skip", "reason": "not-real-or-nothing-shipped"}
     try:
-        from ..reporting import issue_sync
+        from ..reporting import issue_sync, approvals
         from ..common import killswitch
         graduate_fn = graduate_fn or issue_sync.graduate_and_push
         repo = repo if repo is not None else config.target_repo_slug()
@@ -1345,9 +1358,28 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             return {"action": "skip", "reason": "no-repo"}
         root = root or config.get_adapter().entry()[0]
         base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
-        res = graduate_fn(root=root, base=base, repo=repo, store=store,
-                          stop_check=stop_check or killswitch.is_halted,
-                          test_fn=_graduation_test_fn())
+        sc = stop_check or killswitch.is_halted
+        test_fn = _graduation_test_fn()
+
+        gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+        if gate_on:
+            preview = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                  stop_check=sc, test_fn=test_fn, dry_run=True)
+            if preview.get("action") == "dry_run":
+                n = preview.get("n_commits", 0)
+                if n <= 0:                        # nothing to propose — quiet, like a real no-op
+                    return {"action": "skip", "reason": "no-op"}
+                approval_id = approvals.propose_graduation(store, preview=preview)
+                print(f"[run] graduation proposed → approval #{approval_id} pending "
+                      f"(autonomy.push_approval)")
+                return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
+            # The preview itself came back abnormal (STOP tripped mid-preview, or an
+            # injected graduate_fn that doesn't honor dry_run) — fall through to the SAME
+            # abnormal-skip escalation a real push's skip would get, below.
+            res = preview
+        else:
+            res = graduate_fn(root=root, base=base, repo=repo, store=store,
+                              stop_check=sc, test_fn=test_fn)
         # A silent abnormal skip is how a broken graduation pipeline stays invisible
         # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
         # broken" through the same deduped failure seam as a raised graduate error;
@@ -1416,6 +1448,14 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                                f"graduation pushes the base branch but nothing promotes it to "
                                f"the default branch",
                         ref="graduation:lag-publication")
+                # Task 5.5: gated the same as the push path (autonomy.push_approval) — file
+                # a publication proposal so the operator can promote base→release from the
+                # dashboard's Queue tab. add_pending_approval's supersede-per-kind semantics
+                # refreshes a stale proposal on every alarm, so no separate "already filed"
+                # check is needed here.
+                gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+                if gate_on:
+                    store.add_pending_approval("publication", {"ahead": p, "release": release})
         return {**lag, "publication": pub}
     except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
         print(f"[run] lag alarm skipped (non-fatal): {e}")
