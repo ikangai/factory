@@ -1240,8 +1240,20 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     """`factory graduate [--dry-run]` — the operator's manual handle on the same flow the
     autopilot runs after a shift ships: ff base→factory/auto, push base to origin, and
     sync the target's GitHub issues for the pushed commits (keyword-gated close).
-    --dry-run previews the range + issue actions, mutating nothing."""
-    from ..reporting import issue_sync
+    --dry-run previews the range + issue actions, mutating nothing.
+
+    Fix 1 (final whole-branch review): this CLI is reachable by the AUTONOMOUS conductor
+    (it has Bash + ./bin/factory), so an ungated real push here let an LLM push to
+    production with zero human approval — defeating the very structural brake this branch
+    exists to install. So when `autonomy.push_approval` is ON (config default) and this is
+    not an explicit --dry-run, cmd_graduate does NOT push: it captures the SAME dry-run
+    preview (under the SAME cross-process lock the real push takes) and files/refreshes a
+    pending approval via reporting.approvals.propose_graduation (supersede handles refresh),
+    exactly like `_graduate_after_shift`'s gate-ON branch — the operator approves it from
+    the fleet GUI. NO bypass flag by design: turning autonomy up is a config-FILE edit, the
+    operator's deliberate override, never a CLI arg. Gate OFF and --dry-run stay
+    byte-identical to the pre-fix behavior."""
+    from ..reporting import issue_sync, approvals
     from ..common import filelock
     repo = config.target_repo_slug()
     if not repo:
@@ -1249,14 +1261,31 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         return None
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
+    gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+    propose = gate_on and not dry_run       # gate ON + not an explicit preview → file, don't push
     try:
         # Same cross-process push lock as execute_approval / the gate-off shift-end path:
-        # every actor that pushes this repo outward serializes on it.
+        # every actor that pushes this repo outward (or previews it under the gate) serializes.
         with filelock.repo_lock(root):
             res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
-                                               test_fn=_graduation_test_fn(), dry_run=dry_run)
+                                               test_fn=_graduation_test_fn(),
+                                               dry_run=dry_run or propose)
     except filelock.LockBusyError:
         res = {"action": "skip", "reason": "lock-busy"}
+    if propose:
+        if res.get("action") != "dry_run":
+            # The preview came back abnormal (lock-busy, or graduate_and_push skipped) — the
+            # pipeline is broken; surface it as-is rather than filing a meaningless card.
+            print(f"[graduate] {res.get('action')}: {res.get('reason') or res.get('error', '')}")
+            return res
+        n = res.get("n_commits", 0)
+        if n <= 0:
+            print("[graduate] nothing to graduate — base is already current.")
+            return {"action": "skip", "reason": "no-op"}
+        approval_id = approvals.propose_graduation(store, preview=res)
+        print(f"graduation proposed → approval #{approval_id} pending (autonomy.push_approval)"
+              f" — approve in the fleet GUI or set autonomy.push_approval: false")
+        return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
     action = res.get("action")
     if action in ("synced", "dry_run"):
         synced = res.get("synced", [])

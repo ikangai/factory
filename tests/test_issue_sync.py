@@ -641,6 +641,96 @@ def test_cmd_graduate_skips_without_a_repo(tmp_path, monkeypatch):
         assert orch.cmd_graduate(s) is None
 
 
+class _CmdAd:
+    def entry(self):
+        return ("/troot", "/troot/clive.py")
+
+    def run_tests(self, cwd, **k):
+        return (True, "ok")
+
+
+def _cmd_graduate_config(monkeypatch, *, push_approval):
+    monkeypatch.setattr(orch.config, "target_repo_slug", lambda: "o/r")
+    monkeypatch.setattr(orch.config, "target_config", lambda: {"base_branch": "basebr"})
+    monkeypatch.setattr(orch.config, "get_adapter", lambda: _CmdAd())
+    monkeypatch.setattr(orch.config, "load_config",
+                        lambda: {"autonomy": {"push_approval": push_approval}})
+
+
+def test_cmd_graduate_gate_on_files_approval_and_does_not_push(tmp_path, monkeypatch, capsys):
+    """Fix 1 (final whole-branch review): `factory graduate` is reachable by the autonomous
+    conductor (Bash + ./bin/factory), so an UNGATED real push let an LLM push to production
+    with zero approval. With autonomy.push_approval ON (config default) and no --dry-run,
+    cmd_graduate must NOT push — it files a pending approval from the dry-run preview and
+    returns the proposed shape (mirrors _graduate_after_shift's gate-ON return)."""
+    with _store(tmp_path) as s:
+        calls = []
+
+        def fake_grad(**kw):
+            calls.append(kw)
+            return {"action": "dry_run", "range": "origin/basebr..factory/auto", "n_commits": 4,
+                    "base_sha": "b0", "tip_sha": "t0", "synced": []}
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=True)
+        res = orch.cmd_graduate(s)                              # NO --dry-run
+        assert res["action"] == "proposed" and res["n_commits"] == 4
+        assert isinstance(res["approval_id"], int)
+        assert all(c["dry_run"] is True for c in calls)        # never a real push
+        rows = s.pending_approvals()
+        assert len(rows) == 1 and rows[0]["kind"] == "graduation"
+        assert rows[0]["payload"]["tip_sha"] == "t0"
+        out = capsys.readouterr().out
+        assert "graduation proposed" in out and "autonomy.push_approval" in out
+
+
+def test_cmd_graduate_gate_on_zero_commits_files_nothing(tmp_path, monkeypatch):
+    """Gate ON but nothing to graduate: no empty approval card, no push."""
+    with _store(tmp_path) as s:
+        def fake_grad(**kw):
+            return {"action": "dry_run", "range": "x..x", "n_commits": 0,
+                    "base_sha": "b0", "tip_sha": "b0", "synced": []}
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=True)
+        res = orch.cmd_graduate(s)
+        assert res == {"action": "skip", "reason": "no-op"}
+        assert s.pending_approvals() == []
+
+
+def test_cmd_graduate_gate_off_pushes_for_real(tmp_path, monkeypatch):
+    """Gate OFF (config-file override): byte-identical to the pre-fix behavior — a real push,
+    no approval filed."""
+    with _store(tmp_path) as s:
+        calls = []
+
+        def fake_grad(**kw):
+            calls.append(kw)
+            return {"action": "synced", "n_commits": 2, "range": "a..b", "synced": []}
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=False)
+        res = orch.cmd_graduate(s)                              # NO --dry-run, gate OFF
+        assert res["action"] == "synced"
+        assert calls[0].get("dry_run") is False                # a real push
+        assert s.pending_approvals() == []
+
+
+def test_cmd_graduate_dry_run_never_proposes_even_with_gate_on(tmp_path, monkeypatch):
+    """An explicit --dry-run stays a pure preview under EITHER gate setting — it never files
+    an approval (byte-identical to today's dry-run)."""
+    with _store(tmp_path) as s:
+        def fake_grad(**kw):
+            return {"action": "dry_run", "range": "a..b", "n_commits": 3,
+                    "base_sha": "b0", "tip_sha": "t0", "synced": []}
+
+        monkeypatch.setattr(issue_sync, "graduate_and_push", fake_grad)
+        _cmd_graduate_config(monkeypatch, push_approval=True)
+        res = orch.cmd_graduate(s, dry_run=True)
+        assert res["action"] == "dry_run"
+        assert s.pending_approvals() == []
+
+
 # -- graduation_lag (blindspot fix 2026-07-07: passive unpushed-commit counter) --
 def test_graduation_lag_counts_unpushed_commits():
     """graduation_lag measures how far the champion has drifted ahead of the last push."""
