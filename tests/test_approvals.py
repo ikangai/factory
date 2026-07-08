@@ -52,23 +52,29 @@ def _grad_fn(calls, *, preview, real=None):
 def test_propose_graduation_files_a_thin_payload(tmp_path):
     with _store(tmp_path) as s:
         preview = {"action": "dry_run", "range": "a..b", "n_commits": 3,
+                  "base_sha": "b0b0b0b", "tip_sha": "t1t1t1t",
                   "synced": [{"issue": 9, "action": "comment"}], "fetch_failed": True}
         aid = approvals.propose_graduation(s, preview=preview)
         row = s.get_approval(aid)
         assert row["kind"] == "graduation" and row["status"] == "pending"
+        # Fix 2 (final whole-branch review): the payload now PINS the endpoint SHAs, not just
+        # the count — the `range` string is a constant symbolic literal so a same-count amend
+        # would otherwise slip past the stale-check.
         assert row["payload"] == {"range": "a..b", "n_commits": 3,
+                                  "base_sha": "b0b0b0b", "tip_sha": "t1t1t1t",
                                   "synced_preview": [{"issue": 9, "action": "comment"}],
                                   "fetch_failed": True}
 
 
 def test_propose_graduation_defaults_missing_preview_fields(tmp_path):
-    """A minimal preview (no 'synced'/'fetch_failed' keys) still files a well-shaped row —
-    the payload builder must not KeyError on an unusual dry_run result."""
+    """A minimal preview (no 'synced'/'fetch_failed'/sha keys) still files a well-shaped row —
+    the payload builder must not KeyError on an unusual dry_run result; missing SHAs pin ""
+    (fail-closed: "" can never equal a real fresh SHA, so the stale-check refuses)."""
     with _store(tmp_path) as s:
         aid = approvals.propose_graduation(s, preview={"action": "dry_run", "n_commits": 0})
         row = s.get_approval(aid)
-        assert row["payload"] == {"range": "", "n_commits": 0, "synced_preview": [],
-                                  "fetch_failed": False}
+        assert row["payload"] == {"range": "", "n_commits": 0, "base_sha": "", "tip_sha": "",
+                                  "synced_preview": [], "fetch_failed": False}
 
 
 # -- execute_approval: graduation ----------------------------------------------
@@ -77,10 +83,12 @@ def test_execute_approval_graduation_success_resolves_and_audits(tmp_path, monke
     kwargs, row resolves executing→approved, one 'approve' audit row."""
     _fake_config(monkeypatch)
     with _store(tmp_path) as s:
-        aid = s.add_pending_approval("graduation", {"range": "a..b", "n_commits": 2})
+        aid = s.add_pending_approval("graduation", {"range": "origin/base..factory/auto",
+                                                    "n_commits": 2, "base_sha": "b0", "tip_sha": "t0"})
         calls = []
-        fn = _grad_fn(calls, preview={"action": "dry_run", "range": "a..b",
-                                      "n_commits": 2, "synced": []})
+        fn = _grad_fn(calls, preview={"action": "dry_run", "range": "origin/base..factory/auto",
+                                      "n_commits": 2, "base_sha": "b0", "tip_sha": "t0",
+                                      "synced": []})
         res = approvals.execute_approval(s, aid, graduate_fn=fn)
         assert res["ok"] is True and res["result"]["action"] == "synced"
         # exactly two calls: the consent re-derivation (dry_run) then the REAL push
@@ -120,6 +128,32 @@ def test_execute_approval_graduation_stale_preview_refuses_and_refreshes(tmp_pat
         actions = s.recent_operator_actions()
         assert actions[0]["action"] == "approve-stale-refreshed"
         assert "2" in actions[0]["detail"] and "5" in actions[0]["detail"]
+
+
+def test_execute_approval_graduation_stale_when_only_tip_sha_moved(tmp_path, monkeypatch):
+    """CONSENT PINNING, the previously-masked case (final whole-branch review): the `range`
+    string is a CONSTANT symbolic literal and the commit COUNT is unchanged, but the champion
+    tip was amended/force-pushed since the card was filed. A count-only stale-check would push
+    a tip the operator never saw; pinning the endpoint SHAs (Fix 2) refuses it."""
+    _fake_config(monkeypatch)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval(
+            "graduation", {"range": "origin/base..factory/auto", "n_commits": 2,
+                           "base_sha": "b0", "tip_sha": "t0",
+                           "synced_preview": [], "fetch_failed": False})
+        calls = []
+        fn = _grad_fn(calls, preview={"action": "dry_run", "range": "origin/base..factory/auto",
+                                      "n_commits": 2, "base_sha": "b0", "tip_sha": "t1",  # tip moved
+                                      "synced": []})
+        res = approvals.execute_approval(s, aid, graduate_fn=fn)
+        assert res["ok"] is False and res["error"] == "preview-stale"
+        assert res["fresh"]["tip_sha"] == "t1"
+        assert len(calls) == 1 and calls[0]["dry_run"] is True     # the REAL push never ran
+
+        row = s.get_approval(aid)
+        assert row["status"] == "pending"                          # re-clickable
+        assert row["payload"]["tip_sha"] == "t1"                   # refreshed to the TRUE tip
+        assert s.recent_operator_actions()[0]["action"] == "approve-stale-refreshed"
 
 
 def test_execute_approval_graduation_failure_leaves_row_pending(tmp_path, monkeypatch):

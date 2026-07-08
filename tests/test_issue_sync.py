@@ -414,6 +414,21 @@ def test_graduate_skips_on_fetch_failure(tmp_path):
         assert not any(a[0] == "gh" for a in f.calls)       # never touched the remote or issues
 
 
+def test_dry_run_pins_endpoint_shas(tmp_path):
+    """Fix 2 (final whole-branch review): the dry-run preview must resolve BOTH endpoint SHAs
+    (origin/<base> tip + <auto_branch> tip) so the approval card pins the actual commits, not
+    just a count against a constant symbolic range string."""
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", old="deadbee", new="cafef00",
+                     log=_log([{"sha": "c1", "subject": "done", "body": "closes #41"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f, dry_run=True)
+        assert res["action"] == "dry_run"
+        # origin/base and factory/auto both rev-parse through the fake to `old`
+        assert res["base_sha"] == "deadbee" and res["tip_sha"] == "deadbee"
+        assert ["git", "-C", "/x", "rev-parse", "factory/auto"] in f.calls
+
+
 def test_dry_run_survives_fetch_failure(tmp_path):
     with _store(tmp_path) as s:
         f = _GitFake(branch="base", fetch_rc=1,

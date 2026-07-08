@@ -186,6 +186,13 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     def git(*args):
         return runner(["git", "-C", root, *args], capture_output=True, text=True, timeout=60)
 
+    def rev(ref):
+        """Resolved sha of `ref`, or "" when unresolvable (fail-closed: a "" endpoint can
+        never equal a real pinned SHA in the approval stale-check, so the consent gate
+        refuses to push on an unverifiable endpoint rather than trusting it)."""
+        r = git("rev-parse", ref)
+        return (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
+
     # Refresh the remote ref before reading it — it is BOTH the sync-range floor (dry-run
     # preview) and the divergence truth (real merge/push): reading a possibly week-old
     # local remote-tracking ref is exactly what masked 105 commits of upstream drift with
@@ -197,7 +204,14 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
         rng = f"{remote}/{base}..{auto_branch}"
         commits = commits_in_range(root, rng, runner=runner)
         synced = sync_issues(repo, commits, store=store, runner=runner, dry_run=True)
-        result = {"action": "dry_run", "range": rng, "n_commits": len(commits), "synced": synced}
+        # Fix 2 (final whole-branch review): `range` is a CONSTANT symbolic literal
+        # (origin/<base>..<auto_branch>) — byte-identical every run — so a count-only
+        # stale-check (approvals.execute_approval) is blind to a commit-count-preserving
+        # amend/force-push on either endpoint. Pin the ACTUAL resolved endpoint SHAs so the
+        # consent re-derivation can refuse when either tip moved under the operator.
+        result = {"action": "dry_run", "range": rng, "n_commits": len(commits),
+                  "synced": synced, "base_sha": rev(f"{remote}/{base}"),
+                  "tip_sha": rev(auto_branch)}
         if fetch_failed:      # a stale preview beats no preview — flag it, don't withhold it
             result["fetch_failed"] = True
         return result
@@ -213,8 +227,7 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     if getattr(ff, "returncode", 1) != 0:
         return {"action": "skip", "reason": "not-fast-forward"}
 
-    old = git("rev-parse", f"{remote}/{base}")      # pre-push tip → the sync range floor
-    old_sha = (old.stdout or "").strip() if getattr(old, "returncode", 1) == 0 else ""
+    old_sha = rev(f"{remote}/{base}")               # pre-push tip → the sync range floor
     if not old_sha:
         return {"action": "skip", "reason": "no-remote-ref"}
 
@@ -240,7 +253,10 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     rng = f"{old_sha}..{new_sha}"
     commits = commits_in_range(root, rng, runner=runner)
     synced = sync_issues(repo, commits, store=store, runner=runner)
-    return {"action": "synced", "range": rng, "n_commits": len(commits), "synced": synced}
+    # base_sha/tip_sha added for symmetry with the dry-run preview (Fix 2) — harmless on the
+    # real path (nothing compares them post-push): the pre-push remote tip and the pushed HEAD.
+    return {"action": "synced", "range": rng, "n_commits": len(commits), "synced": synced,
+            "base_sha": old_sha, "tip_sha": new_sha}
 
 
 def promote_to_release(*, root: str, base: str, release: str = "main", remote: str = "origin",

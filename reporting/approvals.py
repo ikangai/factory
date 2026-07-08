@@ -46,11 +46,18 @@ def _graduation_test_fn():
 
 
 def _graduation_payload(preview: dict) -> dict:
-    """The card shape a graduation preview pins: only what the Queue tab renders and what
-    the stale-check compares (range + n_commits are the consent-critical pair)."""
+    """The card shape a graduation preview pins: what the Queue tab renders AND what the
+    stale-check compares. The consent-critical set is n_commits + the two ENDPOINT SHAs
+    (base_sha = origin/<base> tip, tip_sha = <auto_branch> tip). The `range` string is a
+    CONSTANT symbolic literal (origin/<base>..<auto_branch>) so on its own it guards only
+    against config drift changing branch names — never a same-count amend/force-push; the
+    SHAs close that masked case (Fix 2, final whole-branch review). Missing SHAs pin ""
+    (fail-closed — "" can never match a real fresh SHA, so the gate refuses)."""
     return {
         "range": preview.get("range", ""),
         "n_commits": preview.get("n_commits", 0),
+        "base_sha": preview.get("base_sha", ""),
+        "tip_sha": preview.get("tip_sha", ""),
         "synced_preview": preview.get("synced", []),
         "fetch_failed": bool(preview.get("fetch_failed", False)),
     }
@@ -136,15 +143,21 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     _fail_attempt(store, approval_id,
                                   f"preview failed: {_result_note(fresh)}")
                     return {"ok": False, "result": fresh}
+                # Consent match: count + BOTH endpoint SHAs (Fix 2 — the range alone is a
+                # constant literal). The range comparison is kept as a config-drift guard
+                # (branch-name change), but a same-count amend/force-push now trips the SHAs.
                 if (fresh.get("range") != payload.get("range")
-                        or fresh.get("n_commits") != payload.get("n_commits")):
+                        or fresh.get("n_commits") != payload.get("n_commits")
+                        or fresh.get("base_sha", "") != payload.get("base_sha", "")
+                        or fresh.get("tip_sha", "") != payload.get("tip_sha", "")):
                     store.update_approval_payload(approval_id, _graduation_payload(fresh))
                     store.unclaim_approval(approval_id)
                     store.record_operator_action(
                         "approve-stale-refreshed", ref,
                         f"card showed {payload.get('n_commits')} commit(s) "
-                        f"({payload.get('range', '')}); reality is "
-                        f"{fresh.get('n_commits')} ({fresh.get('range', '')})")
+                        f"({payload.get('range', '')}, tip {(payload.get('tip_sha') or '')[:9]}); "
+                        f"reality is {fresh.get('n_commits')} ({fresh.get('range', '')}, "
+                        f"tip {(fresh.get('tip_sha') or '')[:9]})")
                     return {"ok": False, "error": "preview-stale", "fresh": fresh}
                 result = graduate_fn(root=root, base=base, repo=repo, store=store,
                                      test_fn=test_fn)
