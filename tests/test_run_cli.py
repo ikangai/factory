@@ -41,6 +41,38 @@ def test_cmd_run_executes_a_shift_then_assesses(tmp_path, monkeypatch):
         assert s.latest_mission_status() is not None          # the shift was assessed
 
 
+def test_cmd_run_wires_the_graduation_lag_alarm(tmp_path, monkeypatch):
+    """Task 6 (blindspot fix): cmd_run must call the passive lag alarm at shift end,
+    in every mode — not just real+shipped. Cheap seam: monkeypatch the alarm itself
+    and assert it fired with the store, rather than driving real config/git."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    calls = []
+    monkeypatch.setattr(orchestrator, "_warn_graduation_lag",
+                        lambda st: calls.append(st) or {"ahead": 0})
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=100, wall_clock_s=5)
+        assert calls and calls[0] is s
+
+
+def test_cmd_run_lag_alarm_fires_after_assess(tmp_path, monkeypatch):
+    """Ordering pin: the alarm may FILE a backlog task; running it before assess() would
+    inflate open_backlog and flip THIS shift's mission status / reset the plateau streak.
+    It must inform the NEXT shift, so assess fires first (mirrors _graduate_after_shift)."""
+    from factory.orchestrator import mission as missionmod
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    order = []
+    monkeypatch.setattr(missionmod, "assess",
+                        lambda store, **kw: order.append("assess") or
+                        {"status": "advancing", "rationale": "r", "recommend_stop": False})
+    monkeypatch.setattr(orchestrator, "_warn_graduation_lag",
+                        lambda st: order.append("lag") or {"ahead": 0})
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        orchestrator.cmd_run(s, conductor=_completed, token_budget=100, wall_clock_s=5)
+        assert order == ["assess", "lag"]
+
+
 def test_cmd_run_needs_a_mission(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
     with _store(tmp_path) as s:

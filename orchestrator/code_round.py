@@ -23,12 +23,14 @@ from __future__ import annotations
 from typing import Callable
 
 from ..common import code_gate, frozen_source, killswitch
+from ..common.textutil import clean_line
 
 
 def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    champion_scores: dict, grade_fn: Callable[[str], dict],
                    changed_paths=None, diff_text: str = None,
-                   label: str = "candidate", regression_tol: float = 0.0,
+                   label: str = "candidate", task_ref: str = "",
+                   regression_tol: float = 0.0,
                    require_test: bool = False, acceptance_ref: str = None) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
@@ -103,7 +105,14 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     before = {"working": champion_scores["working"],
               "held_out": champion_scores.get("held_out", 0.0), "tests_passed": True}
     try:
-        merge_sha = adapter.merge_branch(main_repo, branch, message=f"factory: {label}")
+        # Provenance trailer (blindspot fix 2026-07-07): the sha→task chain must survive
+        # WITHOUT the blackboard — the public repo's history was unexplainable on DB loss.
+        # Sanitized to ONE printable line at this single choke point (63035a2 review):
+        # task titles are free/LLM-authored, and an embedded newline in the ref could
+        # forge/shadow the trailer — provenance must be tamper-evident.
+        ref = clean_line(task_ref, cap=160)
+        message = f"factory: {label}" + (f"\n\nFactory-Task: {ref}" if ref else "")
+        merge_sha = adapter.merge_branch(main_repo, branch, message=message)
     except Exception as e:  # merge conflict / git failure → clean discard (adapter aborted)
         return {"action": "discarded", "stage": "merge", "error": str(e), **extra}
 

@@ -504,6 +504,22 @@ def test_execute_claimed_tasks_passes_real_through(tmp_path):
     s.close()
 
 
+def test_execute_claimed_tasks_passes_task_ref_through(tmp_path):
+    """Blindspot fix (2026-07-07): the injected develop_fn receives task_ref = '<id>: <title>'
+    so the merge commit can carry a Factory-Task trailer without touching the blackboard."""
+    from factory.common.store import Blackboard
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t", "guard KeyError in execute_plan", source="issue")
+    s.set_task_status("t", "in_progress", shift_id=sh)
+    seen = {}
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=lambda text, **k: seen.update(k) or {"action": "merged", "merge_sha": "z"})
+    assert seen["task_ref"] == "t: guard KeyError in execute_plan"
+    s.close()
+
+
 def test_halted_kill_switch(monkeypatch, tmp_path):
     monkeypatch.setattr(develop.killswitch, "is_halted", lambda: True)
     ad = FakeAdapter()

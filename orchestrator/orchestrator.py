@@ -672,6 +672,8 @@ def cmd_develop_once(store: Blackboard, task: str, *, prod: bool = False,
     try:
         adapter.clone(main)   # throwaway clone of the target = the test champion
         print(f"[develop-once] champion clone: {main}")
+        # no task_ref (deliberate): a develop-once smoke has no task row, and the merge
+        # lands in a throwaway clone — no Factory-Task provenance trailer to carry.
         res = develop_and_merge(adapter=adapter, main_repo=main, task=task,
                                 champion_scores=champion_scores, grade_fn=grade_fn,
                                 as_user=as_user, claude_bin=claude_bin)
@@ -1093,6 +1095,9 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
                              shipped=[t["id"] for t in shipped_tasks],
                              summary="shipped: " + "; ".join(t["title"] for t in shipped_tasks))
         print(f"[run] mission status: {m['status']} — {m['rationale']}")
+        # AFTER assess — a filed lag task must inform the NEXT shift's backlog, not corrupt
+        # this shift's status/plateau (mirrors _graduate_after_shift). Passive, every mode.
+        _warn_graduation_lag(store)
         if real and res.get("shipped", 0):
             root = config.get_adapter().entry()[0]
             print(f"[run] real-clive: {res['shipped']} merge(s) on branch factory/auto — review: "
@@ -1340,9 +1345,16 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             return {"action": "skip", "reason": "no-repo"}
         root = root or config.get_adapter().entry()[0]
         base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
-        return graduate_fn(root=root, base=base, repo=repo, store=store,
-                           stop_check=stop_check or killswitch.is_halted,
-                           test_fn=_graduation_test_fn())
+        res = graduate_fn(root=root, base=base, repo=repo, store=store,
+                          stop_check=stop_check or killswitch.is_halted,
+                          test_fn=_graduation_test_fn())
+        # A silent abnormal skip is how a broken graduation pipeline stays invisible
+        # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
+        # broken" through the same deduped failure seam as a raised graduate error;
+        # benign: stop = operator brake, no-op = nothing worth pushing.
+        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op"):
+            _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
+        return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
         err = str(e)
         print(f"[run] graduate+sync skipped (non-fatal error): {err}")
@@ -1350,19 +1362,83 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         return {"action": "error", "error": err}
 
 
-def _maybe_file_graduation_failure(store: Blackboard, error: str) -> None:
+_GRAD_LAG_ALARM = 12   # commits ≈ 2 shifts of merges; beyond this the clean-merge surface is at risk
+
+
+def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
+                         lag_fn=None, file_fn=None) -> Optional[dict]:
+    """Shift-end PASSIVE alarm on BOTH graduation edges (blindspot fixes 2026-07-07):
+    (1) base edge — origin/<base>..factory/auto, the push pipeline stalled (lag hit 105
+    commits with zero signal because the only reporting lived inside the real+shipped
+    graduation path); (2) publication edge — origin/<release>..factory/auto, pushes land
+    on the base branch but nothing PROMOTES them to the target's default branch (same-day
+    evidence: base edge read 0 while origin/main sat 105 commits behind). Runs in every
+    mode — one or two local rev-lists, no fetch/push/LLM. Prints measurable lags (the
+    publication edge only when > 0 — a current default branch is not news); above
+    `threshold` each edge routes through the graduation-failure seam (deduped conductor
+    task, gated by autonomy.failure_tasks like every failure task — each edge under its
+    OWN dedup ref so one edge's open task can't swallow the other's escalation). Returns
+    the base-edge dict, plus {"publication": …} when the second edge was measured (absent
+    when release == base or the base edge was unmeasurable). Never raises — an alarm must
+    not be able to kill the loop it guards — but never silently either: a persistent skip
+    would recreate the blindspot, so the except prints its cause."""
+    try:
+        from ..reporting import issue_sync
+        lag_fn = lag_fn or issue_sync.graduation_lag
+        file_fn = file_fn or _maybe_file_graduation_failure
+        root = config.get_adapter().entry()[0]
+        tc = config.target_config()
+        base = tc.get("base_branch") or "chore/extract-factory"
+        lag = lag_fn(root=root, base=base)
+        ahead = lag.get("ahead")
+        if ahead is None:
+            return lag
+        print(f"[run] graduation lag: {ahead} commit(s) on factory/auto not yet pushed to origin/{base}")
+        if ahead > threshold:
+            print(f"[run] ⚠ graduation lag {ahead} > {threshold} — run `factory graduate` "
+                  f"(or check why the autopilot isn't graduating)")
+            file_fn(store, f"graduation lag: {ahead} ungraduated commit(s) on factory/auto",
+                    ref="graduation:lag-base")
+        release = tc.get("release_branch") or "main"
+        if release == base:                    # one branch plays both roles — one edge suffices
+            return lag
+        pub = lag_fn(root=root, base=release)
+        p = pub.get("ahead")
+        if p is not None:
+            if p > 0:
+                print(f"[run] publication lag: {p} commit(s) on factory/auto not on "
+                      f"origin/{release} (the target's default branch)")
+            if p > threshold:
+                print(f"[run] ⚠ publication lag {p} > {threshold} — base pushes are current but "
+                      f"nothing promotes them to origin/{release} — promote/merge on GitHub or "
+                      f"set target.release_branch")
+                file_fn(store, f"publication lag: {p} commit(s) not on origin/{release} — "
+                               f"graduation pushes the base branch but nothing promotes it to "
+                               f"the default branch",
+                        ref="graduation:lag-publication")
+        return {**lag, "publication": pub}
+    except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
+        print(f"[run] lag alarm skipped (non-fatal): {e}")
+        return None
+
+
+def _maybe_file_graduation_failure(store: Blackboard, error: str, *,
+                                   ref: str = "graduation") -> None:
     """Task 5.1: when the unattended graduation/issue-sync path fails, turn the swallowed
     error into a deduped, conductor-only backlog task + a factory learning instead of
-    letting it vanish into a log print. Gated OFF by default (autonomy.failure_tasks) — a
-    passive store write (no LLM, no spend), so no STOP/mode gate is needed: the caller only
-    reaches this path when a shift actually shipped in REAL mode, which STOP already blocks
-    upstream. Never raises — it runs inside the loop-protecting except handler."""
+    letting it vanish into a log print. `ref` scopes the dedup marker per failure class
+    (default 'graduation' for graduate/sync callers; the lag alarm passes edge-specific
+    refs so its two edges escalate independently). Gated OFF by default
+    (autonomy.failure_tasks) — a passive store write (no LLM, no spend), so no STOP/mode
+    gate is needed: the caller only reaches this path when a shift actually shipped in
+    REAL mode, which STOP already blocks upstream. Never raises — it runs inside the
+    loop-protecting except handler."""
     try:
         auton = config.load_config().get("autonomy", {}) or {}
         if not auton.get("failure_tasks", False):
             return
         from ..reporting import factory_memory
-        factory_memory.record_graduation_failure(store, error=error)
+        factory_memory.record_graduation_failure(store, error=error, ref=ref)
     except Exception as ex:  # noqa: BLE001 — diagnostics must never crash the loop
         print(f"[run] failure-task filing skipped (non-fatal): {ex}")
 

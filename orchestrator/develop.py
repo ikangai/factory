@@ -117,7 +117,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                  champion_scores: Optional[dict] = None, merge_lock=None,
                  memory: str = "", profile_overlay: str = "", model: str = "",
                  require_test: Optional[bool] = None, reviewer: bool = False,
-                 acceptance_ref: Optional[str] = None) -> dict:
+                 acceptance_ref: Optional[str] = None, task_ref: str = "") -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -135,7 +135,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
-                                 acceptance_ref=acceptance_ref)
+                                 acceptance_ref=acceptance_ref, task_ref=task_ref)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
@@ -145,7 +145,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  as_user=as_user, claude_bin=claude_bin, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
-                                 acceptance_ref=acceptance_ref)
+                                 acceptance_ref=acceptance_ref, task_ref=task_ref)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -278,7 +278,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                            profile_overlay=prof["overlay"], model=prof["model"],
                            require_test=require_test, reviewer=reviewer,
                            acceptance_ref=acc_ref, grade_fn=grade_fn,
-                           champion_scores=champion_scores)
+                           champion_scores=champion_scores,
+                           task_ref=f"{task['id']}: {task['title'][:100]}")
             except Exception as e:                    # noqa: BLE001 — contain a dispatch blow-up
                 return {"action": "error", "error": str(e)}
 
@@ -529,12 +530,14 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                       merge_lock=None, memory: str = "",
                       profile_overlay: str = "", model: str = "",
                       require_test: Optional[bool] = None, reviewer: bool = False,
-                      acceptance_ref: Optional[str] = None) -> dict:
+                      acceptance_ref: Optional[str] = None, task_ref: str = "") -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
     SHARED-worktree section (fetch + worktree + grade + merge) so parallel workers in REAL
-    mode don't race on the one factory/auto worktree — the slow clone+develop runs unlocked."""
+    mode don't race on the one factory/auto worktree — the slow clone+develop runs unlocked.
+    `task_ref` rides into the merge commit as a Factory-Task trailer so provenance survives
+    without the blackboard."""
     from ..roles.common import develop_candidate
 
     if killswitch.is_halted():
@@ -612,7 +615,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
-                    changed_paths=changed, label=branch, require_test=rt,
+                    changed_paths=changed, label=branch, task_ref=task_ref, require_test=rt,
                     acceptance_ref=acceptance_ref)   # Task 3.1: run the spec's named test in the candidate
                 res.update(evidence)                  # learnings + reply_head (Task 0.4);
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)

@@ -101,6 +101,24 @@ def test_plan_empty_for_no_refs():
     assert issue_sync.plan_sync([_c("a1", "chore: tidy")]) == {}
 
 
+def test_factory_task_trailer_text_never_closes_an_issue():
+    """63035a2 review (Critical 2): Factory-Task trailers carry task-TITLE text (free/
+    LLM-authored) — provenance, not intent. A title phrased 'closes #41' must NOT close
+    a real issue on graduation."""
+    plan = issue_sync.plan_sync(
+        [_c("a1", "factory: factory/cand-ab12cd34",
+            body="Factory-Task: task-abc: closes #41 memory leak")])
+    assert plan == {}                       # no close, no comment — the trailer is inert
+
+
+def test_non_trailer_body_line_still_closes():
+    """Control: a worker's OWN commit-body close keyword (not a trailer line) still syncs."""
+    plan = issue_sync.plan_sync(
+        [_c("a1", "factory: factory/cand-ab12cd34",
+            body="Factory-Task: task-abc: closes #41 memory leak\ncloses #41")])
+    assert plan[41]["action"] == "close"
+
+
 # -- store idempotency -------------------------------------------------------
 def test_issue_sync_seen_roundtrip(tmp_path):
     with _store(tmp_path) as s:
@@ -217,11 +235,12 @@ def _log(commits):
 
 class _GitFake:
     """Dispatches injected git/gh calls by argv. Records every call for assertions."""
-    def __init__(self, *, branch="base", ff_rc=0, push_rc=0, diff_rc=1,
+    def __init__(self, *, branch="base", ff_rc=0, push_rc=0, diff_rc=1, fetch_rc=0,
                  old="old", new="new", log=""):
         self.calls = []
         self.branch, self.ff_rc, self.push_rc = branch, ff_rc, push_rc
         self.diff_rc = diff_rc          # `git diff --quiet` exit: 1 = has changes (default), 0 = none
+        self.fetch_rc = fetch_rc        # `git fetch` exit: 0 = success (default)
         self.old, self.new, self.log = old, new, log
 
     def __call__(self, argv, **kw):
@@ -229,6 +248,8 @@ class _GitFake:
         a = argv
         if a[0] == "git":
             sub = a[3] if len(a) > 3 else ""
+            if sub == "fetch":
+                return _Run(self.fetch_rc, "")
             if sub == "rev-parse" and "--abbrev-ref" in a:
                 return _Run(0, self.branch)
             if sub == "rev-parse":
@@ -367,6 +388,40 @@ def test_graduate_dry_run_mutates_nothing(tmp_path):
         assert s.issue_sync_seen(41, "c1") is False
 
 
+# -- fetch-before-read (blindspot fix 2026-07-07: stale-ref reads masked a week of drift) --
+def test_graduate_fetches_remote_base_before_reading_it(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f)
+        assert res["action"] == "synced"
+        fetch_call = ["git", "-C", "/x", "fetch", "origin", "base"]
+        remote_rev_parse_call = ["git", "-C", "/x", "rev-parse", "origin/base"]
+        assert fetch_call in f.calls and remote_rev_parse_call in f.calls
+        assert f.calls.index(fetch_call) < f.calls.index(remote_rev_parse_call)
+
+
+def test_graduate_skips_on_fetch_failure(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", fetch_rc=1,
+                     log=_log([{"sha": "c1", "subject": "feat (#40)"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f)
+        assert res == {"action": "skip", "reason": "fetch-failed"}
+        assert "merge" not in f.git_subcmds() and "push" not in f.git_subcmds()
+        assert not any(a[0] == "gh" for a in f.calls)       # never touched the remote or issues
+
+
+def test_dry_run_survives_fetch_failure(tmp_path):
+    with _store(tmp_path) as s:
+        f = _GitFake(branch="base", fetch_rc=1,
+                     log=_log([{"sha": "c1", "subject": "done", "body": "closes #41"}]))
+        res = issue_sync.graduate_and_push(root="/x", base="base", repo="o/r",
+                                           store=s, runner=f, dry_run=True)
+        assert res["action"] == "dry_run"
+        assert res["fetch_failed"] is True
+
+
 # -- loop wiring: _graduate_after_shift --------------------------------------
 class _Recorder:
     def __init__(self, result=None, raises=False):
@@ -454,3 +509,31 @@ def test_cmd_graduate_skips_without_a_repo(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
         monkeypatch.setattr(orch.config, "target_repo_slug", lambda: "")
         assert orch.cmd_graduate(s) is None
+
+
+# -- graduation_lag (blindspot fix 2026-07-07: passive unpushed-commit counter) --
+def test_graduation_lag_counts_unpushed_commits():
+    """graduation_lag measures how far the champion has drifted ahead of the last push."""
+    def fake_runner(argv, **kw):
+        # Expect: ["git", "-C", "/r", "rev-list", "--count", "origin/base..factory/auto"]
+        assert argv == ["git", "-C", "/r", "rev-list", "--count", "origin/base..factory/auto"]
+        return _Run(returncode=0, stdout="105\n")
+
+    result = issue_sync.graduation_lag(root="/r", base="base", runner=fake_runner)
+    assert result == {"ahead": 105}
+
+
+def test_graduation_lag_missing_ref_is_quiet():
+    """graduation_lag returns None+error when a ref is missing, never raises."""
+    class _RunWithError:
+        def __init__(self):
+            self.returncode = 128
+            self.stdout = ""
+            self.stderr = "fatal: unknown revision origin/base\n"
+
+    def fake_runner(argv, **kw):
+        return _RunWithError()
+
+    result = issue_sync.graduation_lag(root="/r", base="base", runner=fake_runner)
+    assert result["ahead"] is None
+    assert "unknown revision" in result["error"]

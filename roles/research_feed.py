@@ -14,7 +14,13 @@ import uuid
 from typing import Optional
 
 from ..common import config, paths
+from ..common.textutil import clean_line
 from . import common
+
+# Issue titles are OUTSIDER-authored (anyone can file against the public target repo) and
+# flow into role prompts. The sanitizer is the shared common.textutil.clean_line (it also
+# guards git-trailer values, 63035a2 review); this alias keeps the local name + call sites.
+_clean_title = clean_line
 
 
 def _bullets(rows, fmt, empty: str) -> str:
@@ -38,8 +44,8 @@ def fetch_issues(repo: str, limit: int = 25) -> str:
         return ""
     lines = []
     for it in issues:
-        labels = ",".join(l.get("name", "") for l in it.get("labels", []))
-        lines.append(f"- #{it.get('number')}: {it.get('title', '')}"
+        labels = ",".join(_clean_title(l.get("name", ""), cap=40) for l in it.get("labels", []))
+        lines.append(f"- #{it.get('number')}: {_clean_title(it.get('title', ''))}"
                      + (f"  [{labels}]" if labels else ""))
     return "\n".join(lines)
 

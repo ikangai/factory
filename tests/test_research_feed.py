@@ -240,3 +240,30 @@ def test_convert_briefs_dedupes_against_open_backlog(tmp_path, monkeypatch):
         assert added == []                                            # case-insensitive dup dropped
         assert len(s.list_tasks(status="open")) == 1
     assert _read_status(p) == "staged"          # not converted — nothing was added
+
+
+# Task 8: Issue title sanitization
+
+def test_clean_title_strips_control_and_collapses_ws():
+    """Control/format chars stripped; whitespace normalized to single spaces."""
+    result = research_feed._clean_title("fix\x1b[31m the   bug\t now")
+    assert result == "fix[31m the bug now"
+
+
+def test_clean_title_caps_length():
+    """Titles capped to 140 chars by default."""
+    result = research_feed._clean_title("x" * 500)
+    assert len(result) == 140
+
+
+def test_fetch_issues_uses_clean_title(monkeypatch):
+    """fetch_issues sanitizes titles and label names via _clean_title."""
+    import json
+    import subprocess
+    import types
+    canned = json.dumps([
+        {"number": 7, "title": " evil   spaced", "labels": [{"name": "bug\x1b[31m"}]}])
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=canned))
+    out = research_feed.fetch_issues("x/y")
+    assert out == "- #7: evil spaced  [bug[31m]"

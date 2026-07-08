@@ -35,7 +35,12 @@ def parse_issue_refs(message: str) -> dict:
 
 
 def _commit_text(commit: dict) -> str:
-    return f"{commit.get('subject', '')}\n{commit.get('body', '')}"
+    # Factory-Task trailers carry task-TITLE text (free/LLM-authored) — provenance, not
+    # intent. Scanning them would let a title phrased "closes #41" close a real issue
+    # (63035a2 review). Workers' own dev-commit bodies still sync normally.
+    body = "\n".join(l for l in (commit.get("body") or "").splitlines()
+                     if not l.startswith("Factory-Task:"))
+    return f"{commit.get('subject', '')}\n{body}"
 
 
 def plan_sync(commits: list[dict]) -> dict:
@@ -137,29 +142,66 @@ def commits_in_range(root: str, rng: str, *, runner=subprocess.run) -> list[dict
     return commits
 
 
+def graduation_lag(*, root: str, base: str, auto_branch: str = "factory/auto",
+                   remote: str = "origin", runner=subprocess.run) -> dict:
+    """How far the champion has drifted ahead of the last push: commits on `auto_branch`
+    that `remote/base` never received. PASSIVE (no fetch, no mutation) — safe to call
+    every shift in any mode. Returns {'ahead': int} or, when a ref is missing/unreadable,
+    {'ahead': None, 'error': str} — callers alarm on ahead>threshold, never on error.
+    Blindspot fix 2026-07-07: the lag reached 105 commits with zero signal."""
+    out = runner(["git", "-C", root, "rev-list", "--count",
+                  f"{remote}/{base}..{auto_branch}"],
+                 capture_output=True, text=True, timeout=30)
+    if getattr(out, "returncode", 1) != 0:
+        return {"ahead": None, "error": (getattr(out, "stderr", "") or "").strip()[:120]}
+    try:
+        return {"ahead": int((out.stdout or "").strip())}
+    except ValueError:
+        return {"ahead": None, "error": "unparsable rev-list output"}
+
+
 def graduate_and_push(*, root: str, base: str, repo: str, store,
                       auto_branch: str = "factory/auto", remote: str = "origin",
                       runner=subprocess.run, stop_check=None, test_fn=None,
                       dry_run: bool = False) -> dict:
     """Graduate (ff `base` → `auto_branch`), push `base` to `remote`, then sync the
-    issues referenced by the newly-pushed commits. Fails CLOSED at every step — skips
-    (never forces) when STOP is set, the repo isn't on `base`, the merge isn't a
-    fast-forward, the pushed diff is a no-op, the integrated tip fails re-test, or the
-    push is rejected. `test_fn(root) -> (passed, report)` is the prod-push quality gate:
-    when given, the target's suite is re-run on the integrated tip before the push and a
-    red tip skips ('tests-failed'). `dry_run` mutates nothing and previews the
-    `remote/base..auto_branch` range. git+gh go through `runner` (injected for tests)."""
+    issues referenced by the newly-pushed commits. Always `fetch`es `remote/base` first —
+    it is both the sync-range floor and the divergence truth, and reading it stale once
+    masked a week of upstream drift (2026-07-07 blindspot pass, 105 commits). Fails CLOSED
+    at every step — skips (never forces) when STOP is set, the fetch itself fails
+    ('fetch-failed'), the repo isn't on `base`, the merge isn't a fast-forward, the pushed
+    diff is a no-op, the integrated tip fails re-test, or the push is rejected. `test_fn(root)
+    -> (passed, report)` is the prod-push quality gate: when given, the target's suite is
+    re-run on the integrated tip before the push and a red tip skips ('tests-failed').
+    `dry_run` mutates no target-branch/issue state (it still fetches — the preview needs
+    a fresh remote ref) and previews the `remote/base..auto_branch` range; it proceeds on
+    a stale ref even when the fetch fails (a stale preview beats no preview), flagging
+    the result with `fetch_failed: True` in that case. git+gh go through `runner`
+    (injected for tests)."""
     if stop_check and stop_check():
         return {"action": "skip", "reason": "stop"}
 
     def git(*args):
         return runner(["git", "-C", root, *args], capture_output=True, text=True, timeout=60)
 
+    # Refresh the remote ref before reading it — it is BOTH the sync-range floor (dry-run
+    # preview) and the divergence truth (real merge/push): reading a possibly week-old
+    # local remote-tracking ref is exactly what masked 105 commits of upstream drift with
+    # zero signal (2026-07-07 blindspot pass).
+    fetched = git("fetch", remote, base)
+    fetch_failed = getattr(fetched, "returncode", 1) != 0
+
     if dry_run:
         rng = f"{remote}/{base}..{auto_branch}"
         commits = commits_in_range(root, rng, runner=runner)
         synced = sync_issues(repo, commits, store=store, runner=runner, dry_run=True)
-        return {"action": "dry_run", "range": rng, "n_commits": len(commits), "synced": synced}
+        result = {"action": "dry_run", "range": rng, "n_commits": len(commits), "synced": synced}
+        if fetch_failed:      # a stale preview beats no preview — flag it, don't withhold it
+            result["fetch_failed"] = True
+        return result
+
+    if fetch_failed:          # real path fails CLOSED: never graduate off a ref we couldn't refresh
+        return {"action": "skip", "reason": "fetch-failed"}
 
     cur = git("rev-parse", "--abbrev-ref", "HEAD")
     if getattr(cur, "returncode", 1) != 0 or (cur.stdout or "").strip() != base:

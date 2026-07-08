@@ -43,6 +43,12 @@ def _conn(db_path: Optional[str] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")  # crash/copy-safe by construction (not header
+        # luck); best-effort — the switch fails fast (not the 30s busy_timeout) under a
+        # concurrent writer on a not-yet-WAL file, and the NEXT connection retries it
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 

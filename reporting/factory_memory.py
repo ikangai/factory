@@ -99,25 +99,27 @@ _GRADUATION_DETAIL = (
 )
 
 
-def record_graduation_failure(store, *, error: str) -> dict:
+def record_graduation_failure(store, *, error: str, ref: str = GRADUATION_SOURCE_REF) -> dict:
     """Task 5.1: turn a swallowed graduation/issue-sync failure into a deduped backlog task
     + a durable factory learning. The task is filed with source='worker' (the tasks.source
-    CHECK has NO 'factory' value) and stamped source_ref='graduation'; it is DEDUPED against
-    OPEN *and* BLOCKED tasks on that marker (a scope-rejected prior failure task stays 'open',
-    a handled one may be 'blocked' — open-only dedup would re-spam either way). Resolved
-    (done/dropped) failure tasks do NOT block a fresh one, so a new outage is still surfaced.
-    The learning is recorded EVERY call (its own dedup bumps `hits` → recurrence count) even
-    when the task deduped. Never raises — the caller runs inside the loop-protecting handler.
-    Returns {task_id, deduped, learning}."""
+    CHECK has NO 'factory' value) and stamped source_ref=`ref` (default 'graduation'); it is
+    DEDUPED against OPEN *and* BLOCKED tasks on that marker (a scope-rejected prior failure
+    task stays 'open', a handled one may be 'blocked' — open-only dedup would re-spam either
+    way). `ref` scopes the dedup PER FAILURE CLASS (lag-alarm hardening: the lag alarm files
+    graduation:lag-base / graduation:lag-publication so an open base-edge task can't swallow
+    the publication edge's escalation). Resolved (done/dropped) failure tasks do NOT block a
+    fresh one, so a new outage is still surfaced. The learning is recorded EVERY call (its
+    own dedup bumps `hits` → recurrence count) even when the task deduped. Never raises —
+    the caller runs inside the loop-protecting handler. Returns {task_id, deduped, learning}."""
     err = (error or "").strip() or "(no error text)"
     open_blocked = store.list_tasks(status="open") + store.list_tasks(status="blocked")
-    deduped = any(t.get("source_ref") == GRADUATION_SOURCE_REF for t in open_blocked)
+    deduped = any(t.get("source_ref") == ref for t in open_blocked)
     task_id = None
     if not deduped:
         import uuid
         task_id = f"task-{uuid.uuid4().hex[:8]}"
         store.add_task(task_id, _GRADUATION_TITLE, source="worker",
-                       source_ref=GRADUATION_SOURCE_REF,
+                       source_ref=ref,
                        detail=_GRADUATION_DETAIL.format(error=err))
     rec = record_learning(
         store, "factory",

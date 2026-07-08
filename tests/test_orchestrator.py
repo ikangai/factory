@@ -153,6 +153,41 @@ def test_resolved_failure_task_does_not_block_a_fresh_one(tmp_path, monkeypatch)
         assert len(s.list_tasks(status="open")) == 1         # a fresh one
 
 
+def test_abnormal_graduate_skip_files_failure(tmp_path, monkeypatch):
+    """An abnormal skip (reason not 'stop'/'no-op') escalates through the failure seam
+    just like a raised graduate error (2026-07-07 blindspot pass)."""
+    with _store(tmp_path) as s:
+        _gate(monkeypatch, on=True)
+
+        def skip_fn(**kw):
+            return {"action": "skip", "reason": "push-failed"}
+
+        res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=skip_fn,
+                                         repo="o/r", root="/x", base="base")
+        assert res["reason"] == "push-failed"
+        # filed a failure task, just like a raised error would
+        tasks = s.list_tasks(status="open")
+        assert len(tasks) == 1
+        t = tasks[0]
+        assert t["source_ref"] == "graduation"
+        assert "graduate skipped: push-failed" in t["detail"]
+
+
+def test_benign_graduate_skip_stays_quiet(tmp_path, monkeypatch):
+    """Benign skips (stop = operator brake, no-op = nothing to push) are NOT escalated."""
+    with _store(tmp_path) as s:
+        _gate(monkeypatch, on=True)
+
+        for reason in ("stop", "no-op"):
+            def skip_fn(**kw):
+                return {"action": "skip", "reason": reason}
+
+            orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=skip_fn,
+                                       repo="o/r", root="/x", base="base")
+        # no failure tasks filed for benign skips
+        assert s.list_tasks(status="open") == []
+
+
 # -- factory_memory.record_graduation_failure (unit) ------------------------
 def test_record_graduation_failure_shapes_and_dedup(tmp_path):
     with _store(tmp_path) as s:
@@ -173,6 +208,20 @@ def test_record_graduation_failure_empty_error_is_safe(tmp_path):
         assert r["task_id"] is not None
         t = s.list_tasks(status="open")[0]
         assert "(no error text)" in t["detail"]
+
+
+def test_record_graduation_failure_distinct_refs_do_not_collide(tmp_path):
+    """Edge-specific dedup (lag-alarm hardening): dedup is scoped to the caller's `ref`,
+    so an open base-edge lag task cannot swallow the publication edge's escalation —
+    while a repeat on the SAME ref still dedupes."""
+    with _store(tmp_path) as s:
+        r1 = factory_memory.record_graduation_failure(s, error="A", ref="graduation:lag-base")
+        r2 = factory_memory.record_graduation_failure(s, error="B", ref="graduation:lag-publication")
+        assert r1["deduped"] is False and r2["deduped"] is False
+        assert sorted(t["source_ref"] for t in s.list_tasks(status="open")) == \
+            ["graduation:lag-base", "graduation:lag-publication"]
+        r3 = factory_memory.record_graduation_failure(s, error="A2", ref="graduation:lag-base")
+        assert r3["deduped"] is True and len(s.list_tasks(status="open")) == 2
 
 
 # -- cmd_rebaseline: the periodic full re-baseline (Piece 5) -----------------
