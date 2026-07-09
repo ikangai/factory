@@ -252,9 +252,14 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     return obj
 
 
-def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
+def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude", model=None):
     """Production judge: one cheap LLM call over roles/scope_check/prompt.md → a raw verdict
-    dict (parsed). Returns {} on any failure so prefilter fails open."""
+    dict (parsed). Returns {} on any failure so prefilter fails open.
+
+    `model`: an optional tier ALIAS override (self-organizing factory, Task 1.3 — an org
+    chart's per-class scope_judge tier). None (the default) preserves today's behavior
+    EXACTLY (the config-derived scope_check_tier read below) — None, not '', is the "no
+    override" sentinel, because '' is itself a legal alias (frontier)."""
     from ..roles import common
     from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
@@ -262,6 +267,7 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     prompt = common._load_prompt("scope_check").replace("{TASK}", text)
     import time
     t0 = time.monotonic()
+    tier = model if model is not None else (sw.get("scope_check_tier") or "")
     try:
         reply, t, c = common.claude_super(
             prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
@@ -272,7 +278,7 @@ def scope_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
             # fails open DOWNWARD to `standard` on an unknown tier — never silently up to frontier.
             # decompose_judge is a SEPARATE call path and is deliberately NOT threaded (spec: scope
             # only). config.yaml-only (no store handle here), so it stays out of SETTINGS_SPEC.
-            model=config.resolve_model(sw.get("scope_check_tier") or ""))
+            model=config.resolve_model(tier))
         obj = common._parse_obj(reply)
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fail open

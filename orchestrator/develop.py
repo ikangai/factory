@@ -62,6 +62,18 @@ _RETRY_STAGES = ("tests", "no_test", "acceptance")
 _WORKER_TIMEOUT_S = 1800
 
 
+def _class_override(params, key: str, current):
+    """A class's stage override wins; else `current` PASSES THROUGH UNCHANGED (including
+    None, so require_test's own further fallback inside develop_and_merge still applies).
+    Deliberately NOT org.stage_on's resolve_setting fallback: require_test/reviewer/
+    acceptance_exec arrive here ALREADY resolved once by the caller (cmd_run's own
+    resolve_setting call) — re-deriving from store+config here would let config.yaml's
+    own default silently clobber an explicitly-passed parameter (a real bug caught by
+    test_execute_extracts_ref_and_adds_contract_when_gate_on going red under the first
+    draft of Task 1.3, which piped these three through org.stage_on instead)."""
+    return bool(params.stages[key]) if key in params.stages else current
+
+
 def classify_empty_handed(reply: str) -> Optional[dict]:
     """Classify a no-branch worker reply into {action:'error', stage, error} — or None
     for a GENUINE no_candidate (the worker honestly came back empty-handed). Stages:
@@ -188,10 +200,40 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
         print("[execute] STOP engaged — not dispatching.", flush=True)
         return 0
 
+    # Self-organizing factory (design: docs/plans/2026-07-09-self-organizing-factory-
+    # design.md §2; impl Task 1.3): consult the ACTIVE org chart ONCE, on the MAIN thread,
+    # before anything below reads a per-task knob. A chartless mission resolves every
+    # task to an empty OrgParams (org.task_params falls through), so org_params_by_id is
+    # populated either way and every per-task lookup below defaults to today's global
+    # resolution — the no-chart path stays byte-identical.
+    from . import org as orgmod
+    chart = orgmod.get_active_chart(store)
+    org_params_by_id: dict = {}
+    for t in claimed:
+        params = orgmod.task_params(store, t, chart)
+        org_params_by_id[t["id"]] = params
+        if chart is not None:                     # never touch org_class/profile chartless — a
+            store.set_task_org_class(t["id"], params.org_class)  # superseded-without-replan chart
+            if params.profile and not t.get("profile"):          # must not erase prior classification
+                store.set_task_profile(t["id"], params.profile)
+                t["profile"] = params.profile      # keep the in-memory row in sync for the profile-
+                                                    # resolution loop just below (same dispatch pass)
+
     if scope_judge is not None:                            # GSD spec-driven pre-dispatch scope check:
         from ..reporting import scope_check                # reject/split over-broad briefs BEFORE a
         before = len(claimed)                              # worker is spent (kills no_candidate upstream)
-        claimed = scope_check.prefilter(store, claimed, shift_id=shift_id, judge=scope_judge)
+        # Task 1.3: scope_check is now a PER-TASK stage gate — a class's stages.scope_check
+        # override wins; default True (scope_judge is only non-None when the shift-level
+        # knob resolved on, so "runs for everyone" stays today's behavior for an
+        # unclassified/no-override task). Bypassed tasks skip the judge entirely (no
+        # reject/split, no spec sharpening) rather than being force-fed through it.
+        to_judge = [t for t in claimed
+                   if orgmod.stage_on(org_params_by_id[t["id"]], store, "scope_check", True)]
+        judge_ids = {t["id"] for t in to_judge}
+        bypassed = [t for t in claimed if t["id"] not in judge_ids]
+        judged_kept = (scope_check.prefilter(store, to_judge, shift_id=shift_id, judge=scope_judge)
+                      if to_judge else [])
+        claimed = judged_kept + bypassed
         if len(claimed) != before:
             print(f"[execute] scope check: {before - len(claimed)} task(s) rejected/split, "
                   f"{len(claimed)} dispatching.", flush=True)
@@ -215,22 +257,35 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     profiles = {}
     cards: dict = {}                                 # task id → (card text, surfaced learning ids)
     accept_refs: dict = {}                           # task id → the named acceptance ref (or None)
+    # Task 1.3: require_test/reviewer/acceptance_exec/retry_on_discard are resolved once
+    # GLOBALLY today (the params below); make each a PER-TASK lookup — a class's stages
+    # override wins, else it falls through to that same global value (byte-identical when
+    # no chart or no override). scope_check/auto_decompose stay structurally global (they
+    # gate whether the judge/decomposer CALLABLE exists at all, constructed above
+    # execute_claimed_tasks) — a class can only narrow those, not conjure a callable.
+    require_test_by_id: dict = {}
+    reviewer_by_id: dict = {}
     for t in claimed:
+        params = org_params_by_id[t["id"]]
         topic = (t.get("title") or "") + " " + (t.get("detail") or "")
         cards[t["id"]] = factory_memory.memory_card_with_ids(store, "developer", topic=topic)
+        task_acceptance_exec = _class_override(params, "acceptance_exec", acceptance_exec)
         accept_refs[t["id"]] = (acceptance.extract_test_ref(t.get("spec") or {})
-                                if acceptance_exec else None)
+                                if task_acceptance_exec else None)
+        require_test_by_id[t["id"]] = _class_override(params, "require_test", require_test)
+        reviewer_by_id[t["id"]] = _class_override(params, "reviewer", reviewer)
         raw = t.get("profile") or ""
         prof = store.get_profile(raw)                    # '' / 'generalist' → synthetic generalist
         if prof is None:                                 # a NAMED profile that no longer exists:
             print(f"[execute] task {t['id']} names unknown profile {raw!r} — failing open to "
                   f"standard tier (never frontier)", flush=True)
-            profiles[t["id"]] = {"name": "generalist", "overlay": "",
+            profiles[t["id"]] = {"name": "generalist", "overlay": "", "tier": "standard",
                                  "model": config.resolve_model("standard")}
         else:
-            profiles[t["id"]] = {"name": prof.get("name") or "generalist",
-                                 "overlay": prof.get("overlay", ""),
-                                 "model": config.resolve_model(prof.get("model", ""))}
+            tier = prof.get("model", "")                 # the ALIAS ('', frontier/standard/fast) —
+            profiles[t["id"]] = {"name": prof.get("name") or "generalist",   # routing_outcomes.tier
+                                 "overlay": prof.get("overlay", ""), "tier": tier,
+                                 "model": config.resolve_model(tier)}
 
     # Real merge-grade (Piece 4): resolve (grade_fn, champion_scores) ON THE MAIN THREAD — in
     # 'smoke' mode this measures the champion baseline once (real clive runs) before dispatch;
@@ -247,12 +302,18 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
     # writer store. retry_budget_ok is brake-honest: a retry is suppressed once the shift's
     # LEDGERED spend has reached its token_budget (composes with Task 0.2's per-shift brake; a
     # token_budget of 0 = unlimited, matching that brake's convention). Computed once, pre-dispatch.
-    retry_on = bool(config.resolve_setting(store, "super_worker.retry_on_discard", False)[0])
-    retry_budget_ok = False
-    if retry_on:
-        _budget = int((store.get_shift(shift_id) or {}).get("token_budget") or 0)
-        _spent = int(store.shift_spend(shift_id)["tokens"])
-        retry_budget_ok = _budget == 0 or _spent < _budget
+    # Task 1.3: retry_on_discard becomes a PER-TASK lookup (retry_on_by_id) — a class's
+    # override can turn it on/off independent of the shift-level default, so
+    # retry_budget_ok is computed UNCONDITIONALLY (cheap: two store reads) rather than
+    # gated on the global default, or a class-enabled retry would never get its headroom
+    # check evaluated when the global default is off.
+    retry_on_default = bool(config.resolve_setting(store, "super_worker.retry_on_discard", False)[0])
+    retry_on_by_id = {t["id"]: orgmod.stage_on(org_params_by_id[t["id"]], store,
+                                               "retry_on_discard", retry_on_default)
+                      for t in claimed}
+    _budget = int((store.get_shift(shift_id) or {}).get("token_budget") or 0)
+    _spent = int(store.shift_spend(shift_id)["tokens"])
+    retry_budget_ok = _budget == 0 or _spent < _budget
 
     def work(task):
         if killswitch.is_halted():                   # STOP tripped before this one started
@@ -276,7 +337,8 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 return run(brief, as_user=as_user, claude_bin=claude_bin, real=real,
                            merge_lock=merge_lock, memory=cards[task["id"]][0],
                            profile_overlay=prof["overlay"], model=prof["model"],
-                           require_test=require_test, reviewer=reviewer,
+                           require_test=require_test_by_id[task["id"]],
+                           reviewer=reviewer_by_id[task["id"]],
                            acceptance_ref=acc_ref, grade_fn=grade_fn,
                            champion_scores=champion_scores,
                            task_ref=f"{task['id']}: {task['title'][:100]}")
@@ -284,13 +346,14 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                 return {"action": "error", "error": str(e)}
 
         res = _dispatch(text)
-        # Task 3.2: ONE informed retry on a gradeable gate-discard. Gate ON + budget headroom
-        # (both resolved on the MAIN THREAD above) + STOP still clear + a retry-eligible stage
-        # (tests / no_test / acceptance; NEVER frozen). The retry runs a fresh INDEPENDENT
-        # attempt off the PRISTINE base (develop_and_merge re-clones) — so the suffix is worded
-        # honestly: the prior code is NOT visible, only its failure evidence (operator memory).
-        # develop_and_merge's own STOP re-checks (entry + pre-merge) still fire inside _dispatch.
-        if (retry_on and retry_budget_ok and not killswitch.is_halted()
+        # Task 3.2: ONE informed retry on a gradeable gate-discard. Gate ON (per-task,
+        # Task 1.3) + budget headroom (resolved on the MAIN THREAD above) + STOP still
+        # clear + a retry-eligible stage (tests / no_test / acceptance; NEVER frozen). The
+        # retry runs a fresh INDEPENDENT attempt off the PRISTINE base (develop_and_merge
+        # re-clones) — so the suffix is worded honestly: the prior code is NOT visible,
+        # only its failure evidence (operator memory). develop_and_merge's own STOP
+        # re-checks (entry + pre-merge) still fire inside _dispatch.
+        if (retry_on_by_id[task["id"]] and retry_budget_ok and not killswitch.is_halted()
                 and res.get("action") == "discarded" and res.get("stage") in _RETRY_STAGES):
             evidence = str(res.get("tests_report") or res.get("why") or res.get("error") or "")[:2000]
             suffix = (
@@ -358,6 +421,13 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                                   shift_id=shift_id)
             shipped += 1
             print(f"[execute]   {task['id']} → merged {res.get('merge_sha', '')[:12]} — SHIPPED", flush=True)
+            # Self-organizing factory (Task 1.3): the fit table's raw material — one row per
+            # dispatched task. tier = the PROFILE's alias (resolved pre-dispatch, not the
+            # resolved model id); tokens = the same value the developer ledger row got above.
+            store.add_routing_outcome(
+                task["id"], shift_id=shift_id, org_class=org_params_by_id[task["id"]].org_class,
+                profile=profiles[task["id"]]["name"], tier=profiles[task["id"]]["tier"],
+                outcome="done", tokens=int(res.get("tokens") or 0))
             spec = task.get("spec")                    # GSD #6: spec-fulfillment feedback
             if spec and res.get("changed_paths") is not None:
                 from ..reporting import scope_check
@@ -386,6 +456,13 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                                     stage=str(res.get("stage") or ""),
                                     tests_report=str(res.get("tests_report") or ""),
                                     reply_head=str(res.get("reply_head") or ""))
+            # Self-organizing factory (Task 1.3): the fit table's raw material — same
+            # shape as the merged branch above, outcome='blocked' + the gate's stage.
+            store.add_routing_outcome(
+                task["id"], shift_id=shift_id, org_class=org_params_by_id[task["id"]].org_class,
+                profile=profiles[task["id"]]["name"], tier=profiles[task["id"]]["tier"],
+                outcome="blocked", stage=str(res.get("stage") or ""),
+                tokens=int(res.get("tokens") or 0))
             # Task 2.3 slice 2 (scope-check calibration): a no_candidate whose task carries a spec
             # means the scope check PASSED this brief (it attached/kept the spec) — yet the worker
             # came back empty-handed, so the judge under-rejected. Mirror of the merged-side spec-
@@ -416,7 +493,12 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
             # "task too big" evidence; transport/refusal never reach the decomposer (pure spend).
             decompose_ok = action == "no_candidate" or (
                 action == "error" and res.get("stage") in _DECOMPOSE_STAGES)
-            if decompose_ok and decomposer is not None:
+            # Task 1.3: auto_decompose is a per-task stage gate too — a class can OPT OUT
+            # (default True: decomposer is only non-None when the shift-level knob resolved
+            # on, so "decomposes for everyone" stays today's behavior otherwise).
+            task_decompose_on = orgmod.stage_on(org_params_by_id[task["id"]], store,
+                                                "auto_decompose", True)
+            if decompose_ok and task_decompose_on and decomposer is not None:
                 from ..reporting import scope_check
                 sub_ids = scope_check.decompose_no_candidate(
                     store, task, shift_id=shift_id, decomposer=decomposer)
