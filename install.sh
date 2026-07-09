@@ -278,7 +278,15 @@ esac
 # Eval-loop honesty notes. The develop rail (briefs -> worker -> tests -> gated merge) is
 # target-generic either way; these are about the scenario-eval loop only.
 case "$PROVIDER" in
-    clive) : ;;
+    clive) if [ "$TARGET_REPO_NAME" != "clive" ]; then
+        # Explicitly forcing the clive adapter onto a non-clive target (old scripts/CI
+        # muscle memory) is exactly the predictably-unwired case — keep warning.
+        cat >&2 <<NOTE
+  NOTE: target '$TARGET_REPO_NAME' under the CLIVE adapter: the scenario-eval loop
+  expects clive's layout and will predictably fail — use the default 'generic'
+  provider (drop --provider) or write a dedicated adapter.
+NOTE
+    fi ;;
     generic) cat >&2 <<NOTE
   NOTE: target '$TARGET_REPO_NAME' runs under the GENERIC adapter: the eval loop
   invokes '<target.python> <target.entry> [target.exec.args]' with spec knobs as

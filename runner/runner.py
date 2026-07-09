@@ -176,6 +176,15 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
     adapter = get_adapter(cfg)
 
     if scenario.get("class") == "multi-clive":
+        if adapter.name != "clive":
+            # run_multi_clive drives clive's Rooms CLI directly (broker/member flags,
+            # lobby socket) and BYPASSES adapter.run() — under any other adapter it
+            # would spawn a bogus invocation and poll the full timeout before recording
+            # a dishonest fail. Refuse up front; run_capped records this as 'error'.
+            raise RuntimeError(
+                f"scenario {scenario.get('id')!r} is class multi-clive, which drives "
+                f"clive's Rooms CLI directly and is not runnable under the "
+                f"{adapter.name!r} adapter — exclude it from this target's corpus")
         from .multi_clive import run_multi_clive
         return run_multi_clive(candidate_id, candidate_spec_path, scenario,
                                model_entry, partition=partition, store=store,
@@ -200,7 +209,11 @@ def run_one(candidate_id: str, candidate_spec_path: str, scenario: dict,
 
         # --- assemble evidence -------------------------------------------
         sess_text, tokens_used, claim = _read_session_log(handle.home)
-        session_dirs = adapter.parse_session_dirs(cres.stderr)
+        # Both streams, deduped: clive's marker prints to stderr, but a generic target's
+        # session_dir_regex commonly matches stdout — scanning only stderr made that
+        # config knob silently do nothing.
+        session_dirs = list(dict.fromkeys(
+            adapter.parse_session_dirs(cres.stderr + "\n" + cres.stdout)))
         art_text, _kept = _collect_session_artifacts(session_dirs, start,
                                                      handle.workdir, evidence_dir)
         workdir_text = _read_workdir_files(handle.workdir)

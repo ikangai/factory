@@ -82,6 +82,18 @@ def test_actuate_prefix_is_configurable_and_empty_open_is_a_noop(monkeypatch, tm
     assert empty.env == {} and empty.pending == []
 
 
+def test_actuate_forces_a_nonempty_prefix_and_sanitizes_keys(monkeypatch, tmp_path):
+    """A blank prefix would let a CANDIDATE-controlled open key name arbitrary env vars
+    (LD_PRELOAD/PATH) — and applied env layers AFTER the cred scrub. The namespace is
+    mandatory (blank -> FACTORY_ + a note) and keys sanitize to [A-Z0-9_]."""
+    monkeypatch.setattr(config, "target_config",
+                        lambda: _target_cfg(tmp_path, exec_block={"spec_env_prefix": ""}))
+    applied = GenericAdapter().actuate(
+        {"open": {"ld_preload": "/tmp/x.so", "weird-key.name": "v"}}, str(tmp_path), "minimal")
+    assert applied.env == {"FACTORY_LD_PRELOAD": "/tmp/x.so", "FACTORY_WEIRD_KEY_NAME": "v"}
+    assert any("mandatory" in n for n in applied.notes)
+
+
 # --- panel_env ---------------------------------------------------------------------------
 def test_panel_env_maps_model_entry_via_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "target_config", lambda: _target_cfg(
@@ -107,6 +119,15 @@ def test_parse_session_dirs_uses_the_configured_regex(monkeypatch, tmp_path):
 def test_parse_session_dirs_defaults_to_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "target_config", lambda: _target_cfg(tmp_path))
     assert GenericAdapter().parse_session_dirs("anything at all") == []
+
+
+def test_parse_session_dirs_flattens_multi_group_patterns_to_strings(monkeypatch, tmp_path):
+    """findall returns tuples for 2+ groups; downstream does os.path.isdir(d) per entry,
+    so the result must always be a list of STRINGS (first group = the dir)."""
+    monkeypatch.setattr(config, "target_config", lambda: _target_cfg(
+        tmp_path, exec_block={"session_dir_regex": r"(\S*sess-\d+)/(run-\d+)"}))
+    dirs = GenericAdapter().parse_session_dirs("at /tmp/sess-1/run-2 done")
+    assert dirs == ["/tmp/sess-1"]
 
 
 # --- scrub_env ---------------------------------------------------------------------------
@@ -192,13 +213,55 @@ def test_run_times_out_and_reports_it(monkeypatch, tmp_path):
     assert res.duration_s < 20
 
 
-def test_run_missing_entry_raises_an_actionable_config_error(monkeypatch, tmp_path):
+def test_run_missing_entry_fails_soft_with_an_actionable_message(monkeypatch, tmp_path):
+    """NO raise: orchestrator/grade.py calls run_one in a plain loop (no except), so an
+    exception over one config gap would crash a whole grade pass. rc=127 + the fix in
+    stderr lands in the run's evidence instead."""
     root = tmp_path / "empty"
     root.mkdir()
     monkeypatch.setattr(config, "target_config", lambda: _target_cfg(root, entry="nope.py"))
-    with pytest.raises(FileNotFoundError) as e:
-        _run(GenericAdapter())
-    assert "target.entry" in str(e.value)
+    res = _run(GenericAdapter())
+    assert res.rc == 127 and not res.timed_out
+    assert "target.entry" in res.stderr
+
+
+def test_run_clive_py_overrides_the_entry_script_not_the_interpreter(monkeypatch, tmp_path,
+                                                                     stub_target):
+    """Seam contract (clive_invoke.build): clive_py is argv[1] — the entry SCRIPT path —
+    and the interpreter always comes from config. Treating it as the interpreter would
+    execute the entry script AS the interpreter (a broken invocation)."""
+    monkeypatch.setattr(config, "target_config", lambda: _target_cfg(stub_target))
+    other = tmp_path / "other_entry.py"
+    other.write_text("print('OTHER ENTRY')\n")
+    res = _run(GenericAdapter(), clive_py=str(other))
+    assert res.stdout.strip() == "OTHER ENTRY"
+    assert res.argv[0] == sys.executable and res.argv[1] == str(other)
+
+
+def test_run_accepts_a_string_args_template_by_shell_splitting(monkeypatch, stub_target):
+    """A YAML scalar `args: "run {goal}"` must not iterate character-by-character."""
+    monkeypatch.setattr(config, "target_config", lambda: _target_cfg(
+        stub_target, exec_block={"args": "--task {goal} --json"}))
+    res = _run(GenericAdapter(), goal="g1")
+    assert json.loads(res.stdout)["argv"] == ["--task", "g1", "--json"]
+
+
+# --- multi-clive scenarios are refused under a non-clive adapter -------------------------
+def test_run_one_refuses_multi_clive_scenarios_under_the_generic_adapter(monkeypatch,
+                                                                         tmp_path, store):
+    """runner/multi_clive.py drives clive's Rooms CLI directly and BYPASSES adapter.run();
+    under provider=generic it would spawn a bogus invocation and poll the full timeout
+    before recording a dishonest fail. run_one must refuse up front (run_capped maps the
+    raise to outcome 'error')."""
+    from factory.runner import runner as runner_mod
+
+    monkeypatch.setattr(config, "target_config", lambda: _target_cfg(tmp_path))
+    monkeypatch.setattr(runner_mod.paths, "run_evidence_dir",
+                        lambda run_id: str(tmp_path / "ev"))
+    with pytest.raises(RuntimeError) as e:
+        runner_mod.run_one("cand", "unused.yaml", {"id": "mc", "class": "multi-clive"},
+                           {"name": "m"}, store=store, provider=object())
+    assert "multi-clive" in str(e.value) and "generic" in str(e.value)
 
 
 # --- code-development seam defaults ----------------------------------------------------

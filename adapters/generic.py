@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import time
 from typing import Optional
@@ -41,12 +42,21 @@ class GenericAdapter(TargetAdapter):
         reporter's evidence trail shows exactly what a candidate asked for that the
         target never saw. `default_toolset` is a clive concept — unused here."""
         out = AppliedSpec()
-        prefix = str(_exec_cfg().get("spec_env_prefix", "FACTORY_"))
+        prefix = str(_exec_cfg().get("spec_env_prefix", "FACTORY_")).strip()
+        if not prefix:
+            # A blank prefix would let a CANDIDATE-controlled open key name arbitrary
+            # process env vars (LD_PRELOAD, PATH, …) — and applied env is layered AFTER
+            # the cred scrub, so that must never be reachable from a spec. The namespace
+            # is mandatory; misconfiguration falls back loudly, never opens the hole.
+            prefix = "FACTORY_"
+            out.notes.append("spec_env_prefix was empty — forced to FACTORY_ "
+                             "(a non-empty namespace is mandatory)")
         for key, value in (spec.get("open") or {}).items():
+            env_key = prefix + re.sub(r"[^A-Z0-9_]", "_", str(key).upper())
             if isinstance(value, bool):
-                out.env[prefix + key.upper()] = "1" if value else "0"
+                out.env[env_key] = "1" if value else "0"
             elif isinstance(value, (str, int, float)):
-                out.env[prefix + key.upper()] = str(value)
+                out.env[env_key] = str(value)
             else:
                 out.pending.append(key)
         if out.pending:
@@ -61,25 +71,39 @@ class GenericAdapter(TargetAdapter):
             model_entry: dict, max_tokens: int, timeout_s: int,
             cwd: Optional[str] = None, clive_root: Optional[str] = None,
             clive_py: Optional[str] = None) -> CliveResult:
-        """argv = [interpreter, <root>/<entry>, *flags, *args template]. `clive_root`
-        is the seam's name for "grade THIS candidate checkout" — it swaps the SOURCE
-        the entry runs from (the real-merge-grade path depends on it); `cwd` only
-        moves the working directory."""
+        """argv = [interpreter, <root>/<entry>, *flags, *args template]. The seam's
+        override args mirror clive_invoke.build exactly: `clive_root` swaps the SOURCE
+        the entry runs from (a candidate checkout being graded — the real-merge-grade
+        path depends on it), `clive_py` swaps the ENTRY SCRIPT path itself (argv[1],
+        never the interpreter), `cwd` only moves the working directory.
+
+        A missing/unset target.entry FAILS SOFT (rc=127 + the fix in stderr) instead of
+        raising: run_one callers exist without an except (orchestrator/grade.py's plain
+        loop), so an exception here would crash a whole grade pass over one config gap —
+        the failed run's evidence carries the actionable message instead."""
         cfg = config.target_config()
         ex = _exec_cfg()
         root = clive_root or config.clive_entry()[0]
         entry_rel = cfg.get("entry") or ""
-        entry_abs = os.path.join(root, entry_rel)
-        if not entry_rel or not os.path.exists(entry_abs):
-            raise FileNotFoundError(
-                f"generic adapter: target.entry not found at {entry_abs!r} — set "
-                f"target.entry (and optionally target.exec) in config.yaml to the "
-                f"target's entry point")
-        interp = clive_py or self.interpreter()
+        entry_abs = clive_py or (os.path.join(root, entry_rel) if entry_rel else "")
+        if not entry_abs or not os.path.exists(entry_abs):
+            return CliveResult(
+                rc=127, stdout="",
+                stderr=(f"generic adapter: target.entry not found at {entry_abs!r} — "
+                        f"set target.entry (and optionally target.exec) in config.yaml "
+                        f"to the target's entry point"),
+                duration_s=0.0, timed_out=False, argv=[], env_overrides={})
+        interp = self.interpreter()
 
         # {goal} substitutes anywhere in the template; a template with no placeholder
-        # gets the goal appended so it is never silently dropped.
-        template = [str(a) for a in (ex.get("args") or ["{goal}"])]
+        # gets the goal appended so it is never silently dropped. A YAML STRING template
+        # is shell-split ("run {goal}" -> ["run", "{goal}"]) — iterating it raw would
+        # explode into one-character argv entries.
+        args_cfg = ex.get("args")
+        if isinstance(args_cfg, str):
+            template = shlex.split(args_cfg)
+        else:
+            template = [str(a) for a in (args_cfg or ["{goal}"])]
         rendered = [a.replace("{goal}", goal) for a in template]
         if not any("{goal}" in a for a in template):
             rendered.append(goal)
@@ -122,9 +146,12 @@ class GenericAdapter(TargetAdapter):
         if not pattern:
             return []
         try:
-            return re.findall(pattern, text)
+            found = re.findall(pattern, text)
         except re.error:
             return []
+        # findall returns TUPLES when the pattern has 2+ groups; downstream does
+        # os.path.isdir(d) on each entry, so flatten to the first group (the dir).
+        return [m[0] if isinstance(m, tuple) else m for m in found]
 
     # -- env helpers ----------------------------------------------------------
     def scrub_env(self, env: dict[str, str]) -> None:
