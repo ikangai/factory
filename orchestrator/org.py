@@ -1,18 +1,25 @@
-"""The org resolver (design: docs/plans/2026-07-09-self-organizing-factory-design.md §2):
-pure store+config reads, no LLM. This is the CODE side of the authority line — the
-organizer (Phase 2) proposes a chart, but this module is what actually enforces it and
-what dispatch consults. A chartless mission (no active org_charts row) resolves every
-knob exactly as `resolve_setting`/`resolve_model` do today: task_params returns an empty
-OrgParams, and every per-task stage/tier lookup falls straight through — so Phase 1 lands
-with the existing suite passing UNCHANGED as its own regression proof.
+"""The org resolver + the organizer (design: docs/plans/2026-07-09-self-organizing-
+factory-design.md §2/§3): the resolver half (validate_chart/classify/task_params/
+stage_on/fit_rows/render_fit_table) is pure store+config reads, no LLM — the CODE side of
+the authority line that actually enforces what the organizer proposes and what dispatch
+consults. A chartless mission (no active org_charts row) resolves every knob exactly as
+`resolve_setting`/`resolve_model` do today: task_params returns an empty OrgParams, and
+every per-task stage/tier lookup falls straight through — so Phase 1 lands with the
+existing suite passing UNCHANGED as its own regression proof.
+
+Phase 2 adds the organizer itself (plan_org/maybe_plan_org): ONE isolated, FRONTIER-tier
+`claude -p` call (roles/organizer/prompt.md) that proposes a chart from the live backlog +
+bench + fit evidence; validate_chart (never the organizer's own claim) decides whether it
+applies. Transport/parse/validation failure never half-applies a chart — the pipeline
+falls through to today's global behavior, exactly as a chartless mission always has.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
-from ..common import config
+from ..common import config, killswitch
 
 # Every SETTINGS_SPEC key whose value is a *boolean* — the exact "which pipeline stages
 # run for this class of work" surface the design's authority line grants the organizer.
@@ -34,11 +41,18 @@ ROLE_TIER_KEYS = ("worker", "scope_judge", "decomposer", "reviewer", "investigat
 _CLASS_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")   # mirrors store._PROFILE_SLUG_RE
 
 
-def validate_chart(chart, *, max_profiles: int) -> tuple[bool, list[str]]:
+def validate_chart(chart, *, max_profiles: int, active_profiles=None) -> tuple[bool, list[str]]:
     """Enforce the authority line IN CODE (never trust the organizer's own claim of
     compliance). Returns (ok, reasons) — a chart with ANY violation is rejected WHOLESALE
     (fail-closed to current global behavior); `reasons` names every violation found (not
-    just the first) so a rejected-chart learning can cite the real problem."""
+    just the first) so a rejected-chart learning can cite the real problem.
+
+    `active_profiles` (Phase 2 integrator-review addition A): the CURRENT active
+    worker_profiles names, so a class's `profile` can be checked for self-containment
+    against the store, not just the chart's own bench — optional (defaults to none) so
+    every Phase-1 caller that validates a chart in isolation (no store handle) keeps
+    working unchanged; a chart whose classes only reference their OWN bench still
+    validates with no store context at all."""
     reasons: list[str] = []
     if not isinstance(chart, dict):
         return False, ["chart is not a dict"]
@@ -46,6 +60,36 @@ def validate_chart(chart, *, max_profiles: int) -> tuple[bool, list[str]]:
     classes = chart.get("classes")
     if not isinstance(classes, list) or not classes:
         return False, ["chart has no classes (at least one is required)"]
+
+    # addition A: bench entries are validated (name/model/description) — and their names
+    # collected — BEFORE the classes loop, so a class's `profile` can be checked for
+    # self-containment (below) against bench_names ∪ active_profiles in the SAME pass.
+    bench = chart.get("bench")
+    if bench is not None and not isinstance(bench, list):
+        reasons.append("bench must be a list")
+        bench = []
+    bench = bench or []
+    bench_names: set = set()
+    for b in bench:
+        if not isinstance(b, dict):
+            reasons.append("a bench entry is not a dict")
+            continue
+        bname = b.get("name")
+        if isinstance(bname, str) and _CLASS_SLUG_RE.match(bname):
+            bench_names.add(bname)
+        else:
+            reasons.append(f"bench entry name {bname!r} is not a valid slug "
+                           f"(^[a-z0-9][a-z0-9-]{{1,31}}$)")
+        bmodel = b.get("model")
+        if bmodel not in TIER_PALETTE:
+            reasons.append(f"bench entry {bname!r}: model {bmodel!r} is not in the "
+                           f"palette {TIER_PALETTE}")
+        if not isinstance(b.get("description"), str) or not b.get("description", "").strip():
+            reasons.append(f"bench entry {bname!r}: description must be a non-empty string")
+    if len(bench) > max_profiles:
+        reasons.append(f"bench size {len(bench)} exceeds max_profiles {max_profiles}")
+
+    known_profiles = bench_names | set(active_profiles or ())
 
     names: list[str] = []
     for c in classes:
@@ -86,22 +130,27 @@ def validate_chart(chart, *, max_profiles: int) -> tuple[bool, list[str]]:
                 reasons.append(f"class {name!r}: tier {tier!r} for role {role!r} is not "
                                f"in the palette {TIER_PALETTE}")
 
+        # addition A: the chart must be SELF-CONTAINED — a class naming a profile that
+        # neither an existing active worker_profiles row NOR the chart's own bench will
+        # supply is a dangling reference the apply step can't resolve. '' is always valid
+        # (the generalist fallback — never a named profile to look up).
+        profile = c.get("profile") or ""
+        if profile and profile not in known_profiles:
+            reasons.append(f"class {name!r}: profile {profile!r} names neither an existing "
+                           f"active profile nor a bench entry (the chart must be self-contained)")
+
     default_class = chart.get("default_class")
     if default_class not in names:
         reasons.append(f"default_class {default_class!r} does not name a defined class "
                        f"({names})")
 
-    bench = chart.get("bench")
-    if bench is not None and not isinstance(bench, list):
-        reasons.append("bench must be a list")
-        bench = []
-    bench = bench or []
-    if len(bench) > max_profiles:
-        reasons.append(f"bench size {len(bench)} exceeds max_profiles {max_profiles}")
-
     retire = chart.get("retire")
     if retire is not None and not isinstance(retire, list):
         reasons.append("retire must be a list")
+    elif retire:
+        for r in retire:                                       # addition A: every entry a string
+            if not isinstance(r, str):
+                reasons.append(f"retire entry {r!r} must be a string")
 
     return (len(reasons) == 0), reasons
 
@@ -202,6 +251,183 @@ def render_fit_table(rows: list[dict]) -> str:
             f"{r['done']:>5} {r['blocked']:>7} {(r['top_stage'] or '-'): <12} "
             f"{r['avg_tokens']:>8.0f}")
     return "\n".join(lines)
+
+
+# =============================================================================
+# The organizer (design §3, Phase 2): ONE isolated, frontier-tier claude_p call that
+# PROPOSES a chart; everything above (validate_chart etc.) is what actually enforces it.
+# =============================================================================
+
+# The two stage booleans that are structurally GLOBAL — dispatch (develop.py) only
+# constructs the scope-judge/decomposer CALLABLE when the shift-level knob already
+# resolved on, so a class can NARROW (turn off) but never CONJURE (turn on) either.
+_NARROW_ONLY_STAGES = ("scope_check", "auto_decompose")
+
+
+def _backlog_bullets(store, limit: int = 60) -> str:
+    """The {BACKLOG} seam: open tasks id/title/detail, capped — the organizer classifies
+    the WHOLE backlog at apply time (below), this is only what it gets to SEE while
+    designing the chart (a large backlog would blow the prompt budget for no benefit:
+    classes are reusable buckets, not a per-task decision)."""
+    tasks = store.list_tasks(status="open")[:limit]
+    if not tasks:
+        return "(empty — nothing to organize yet)"
+    lines = []
+    for t in tasks:
+        line = f"- {t['id']}: {t['title']}"
+        detail = " ".join((t.get("detail") or "").split())[:200]
+        if detail:
+            line += f" — {detail}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _bench_bullets(store) -> str:
+    """The {BENCH} seam: the CURRENT active bench, so the organizer knows what already
+    exists (and doesn't need to re-list it — the prompt tells it to list only new/changed
+    profiles)."""
+    profs = store.list_profiles(active_only=True)
+    if not profs:
+        return "(no active profiles yet — generalist only)"
+    return "\n".join(
+        f"- {p['name']} [{p.get('model') or 'frontier'}] — {(p.get('description') or '')[:80]}"
+        for p in profs)
+
+
+def _bounds_text(max_profiles: int) -> str:
+    """The {BOUNDS} seam (Phase-1 integrator review, addition B): the authority line,
+    stated verbatim-clear enough that the model never has to guess where it is. Every
+    fact here is asserted literally by tests/test_organizer.py — this text is read by an
+    LLM, not executed, so accuracy of WORDING is the whole point."""
+    both_ways = sorted(ORG_BOOL_KEYS - set(_NARROW_ONLY_STAGES))
+    narrow_only = ", ".join(sorted(_NARROW_ONLY_STAGES))
+    both_ways_s = ", ".join(both_ways)
+    all_stages = ", ".join(sorted(ORG_BOOL_KEYS))
+    tiers_s = ", ".join(t or "''" for t in TIER_PALETTE)
+    return (
+        f"- Controllable stage booleans (per class, in `stages`): {all_stages}.\n"
+        f"  - `{narrow_only}` can only be NARROWED per class (turned OFF where the "
+        f"shift-level knob is on) — they can NEVER be turned on when the shift-level knob "
+        f"is off, because the judge/decomposer callable simply won't exist to run.\n"
+        f"  - `{both_ways_s}` work BOTH ways — a class may force any of these on or off, "
+        f"independent of the shift-level default.\n"
+        f"- Tiers (per class, in `tiers`, for roles worker/scope_judge/decomposer/"
+        f"reviewer/investigator): the palette is {tiers_s} — '' and 'frontier' are "
+        f"SYNONYMS (both mean the account's default, most capable model).\n"
+        f"- Bench cap: at most {max_profiles} active profiles total (`max_profiles`) — "
+        f"retire stale ones to make room; `generalist` cannot be retired.\n"
+        f"- PERMANENTLY OUT OF REACH, no matter what: STOP/mode, every brake/budget "
+        f"(enforce_shift_budget, loop_*, push_approval, graduation_retest, …), every "
+        f"capacity INT (max_parallel, max_tasks_per_shift, refill_threshold, and "
+        f"max_profiles itself), frozen paths, the sandbox/toolset boundary, and the human "
+        f"promotion gate. A chart that tries to reach any of these is REJECTED WHOLESALE — "
+        f"nothing in it applies, not even the parts that were fine.")
+
+
+def build_organizer_prompt(store, *, mission: Optional[dict], max_profiles: int,
+                           fit_text: Optional[str] = None) -> str:
+    """Fill roles/organizer/prompt.md's seams from the live store. `fit_text` may be
+    passed in (plan_org computes it once, to both prompt AND store as `evidence`) or left
+    None to resolve it here."""
+    from ..reporting import factory_memory
+    from ..roles.common import _load_prompt
+    fit_text = fit_text if fit_text is not None else render_fit_table(fit_rows(store))
+    mission_text = ((mission or {}).get("statement") or "").strip()
+    return (_load_prompt("organizer")
+            .replace("{MISSION}", mission_text or "(no active mission — design a standing chart)")
+            .replace("{BACKLOG}", _backlog_bullets(store))
+            .replace("{BENCH}", _bench_bullets(store))
+            .replace("{FIT}", fit_text)
+            .replace("{MEMORY}", factory_memory.memory_card(store, "organizer"))
+            .replace("{BOUNDS}", _bounds_text(max_profiles)))
+
+
+def plan_org(store, *, force: bool = False, shift_id: Optional[int] = None,
+            claude_fn: Optional[Callable] = None) -> Optional[dict]:
+    """Run the organizer and (on a valid, VALIDATED reply) apply its chart. Returns the
+    applied chart dict on success, else None (nothing changed — the pipeline falls
+    through to today's global behavior, exactly as a chartless mission always has).
+
+    Brakes (every one a MUST, mirroring the investigator's posture):
+    `killswitch.is_halted()` is checked FIRST — STOP vetoes even ATTEMPTING the frontier
+    call. `force=False` (the default; `factory org plan`'s posture) refuses outright — no
+    call, no ledger row — when the mission already has an active chart (`factory org
+    replan` passes force=True and always supersedes). A transport/parse failure records a
+    factory learning and changes NO chart row. A VALIDATION failure stores the chart with
+    status='rejected' (audit trail) plus a learning, but never applies it. Only a chart
+    that parses AND validates is applied — atomically, in the design's order: supersede
+    the mission's prior active chart, insert the new one, upsert the bench, then classify
+    + assign every OPEN task. Spend is ledgered notes='organizer' regardless of outcome
+    (a failed/rejected plan still spent real tokens) — WITH `shift_id` when called from
+    the shift-start hook, WITHOUT it for a bare CLI invocation (None is the ledger's own
+    "no shift" convention, same as `distill_learnings`)."""
+    if killswitch.is_halted():                  # STOP vetoes even attempting the frontier call
+        return None
+    mission = store.active_mission()
+    mission_id = mission["id"] if mission else None
+    if not force and store.get_active_org_chart(mission_id) is not None:
+        return None                              # already has an active chart — replan to force
+
+    if claude_fn is None:                        # deferred import → tests monkeypatch claude_p
+        from ..roles.common import claude_p as claude_fn
+    from ..reporting import factory_memory, worker_admin
+    from ..roles.common import _parse_obj
+
+    max_profiles = int(config.resolve_setting(
+        store, "super_worker.max_profiles", worker_admin.max_profiles())[0])
+    fit_text = render_fit_table(fit_rows(store))
+    prompt = build_organizer_prompt(store, mission=mission, max_profiles=max_profiles,
+                                    fit_text=fit_text)
+    model = config.resolve_model("")             # the FRONTIER tier — org design is judgment
+    text, tokens, cost = claude_fn(prompt, model=model)
+    store.add_budget("organizer", int(tokens or 0), float(cost or 0.0),
+                     notes="organizer", shift_id=shift_id)
+
+    chart = _parse_obj(text or "")               # strip fences defensively (belt + suspenders —
+    if not isinstance(chart, dict):               # the prompt asks for none, but never trust it)
+        factory_memory.record_learning(
+            store, "factory",
+            "the organizer returned unparseable JSON — no chart change; the pipeline falls "
+            "through to today's global behavior", scope="organizer", shift_id=shift_id)
+        return None
+
+    rationale = str(chart.pop("rationale", "") or "")[:2000]
+    active_profiles = {p["name"] for p in store.list_profiles(active_only=True)}
+    ok, reasons = validate_chart(chart, max_profiles=max_profiles,
+                                 active_profiles=active_profiles)
+    if not ok:
+        store.add_org_chart(mission_id, chart, rationale=rationale, evidence=fit_text,
+                            status="rejected", created_by="organizer")
+        factory_memory.record_learning(
+            store, "factory",
+            f"an organizer chart FAILED validation and was rejected — {'; '.join(reasons)}"[:1000],
+            scope="organizer", shift_id=shift_id)
+        return None
+
+    # Apply ATOMICALLY, in the design's order: supersede -> chart insert -> bench ->
+    # classify+assign. All main-thread store writes (Binding rule) — plan_org is only
+    # ever called from the CLI or the shift-start hook, never from a worker thread.
+    store.supersede_org_charts(mission_id)
+    store.add_org_chart(mission_id, chart, rationale=rationale, evidence=fit_text,
+                        status="active", created_by="organizer")
+    for b in chart.get("bench") or []:
+        if not isinstance(b, dict):
+            continue
+        store.add_profile(b.get("name"), description=b.get("description") or "",
+                          model=b.get("model") or "", overlay=b.get("overlay") or "",
+                          created_by="organizer", replace=True)
+    for name in chart.get("retire") or []:
+        if isinstance(name, str) and name and name != "generalist":  # unretireable fail-open floor
+            store.retire_profile(name)
+
+    classes_by_name = {c.get("name"): c for c in chart.get("classes") or [] if isinstance(c, dict)}
+    for t in store.list_tasks(status="open"):
+        cls_name = classify(chart, t)
+        store.set_task_org_class(t["id"], cls_name)
+        profile = (classes_by_name.get(cls_name) or {}).get("profile") or ""
+        store.set_task_profile(t["id"], profile)
+
+    return chart
 
 
 def cmd_org(store, action: str) -> None:
