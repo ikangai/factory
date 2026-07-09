@@ -92,6 +92,9 @@ class Blackboard:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN est_tokens INTEGER NOT NULL DEFAULT 0")
         if cols and "profile" not in cols:             # worker-profile assignment (Phase 5)
             self.conn.execute("ALTER TABLE tasks ADD COLUMN profile TEXT NOT NULL DEFAULT ''")
+        if cols and "org_class" not in cols:           # org-chart class assignment (self-organizing
+            self.conn.execute(                          # factory, Task 1.1) — '' = unclassified/no chart
+                "ALTER TABLE tasks ADD COLUMN org_class TEXT NOT NULL DEFAULT ''")
         if cols:                                        # index milestone_id AFTER it's guaranteed to exist
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
         # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
@@ -647,6 +650,99 @@ class Blackboard:
             "FROM budget_ledger b LEFT JOIN tasks t ON t.id = substr(b.role_or_run,11) "
             "WHERE b.role_or_run LIKE 'developer:%' AND b.profile <> '' "
             "GROUP BY b.profile, task_id")
+
+    # -- org charts: per-mission routing devised by the organizer -----------
+    # (design: docs/plans/2026-07-09-self-organizing-factory-design.md §1/§4)
+    def add_org_chart(self, mission_id: Optional[int], chart: dict, *, rationale: str = "",
+                      evidence: str = "", status: str = "active",
+                      created_by: str = "organizer") -> int:
+        """Insert a new chart version for `mission_id` (None = a standing chart). version =
+        1 + the highest existing version for THIS mission (scoped — a replan of mission A
+        never bumps mission B's version). `chart_json IS ?` (not `=`) so the scoping is
+        correct whether mission_id is an int or NULL — SQLite's IS treats NULL as a normal
+        comparable value, unlike =, which never matches NULL via a bound parameter."""
+        row = self._one(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM org_charts WHERE mission_id IS ?",
+            (mission_id,))
+        version = int((row or {}).get("v") or 0) + 1
+        cur = self._exec(
+            "INSERT INTO org_charts(mission_id, version, status, chart_json, rationale, "
+            "evidence, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (mission_id, version, status, json.dumps(chart), rationale, evidence,
+             created_by, now_iso()))
+        return cur.lastrowid
+
+    def get_active_org_chart(self, mission_id: Optional[int] = None) -> Optional[dict]:
+        """The active chart for `mission_id`, or — when mission_id is None — the latest
+        active chart overall (any mission). Never returns a superseded/rejected row (fail-
+        closed: the caller's fallback is today's global resolve_setting behavior). The
+        parsed chart rides out under "chart" (chart_json stays too, for audit/debug)."""
+        if mission_id is not None:
+            row = self._one(
+                "SELECT * FROM org_charts WHERE mission_id IS ? AND status = 'active' "
+                "ORDER BY version DESC, id DESC LIMIT 1", (mission_id,))
+        else:
+            row = self._one(
+                "SELECT * FROM org_charts WHERE status = 'active' "
+                "ORDER BY id DESC LIMIT 1")
+        if row is None:
+            return None
+        try:
+            row["chart"] = json.loads(row.get("chart_json") or "{}")
+        except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty chart (fail-closed)
+            row["chart"] = {}
+        return row
+
+    def supersede_org_charts(self, mission_id: Optional[int]) -> None:
+        """Flip every currently-active chart for `mission_id` to 'superseded' (a replan's
+        first step, per the design's apply order: supersede -> insert -> bench -> classify)."""
+        self._exec(
+            "UPDATE org_charts SET status = 'superseded' WHERE status = 'active' "
+            "AND mission_id IS ?", (mission_id,))
+
+    def set_task_org_class(self, id: str, org_class: str) -> None:
+        """Assign a task's org-chart class ('' = unclassified — the classify-on-the-fly
+        fallback in orchestrator/org.py handles this, not a schema default meaning)."""
+        self._exec("UPDATE tasks SET org_class = ?, updated_at = ? WHERE id = ?",
+                   (org_class, now_iso(), id))
+
+    def add_routing_outcome(self, task_id: str, *, shift_id: Optional[int], org_class: str,
+                            profile: str, tier: str, outcome: str, stage: str = "",
+                            tokens: int = 0) -> int:
+        """One row per dispatched task at close-out (design §4) — the fit table's raw
+        material. `tier` is the ALIAS the task actually ran at (not the resolved model id),
+        so fit_rows aggregates on the same axis the organizer reasons about."""
+        cur = self._exec(
+            "INSERT INTO routing_outcomes(task_id, shift_id, org_class, profile, tier, "
+            "outcome, stage, tokens, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (task_id, shift_id, org_class, profile, tier, outcome, stage, int(tokens),
+             now_iso()))
+        return cur.lastrowid
+
+    def fit_rows(self) -> list[dict]:
+        """Aggregate routing_outcomes by (org_class, tier): attempts, done, blocked, the
+        most common blocked-stage ("top_stage"), and average tokens. The mode (top_stage)
+        isn't a plain SQL GROUP BY aggregate, so it's computed in Python over one grouped
+        fetch — cheap at this table's scale (a shift's worth of dispatched tasks, not
+        millions of rows). Empty table -> []. This IS the organizer's {FIT} seam."""
+        rows = self._all("SELECT org_class, tier, outcome, stage, tokens FROM routing_outcomes")
+        groups: dict[tuple, list[dict]] = {}
+        for r in rows:
+            groups.setdefault((r["org_class"], r["tier"]), []).append(r)
+        out = []
+        for (cls, tier), items in sorted(groups.items()):
+            attempts = len(items)
+            done = sum(1 for i in items if i["outcome"] == "done")
+            blocked = sum(1 for i in items if i["outcome"] == "blocked")
+            stage_counts: dict[str, int] = {}
+            for i in items:
+                if i["outcome"] == "blocked" and i["stage"]:
+                    stage_counts[i["stage"]] = stage_counts.get(i["stage"], 0) + 1
+            top_stage = max(stage_counts, key=stage_counts.get) if stage_counts else ""
+            avg_tokens = sum(i["tokens"] for i in items) / attempts if attempts else 0
+            out.append({"org_class": cls, "tier": tier, "attempts": attempts, "done": done,
+                       "blocked": blocked, "top_stage": top_stage, "avg_tokens": avg_tokens})
+        return out
 
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:

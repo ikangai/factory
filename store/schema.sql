@@ -335,6 +335,46 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     created_at TEXT NOT NULL
 );
 
+-- The org chart artifact (self-organizing factory, design: docs/plans/2026-07-09-self-
+-- organizing-factory-design.md §1): a store-persisted, CODE-validated document a frontier
+-- organizer devises per mission, routing each task class to a stage/tier/profile. version
+-- bumps per replan of the SAME mission (add_org_chart computes 1 + max(version) for it);
+-- status active|superseded|rejected — a rejected chart is stored for the audit trail but
+-- NEVER returned by get_active_org_chart (fail-closed to current global behavior).
+-- mission_id NULL = a standing chart (not tied to one mission's lifecycle).
+CREATE TABLE IF NOT EXISTS org_charts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id  INTEGER,                    -- the mission this org serves (NULL = standing)
+    version     INTEGER NOT NULL DEFAULT 1, -- bumped per replan of the same mission
+    status      TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'superseded', 'rejected')),
+    chart_json  TEXT NOT NULL,              -- the validated chart document
+    rationale   TEXT NOT NULL DEFAULT '',   -- organizer's cited reasoning (incl. fit refs)
+    evidence    TEXT NOT NULL DEFAULT '',   -- the fit-table snapshot the organizer saw
+    created_by  TEXT NOT NULL DEFAULT 'organizer',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_org_charts_mission ON org_charts(mission_id, status);
+
+-- The evidence loop (design §4): one row per DISPATCHED task at close-out (done AND
+-- blocked — written on the MAIN thread next to the existing task_evidence write), keyed
+-- by the class/tier the org chart routed it to. fit_rows() aggregates class x tier into the
+-- organizer's {FIT} seam — the record the operator's own right-sizing discipline demands
+-- (evidence > judgment) applied to model routing itself.
+CREATE TABLE IF NOT EXISTS routing_outcomes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,
+    shift_id   INTEGER,
+    org_class  TEXT NOT NULL DEFAULT '',
+    profile    TEXT NOT NULL DEFAULT '',
+    tier       TEXT NOT NULL DEFAULT '',   -- tier ALIAS used (not the raw model id)
+    outcome    TEXT NOT NULL,              -- done | blocked
+    stage      TEXT NOT NULL DEFAULT '',   -- gate stage when blocked ('' when done)
+    tokens     INTEGER NOT NULL DEFAULT 0, -- ledgered spend for the attempt
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routing_outcomes_class_tier ON routing_outcomes(org_class, tier);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume
