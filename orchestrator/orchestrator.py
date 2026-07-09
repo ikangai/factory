@@ -2066,6 +2066,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     wk.add_argument("--description", default="", help="capabilities (for the conductor + board)")
     wk.add_argument("--overlay", default="", help="persona/emphasis block injected at {PROFILE}")
     wk.add_argument("--model", default="", help="tier alias: frontier|standard|fast ('' = frontier)")
+    og = sub.add_parser("org")              # the org chart: per-mission routing (Phase 1: read-only)
+    og.add_argument("action", choices=["show", "fit"],
+                    help="show = the active chart's classes/bench/rationale; "
+                         "fit = the fit table (routing outcomes by class x tier); "
+                         "plan/replan arrive in Phase 2 (the organizer)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -2210,6 +2215,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "worker":
             cmd_worker(store, a.action, rest=a.rest, description=a.description,
                        overlay=a.overlay, model=a.model)
+        elif a.cmd == "org":
+            from .org import cmd_org
+            cmd_org(store, a.action)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

@@ -198,3 +198,41 @@ def test_render_fit_table_renders_rows():
             "blocked": 1, "top_stage": "tests", "avg_tokens": 321.0}]
     text = org.render_fit_table(rows)
     assert "mechanical-fix" in text and "fast" in text and "5" in text and "tests" in text
+
+
+# -- cmd_org: the read-only CLI surface (Task 1.4; plan/replan arrive in Phase 2) --------
+def test_cmd_org_show_with_no_active_chart(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        org.cmd_org(s, "show")
+        out = capsys.readouterr().out
+        assert "no active org chart" in out.lower()
+
+
+def test_cmd_org_show_renders_classes_bench_and_rationale(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        m = s.set_mission("ship it")
+        s.add_org_chart(m, VALID_CHART, rationale="cited fit rows for worker tier")
+        org.cmd_org(s, "show")
+        out = capsys.readouterr().out
+        assert "mechanical-fix" in out and "risky-core" in out and "standard-dev" in out
+        assert "python-dev" in out and "core-surgeon" in out          # bench
+        assert "cited fit rows for worker tier" in out                # rationale
+        assert "default_class" in out.lower() and "standard-dev" in out
+
+
+def test_cmd_org_fit_renders_the_table(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        sh = s.start_shift(token_budget=1)
+        s.add_task("t1", "x", source="issue")
+        s.add_routing_outcome("t1", shift_id=sh, org_class="mechanical-fix", profile="python-dev",
+                              tier="fast", outcome="done", tokens=100)
+        org.cmd_org(s, "fit")
+        out = capsys.readouterr().out
+        assert "mechanical-fix" in out and "fast" in out
+
+
+def test_cmd_org_fit_with_no_evidence(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        org.cmd_org(s, "fit")
+        out = capsys.readouterr().out
+        assert "no evidence" in out.lower()

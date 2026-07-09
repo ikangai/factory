@@ -130,15 +130,24 @@ class OrgParams:
     org_class: str = ""
 
 
+def _active_row(store) -> Optional[dict]:
+    """The raw active org_charts row (chart parsed under "chart") for the CURRENT mission,
+    falling back to the latest active STANDING chart (mission_id NULL) when there's no
+    active mission — shared by get_active_chart (dispatch) and cmd_org show (the CLI,
+    which also wants version/rationale/created_by, not just the chart body)."""
+    m = store.active_mission()
+    row = store.get_active_org_chart(m["id"]) if m else None
+    if row is None:
+        row = store.get_active_org_chart(None)
+    return row
+
+
 def get_active_chart(store) -> Optional[dict]:
     """The parsed chart document (not the store row) for the CURRENT mission — falls back
     to the latest active STANDING chart (mission_id NULL) when there's no active mission,
     so a mission-less dev/test run can still exercise a hand-authored chart. None when
     nothing is active (the chartless-behavior path)."""
-    m = store.active_mission()
-    row = store.get_active_org_chart(m["id"]) if m else None
-    if row is None:
-        row = store.get_active_org_chart(None)
+    row = _active_row(store)
     return row["chart"] if row else None
 
 
@@ -193,3 +202,36 @@ def render_fit_table(rows: list[dict]) -> str:
             f"{r['done']:>5} {r['blocked']:>7} {(r['top_stage'] or '-'): <12} "
             f"{r['avg_tokens']:>8.0f}")
     return "\n".join(lines)
+
+
+def cmd_org(store, action: str) -> None:
+    """The org chart's read-only CLI surface (Task 1.4):
+      factory org show   # the active chart's classes/bench/rationale, or "no active org chart"
+      factory org fit    # the rendered fit table (routing_outcomes aggregated by class x tier)
+    plan/replan arrive in Phase 2 (the organizer) — YAGNI for now; argparse's choices stay
+    exactly {show, fit} until then."""
+    if action == "show":
+        row = _active_row(store)
+        if row is None:
+            print("[org] no active org chart")
+            return
+        chart = row["chart"]
+        print(f"[org] chart v{row['version']} (mission {row['mission_id']}, "
+              f"{row['created_by']}, default_class={chart.get('default_class', '')})")
+        if row.get("rationale"):
+            print(f"  rationale: {row['rationale']}")
+        for c in chart.get("classes") or []:
+            stages = ", ".join(f"{k}={v}" for k, v in (c.get("stages") or {}).items()) or "(none)"
+            tiers = ", ".join(f"{k}={v or 'frontier'}" for k, v in (c.get("tiers") or {}).items()) or "(none)"
+            print(f"  class {c.get('name')}: profile={c.get('profile') or '(none)'} "
+                  f"stages=[{stages}] tiers=[{tiers}]")
+        bench = chart.get("bench") or []
+        if bench:
+            print("  bench: " + ", ".join(b.get("name", "?") for b in bench))
+        retire = chart.get("retire") or []
+        if retire:
+            print("  retire: " + ", ".join(retire))
+    elif action == "fit":
+        print(render_fit_table(fit_rows(store)))
+    else:
+        print(f"[org] unknown action {action!r} — use show|fit")
