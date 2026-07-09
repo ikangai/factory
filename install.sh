@@ -75,6 +75,15 @@ if [ "$CMD" = "list" ]; then
     exec python3 "$FIRST_CONFIGURE" --list --instances-root "$ROOT"
 fi
 
+# A target repo whose basename is literally `factory` would make TARGET_DIR collide with the
+# factory clone itself (both <root>/<name>/factory) — the sibling layout cannot represent it.
+if [ "$TARGET_BASENAME" = "factory" ]; then
+    echo "ERROR: a target repo named 'factory' collides with the factory clone dir itself" >&2
+    echo "  (the layout is <root>/<name>/{factory,<target-basename>}) — rename the target" >&2
+    echo "  repo/dir and re-run" >&2
+    exit 1
+fi
+
 if [ -z "$NAME" ]; then
     NAME="$TARGET_BASENAME"
 fi
@@ -116,6 +125,15 @@ if [ ! -d "$FACTORY_DIR/.git" ]; then
 else
     echo "  $FACTORY_DIR already cloned — fetching origin"
     git -C "$FACTORY_DIR" fetch origin
+fi
+# Identity fallback for EVERY commit this script may make (the update-path merge below AND
+# the step-6 overlay commit): a fresh machine has no git identity, and "Please tell me who
+# you are" would abort mid-install. Env vars, not `git -c`, so one guard covers both call
+# sites bash-3.2-safely (macOS /bin/bash chokes on empty-array expansion under `set -u`);
+# a configured identity always wins because the fallback is only exported when none exists.
+if [ -z "$(git -C "$FACTORY_DIR" config user.email || true)" ]; then
+    export GIT_AUTHOR_NAME="factory installer" GIT_AUTHOR_EMAIL="installer@factory.local"
+    export GIT_COMMITTER_NAME="factory installer" GIT_COMMITTER_EMAIL="installer@factory.local"
 fi
 if git -C "$FACTORY_DIR" show-ref --verify --quiet "refs/heads/instance/$NAME"; then
     git -C "$FACTORY_DIR" checkout "instance/$NAME"
@@ -184,12 +202,9 @@ fi
 # --- 6. commit the patched config.yaml if changed --------------------------------------------
 echo "[6/10] committing config overlay ..."
 if [ -n "$(git -C "$FACTORY_DIR" status --porcelain -- config.yaml)" ]; then
-    GIT_ARGS=(-C "$FACTORY_DIR")
-    if [ -z "$(git -C "$FACTORY_DIR" config user.email || true)" ]; then
-        GIT_ARGS+=(-c user.name="factory installer" -c user.email="installer@factory.local")
-    fi
-    git "${GIT_ARGS[@]}" add config.yaml
-    git "${GIT_ARGS[@]}" commit -m "instance/$NAME: configure target=$TARGET_BASENAME provider=$PROVIDER port=$ASSIGNED_PORT"
+    # Identity for this commit is guaranteed by the step-2 env fallback.
+    git -C "$FACTORY_DIR" add config.yaml
+    git -C "$FACTORY_DIR" commit -m "instance/$NAME: configure target=$TARGET_BASENAME provider=$PROVIDER port=$ASSIGNED_PORT"
 else
     echo "  config.yaml already matches — nothing to commit"
 fi
@@ -222,7 +237,7 @@ if [ -w "$HOME" ]; then
     esac
 else
     echo "  WARNING: HOME ($HOME) is not writable — skipping launcher creation"
-    LAUNCHER="(skipped — HOME not writable)"
+    LAUNCHER=""
 fi
 
 # --- 9. smoke check ------------------------------------------------------------------------
@@ -233,6 +248,13 @@ echo "  bin/factory status: OK"
 # --- 10. summary -----------------------------------------------------------------------------
 echo "[10/10] done"
 FLEET_PORT=$((ASSIGNED_PORT + 1))
+# The uninstall line must only name the launcher when one was actually created.
+UNINSTALL="rm -rf \"$INSTANCE_DIR\""
+if [ -n "$LAUNCHER" ]; then
+    UNINSTALL="$UNINSTALL \"$LAUNCHER\""
+else
+    LAUNCHER="(skipped — HOME not writable)"
+fi
 cat <<SUMMARY
 
 ============================================================
@@ -249,7 +271,7 @@ cat <<SUMMARY
    - gh auth login    (GitHub auth for graduation pushes)
    - mode stays 'shift' — flip to 'auto' consciously when ready
 
- Uninstall: rm -rf "$INSTANCE_DIR" "$LAUNCHER"
+ Uninstall: $UNINSTALL
  List all instances: install.sh list --root "$ROOT"
  Hardened unattended deploys: docs/runbooks/factory-user-deployment.md
 ============================================================

@@ -87,6 +87,11 @@ pairs `(p, p+1)` from 8787 upward in steps of 10, skipping anything a sibling in
 claims or that fails a real bind test on 127.0.0.1. A re-run never reassigns a live instance's
 port — if the current value already differs from every sibling's, it's kept unchanged.
 
+The sibling scan only sees instances under `--root`. A process OUTSIDE it holding the assigned
+port (e.g. an operator's dev-checkout board on 8787) isn't detected on the keep path — the
+board then fails loudly at startup (`EADDRINUSE`); re-run the installer with an explicit
+`--port` to move the instance.
+
 The **fleet viz port is a convention, not a config field**: `dashboard.port + 1`, passed
 explicitly (`viz --serve --port <port+1>`). `install.sh list` (and `configure_instance.py
 --list`) print both.

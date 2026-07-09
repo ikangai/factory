@@ -150,6 +150,61 @@ def test_rerun_is_idempotent_and_keeps_the_port(install_env):
     assert after_port == before_port
 
 
+def test_target_named_factory_is_rejected(tmp_path_factory):
+    """A target whose basename is literally `factory` would make the sibling target dir
+    collide with the factory clone itself — the guard must fire BEFORE anything is cloned."""
+    home = tmp_path_factory.mktemp("home-collide")
+    root = tmp_path_factory.mktemp("root-collide") / "factories"
+    r = _run_install([
+        "--factory-repo", paths.FACTORY_ROOT,
+        "--target", "/somewhere/factory",
+        "--root", str(root),
+        "--skip-deps",
+    ], home)
+    assert r.returncode != 0
+    assert "collides" in (r.stdout + r.stderr)
+    assert not root.exists()  # guard fired before mkdir/clone
+
+
+def test_update_merge_works_without_git_identity(tmp_path_factory):
+    """The update path makes a real MERGE commit when origin/<branch> moved since install —
+    on a fresh machine (no git identity) that must use the installer's identity fallback, not
+    die on 'Please tell me who you are'. A scratch clone of this repo stands in for origin so
+    the test can move the upstream branch."""
+    home = tmp_path_factory.mktemp("home-upd")
+    root = tmp_path_factory.mktemp("root-upd") / "factories"
+    branch = _current_branch()
+    ident = {**os.environ, "GIT_AUTHOR_NAME": "tester", "GIT_AUTHOR_EMAIL": "t@example.com",
+             "GIT_COMMITTER_NAME": "tester", "GIT_COMMITTER_EMAIL": "t@example.com"}
+
+    scratch = tmp_path_factory.mktemp("scratch") / "factory-src"
+    subprocess.run(["git", "clone", "-q", "--branch", branch, paths.FACTORY_ROOT, str(scratch)],
+                   check=True, timeout=120)
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets3"), "cog")
+
+    args = ["--factory-repo", str(scratch), "--branch", branch,
+            "--target", str(target), "--root", str(root), "--skip-deps"]
+    r1 = _run_install(args, home)
+    assert r1.returncode == 0, f"install failed\nSTDOUT:\n{r1.stdout}\nSTDERR:\n{r1.stderr}"
+
+    # Move the upstream branch, then re-run: instance/cog (overlay commit) + moved origin
+    # diverge, so the update is a true merge commit, not a fast-forward.
+    subprocess.run(["git", "-C", str(scratch), "commit", "--allow-empty", "-q",
+                    "-m", "upstream moved"], check=True, timeout=10, env=ident)
+    r2 = _run_install(args, home)
+    assert r2.returncode == 0, f"update failed\nSTDOUT:\n{r2.stdout}\nSTDERR:\n{r2.stderr}"
+
+    clone = root / "cog" / "factory"
+    log = subprocess.run(["git", "-C", str(clone), "log", "--oneline", "-3"],
+                         capture_output=True, text=True, timeout=10, check=True).stdout
+    assert "upstream moved" in log  # the moved upstream really merged into instance/cog
+    # HEAD is the merge commit; with HOME empty of any .gitconfig its author must be the
+    # installer's FALLBACK identity — proving the fallback fired, not git auto-detection.
+    author = subprocess.run(["git", "-C", str(clone), "log", "-1", "--format=%an"],
+                            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    assert author == "factory installer"
+
+
 def test_second_instance_gets_a_non_colliding_port(install_env, tmp_path_factory):
     target2 = _make_synthetic_target(tmp_path_factory.mktemp("targets2"), "gadget")
 
