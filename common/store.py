@@ -693,6 +693,27 @@ class Blackboard:
             row["chart"] = {}
         return row
 
+    def latest_org_chart(self, mission_id: Optional[int] = None) -> Optional[dict]:
+        """The most RECENT org_charts row for `mission_id`, of ANY status (active,
+        superseded, or rejected) — unlike get_active_org_chart, which only ever returns an
+        active row. Board/audit surfacing (impl plan Task 3.1): a REJECTED replan attempt
+        must stay visible even though it never applied and the (possibly older, possibly
+        absent) active chart is unaffected by it. mission_id=None = latest across all
+        missions (mirrors get_active_org_chart's own None convention)."""
+        if mission_id is not None:
+            row = self._one(
+                "SELECT * FROM org_charts WHERE mission_id IS ? "
+                "ORDER BY version DESC, id DESC LIMIT 1", (mission_id,))
+        else:
+            row = self._one("SELECT * FROM org_charts ORDER BY id DESC LIMIT 1")
+        if row is None:
+            return None
+        try:
+            row["chart"] = json.loads(row.get("chart_json") or "{}")
+        except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty chart (fail-closed)
+            row["chart"] = {}
+        return row
+
     def supersede_org_charts(self, mission_id: Optional[int]) -> None:
         """Flip every currently-active chart for `mission_id` to 'superseded' (a replan's
         first step, per the design's apply order: supersede -> insert -> bench -> classify)."""
