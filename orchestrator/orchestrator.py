@@ -1758,8 +1758,18 @@ def cmd_issue(action: str, *, title: Optional[str] = None, body: str = "",
     return url or None
 
 
+def fleet_viz_default_port(cfg: dict | None = None) -> int:
+    """`viz --serve`'s port when --port is omitted: dashboard.port+1 from config.yaml
+    (8787+1 = the historical 8788 default). DERIVED, not remembered: multi-instance
+    installs assign each instance its own dashboard.port (scripts/configure_instance.py),
+    and deriving the fleet port from it keeps instances collision-free by construction
+    instead of relying on every operator to retype the +1 convention."""
+    cfg = cfg if cfg is not None else config.load_config()
+    return int(((cfg.get("dashboard") or {}).get("port")) or 8787) + 1
+
+
 def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False,
-            port: int = 8788, selfcheck: bool = False):
+            port: int | None = None, selfcheck: bool = False):
     """The fleet visualization of the (super) worker instances + activities. `--serve`:
     a LIVE 'mission control' — an animated conductor-loop that shows the active phase, the
     live workers, and the mission's progress, auto-updating while a run is in flight.
@@ -1773,7 +1783,8 @@ def cmd_viz(store: Blackboard, *, open_browser: bool = True, serve: bool = False
         return report
     if serve:
         from ..dashboard import fleet_server
-        return fleet_server.serve(port=port, open_browser=open_browser)
+        return fleet_server.serve(port=port if port is not None else fleet_viz_default_port(),
+                                  open_browser=open_browser)
     from ..reporting import fleet_viz
     from ..common.store import now_iso
     path = fleet_viz.generate_fleet_html(store, generated_at=now_iso())
@@ -2020,7 +2031,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     iss.add_argument("--label", default="auto-filed")
     viz = sub.add_parser("viz")             # HTML visualization of the fleet + activities
     viz.add_argument("--serve", action="store_true", help="live mission-control server (auto-updating)")
-    viz.add_argument("--port", type=int, default=8788, help="port for --serve (default 8788)")
+    viz.add_argument("--port", type=int, default=None,
+                     help="port for --serve (default: dashboard.port+1 from config.yaml, "
+                          "i.e. 8788 on a stock config — per-instance safe by construction)")
     viz.add_argument("--no-open", action="store_true", help="don't open the browser")
     viz.add_argument("--selfcheck", action="store_true",
                      help="deterministic dashboard gate: node --check the inline JS + "

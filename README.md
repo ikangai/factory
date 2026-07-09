@@ -59,6 +59,28 @@ factory/
 
 ## Install
 
+One command clones the factory + the target repo, installs deps, and configures a
+runnable instance end to end (the two remaining steps — `claude login`, `gh auth login`
+— are manual; credentials are never touched by an installer):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikangai/factory/main/install.sh | bash
+```
+
+Point it at a different target repo to install a FURTHER instance alongside the first —
+each instance gets its own clone, config, and dashboard port, none of them colliding:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ikangai/factory/main/install.sh | \
+  bash -s -- --target https://github.com/me/myrepo.git
+```
+
+Instances land under `~/factories/<name>/`; `install.sh list` enumerates every instance
+on the machine; the full runbook (flags, layout, update flow, uninstall) is
+docs/runbooks/multi-instance-install.md.
+
+Prefer to wire the factory into an already-cloned target yourself:
+
 ```bash
 pip install -r factory/requirements.txt --break-system-packages   # just pyyaml
 # clive's own runtime (anthropic/openai/libtmux/dotenv) must be importable, and
