@@ -31,6 +31,7 @@ PROVIDER="clive"
 BASE_BRANCH=""
 PORT="auto"
 SKIP_DEPS=false
+TARGET_DIR_NAME=""
 CMD="install"
 
 if [ "${1:-}" = "list" ]; then
@@ -41,6 +42,7 @@ fi
 while [ $# -gt 0 ]; do
     case "$1" in
         --target) TARGET="$2"; shift 2 ;;
+        --target-dir) TARGET_DIR_NAME="$2"; shift 2 ;;
         --name) NAME="$2"; shift 2 ;;
         --root) ROOT="$2"; shift 2 ;;
         --factory-repo) FACTORY_REPO="$2"; shift 2 ;;
@@ -53,12 +55,31 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Sanitize to [A-Za-z0-9._-] — a raw URL/path basename or an operator-typed --name/--target-dir
+# can carry characters that are unsafe in a directory or launcher-file name (spaces split the
+# launcher path; '..' escapes the instances root and hides the instance from `list`).
+sanitize() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
+}
+
 # Strip a trailing slash (a local-path target) before basename so "/tmp/x/" doesn't yield "".
 TARGET="${TARGET%/}"
-TARGET_BASENAME="$(basename "${TARGET%.git}")"
-# Sanitize to [A-Za-z0-9._-] — a raw URL/path basename can carry characters that are unsafe in
-# a directory or launcher-file name.
-TARGET_BASENAME="$(printf '%s' "$TARGET_BASENAME" | tr -c 'A-Za-z0-9._-' '-')"
+# The repo's own name (drives identity decisions: the clive base-branch default, the
+# adapter note) stays distinct from the sibling DIR name (which --target-dir may override).
+TARGET_REPO_NAME="$(sanitize "$(basename "${TARGET%.git}")")"
+TARGET_BASENAME="$TARGET_REPO_NAME"
+# --target-dir overrides the sibling dir name (e.g. for a target repo literally named
+# 'factory', which would otherwise collide with the factory clone dir).
+if [ -n "$TARGET_DIR_NAME" ]; then
+    TARGET_BASENAME="$(sanitize "$TARGET_DIR_NAME")"
+fi
+if [ -n "$NAME" ]; then
+    NAME="$(sanitize "$NAME")"
+    if [ -z "$NAME" ] || [ "$(printf '%s' "$NAME" | tr -d -- '-')" = "" ]; then
+        echo "ERROR: --name '$NAME' is empty after sanitizing to [A-Za-z0-9._-]" >&2
+        exit 2
+    fi
+fi
 
 if [ "$CMD" = "list" ]; then
     echo "== instances under $ROOT =="
@@ -75,12 +96,13 @@ if [ "$CMD" = "list" ]; then
     exec python3 "$FIRST_CONFIGURE" --list --instances-root "$ROOT"
 fi
 
-# A target repo whose basename is literally `factory` would make TARGET_DIR collide with the
-# factory clone itself (both <root>/<name>/factory) — the sibling layout cannot represent it.
+# A target sibling dir literally named `factory` would collide with the factory clone itself
+# (both <root>/<name>/factory) — the layout cannot represent it, but --target-dir renames the
+# clone dir without needing any control over the upstream repo's name.
 if [ "$TARGET_BASENAME" = "factory" ]; then
-    echo "ERROR: a target repo named 'factory' collides with the factory clone dir itself" >&2
-    echo "  (the layout is <root>/<name>/{factory,<target-basename>}) — rename the target" >&2
-    echo "  repo/dir and re-run" >&2
+    echo "ERROR: a target dir named 'factory' collides with the factory clone dir itself" >&2
+    echo "  (the layout is <root>/<name>/{factory,<target-dir>}) — re-run with" >&2
+    echo "  --target-dir <other-name> to clone the target under a different dir name" >&2
     exit 1
 fi
 
@@ -90,7 +112,8 @@ fi
 if [ -z "$BASE_BRANCH" ]; then
     # clive is the reference target (its factory-extraction work lives on this branch
     # upstream); any other target gets a fresh factory/base the installer owns end to end.
-    if [ "$TARGET_BASENAME" = "clive" ]; then
+    # Keyed on the repo's NAME, not the --target-dir override — it's an identity decision.
+    if [ "$TARGET_REPO_NAME" = "clive" ]; then
         BASE_BRANCH="chore/extract-factory"
     else
         BASE_BRANCH="factory/base"
@@ -127,19 +150,51 @@ else
     git -C "$FACTORY_DIR" fetch origin
 fi
 # Identity fallback for EVERY commit this script may make (the update-path merge below AND
-# the step-6 overlay commit): a fresh machine has no git identity, and "Please tell me who
-# you are" would abort mid-install. Env vars, not `git -c`, so one guard covers both call
-# sites bash-3.2-safely (macOS /bin/bash chokes on empty-array expansion under `set -u`);
-# a configured identity always wins because the fallback is only exported when none exists.
-if [ -z "$(git -C "$FACTORY_DIR" config user.email || true)" ]; then
+# the step-6 overlay commit): a partially-provisioned machine may lack either half of the
+# identity, and git dies on "empty ident name" when the OS can't derive one. Env vars, not
+# `git -c`, so one guard covers both call sites bash-3.2-safely (macOS /bin/bash chokes on
+# empty-array expansion under `set -u`); a fully configured identity always wins because
+# the fallback is only exported when a half is missing.
+if [ -z "$(git -C "$FACTORY_DIR" config user.email || true)" ] \
+        || [ -z "$(git -C "$FACTORY_DIR" config user.name || true)" ]; then
     export GIT_AUTHOR_NAME="factory installer" GIT_AUTHOR_EMAIL="installer@factory.local"
     export GIT_COMMITTER_NAME="factory installer" GIT_COMMITTER_EMAIL="installer@factory.local"
 fi
+RERUN=false
 if git -C "$FACTORY_DIR" show-ref --verify --quiet "refs/heads/instance/$NAME"; then
+    RERUN=true
     git -C "$FACTORY_DIR" checkout "instance/$NAME"
+    # A prior run that crashed between the step-5 config patch and the step-6 commit leaves
+    # config.yaml dirty, which makes git REFUSE the merge before any merge state exists.
+    # config.yaml is regenerated by step 5 anyway, so an uncommitted copy is safe to discard;
+    # any OTHER dirty tracked file is real local work and aborts loudly.
+    DIRTY="$(git -C "$FACTORY_DIR" status --porcelain --untracked-files=no)"
+    if [ -n "$DIRTY" ]; then
+        if [ -z "$(printf '%s\n' "$DIRTY" | grep -v ' config\.yaml$' || true)" ]; then
+            echo "  discarding an uncommitted config.yaml from an interrupted prior run (step 5 re-applies the overlay)"
+            git -C "$FACTORY_DIR" checkout -- config.yaml
+        else
+            echo "ERROR: $FACTORY_DIR has uncommitted changes beyond config.yaml — commit or stash them, then re-run:" >&2
+            printf '%s\n' "$DIRTY" >&2
+            exit 1
+        fi
+    fi
     if ! git -C "$FACTORY_DIR" merge "origin/$BRANCH" --no-edit; then
-        echo "ERROR: merge conflict updating instance/$NAME — resolve by hand in $FACTORY_DIR" >&2
-        exit 1
+        # The overlay commit and upstream both touch config.yaml, and git coalesces nearby
+        # hunks, so config.yaml conflicts are EXPECTED on updates. Resolution is mechanical:
+        # take upstream's version wholesale (--theirs = origin/$BRANCH in a merge) — step 5
+        # re-applies every instance value onto it right after. Anything else conflicting is
+        # real divergence and stays a loud manual stop.
+        CONFLICTS="$(git -C "$FACTORY_DIR" diff --name-only --diff-filter=U)"
+        if [ "$CONFLICTS" = "config.yaml" ]; then
+            echo "  config.yaml merge conflict auto-resolved: took origin/$BRANCH's version; the instance overlay re-applies in step 5"
+            git -C "$FACTORY_DIR" checkout --theirs config.yaml
+            git -C "$FACTORY_DIR" add config.yaml
+            git -C "$FACTORY_DIR" commit --no-edit
+        else
+            echo "ERROR: merge conflict updating instance/$NAME — resolve by hand in $FACTORY_DIR" >&2
+            exit 1
+        fi
     fi
 else
     git -C "$FACTORY_DIR" checkout -B "instance/$NAME" "origin/$BRANCH"
@@ -150,7 +205,9 @@ echo "[3/10] target clone + base branch '$BASE_BRANCH' ..."
 if [ ! -d "$TARGET_DIR/.git" ]; then
     echo "  cloning target <- $TARGET"
     git clone "$TARGET" "$TARGET_DIR"
-    if [ -n "$(git ls-remote --heads "$TARGET" "$BASE_BRANCH" 2>/dev/null)" ]; then
+    # The clone just fetched every ref, so branch existence is answered locally — no second
+    # round-trip to the remote.
+    if git -C "$TARGET_DIR" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
         git -C "$TARGET_DIR" checkout -B "$BASE_BRANCH" "origin/$BASE_BRANCH"
     else
         git -C "$TARGET_DIR" checkout -B "$BASE_BRANCH"
@@ -166,36 +223,64 @@ fi
 
 # --- 4. python deps ----------------------------------------------------------------------------
 echo "[4/10] python dependencies ..."
+pip_install() {
+    # user-install with the PEP-668 fallback (same idiom as the deploy kit's bootstrap)
+    python3 -m pip install --user -r "$1" \
+        || python3 -m pip install --user --break-system-packages -r "$1"
+}
 if [ "$SKIP_DEPS" = true ]; then
     echo "  --skip-deps set — skipping"
 else
-    python3 -m pip install --user -r "$FACTORY_DIR/requirements.txt" \
-        || python3 -m pip install --user --break-system-packages -r "$FACTORY_DIR/requirements.txt"
+    pip_install "$FACTORY_DIR/requirements.txt"
     if [ -f "$TARGET_DIR/requirements.txt" ]; then
-        python3 -m pip install --user -r "$TARGET_DIR/requirements.txt" \
-            || python3 -m pip install --user --break-system-packages -r "$TARGET_DIR/requirements.txt"
+        pip_install "$TARGET_DIR/requirements.txt"
     fi
+fi
+# Steps 5 (configure) and 7 (init) import yaml regardless of --skip-deps; fail with a named
+# dependency instead of a bare ModuleNotFoundError traceback mid-install.
+if ! python3 -c "import yaml" 2>/dev/null; then
+    echo "ERROR: python3 cannot import 'yaml' (pyyaml) — install it (python3 -m pip install --user pyyaml)" >&2
+    echo "  or re-run without --skip-deps" >&2
+    exit 1
 fi
 
 # --- 5. configure --------------------------------------------------------------------------
 echo "[5/10] configuring instance ..."
+# Fresh install vs update decides the auto-port semantics, and only THIS layer knows which
+# is which: fresh -> "auto" (probe with real bind tests), re-run -> "keep" (never churn a
+# port a live board may hold). An explicit --port passes through either way.
+EFFECTIVE_PORT="$PORT"
+if [ "$PORT" = "auto" ] && [ "$RERUN" = true ]; then
+    EFFECTIVE_PORT="keep"
+fi
 PORT_LINE="$(python3 "$FACTORY_DIR/scripts/configure_instance.py" "$FACTORY_DIR/config.yaml" \
     --target-root "../$TARGET_BASENAME" \
     --provider "$PROVIDER" \
     --base-branch "$BASE_BRANCH" \
-    --port "$PORT" \
+    --port "$EFFECTIVE_PORT" \
     --instances-root "$ROOT")"
 case "$PORT_LINE" in
     PORT=*) ASSIGNED_PORT="${PORT_LINE#PORT=}" ;;
     *) echo "ERROR: configure_instance.py did not print a PORT= line (got: $PORT_LINE)" >&2
        exit 1 ;;
 esac
+# The eval-loop honesty note must fire on the DEFAULT path too: a non-clive target under the
+# default clive provider is exactly the case where the scenario-eval loop will predictably
+# fail (CliveAdapter expects clive's layout), and gating the note on --provider alone warned
+# nobody on the installer's headline use case.
 if [ "$PROVIDER" != "clive" ]; then
     cat >&2 <<NOTE
-  NOTE: only the 'clive' adapter is registered (common/config.py get_adapter). The develop
-  rail (briefs -> worker -> tests -> gated merge) is target-generic and will run against
-  '$PROVIDER' as-is, but the scenario-eval loop needs a NEW adapter under factory/adapters/
-  before it will run for this target.
+  NOTE: provider '$PROVIDER' is only usable if you have registered its adapter in
+  common/config.py get_adapter (only 'clive' ships registered). The develop rail
+  (briefs -> worker -> tests -> gated merge) is target-generic; the scenario-eval
+  loop needs that adapter.
+NOTE
+elif [ "$TARGET_REPO_NAME" != "clive" ]; then
+    cat >&2 <<NOTE
+  NOTE: target '$TARGET_REPO_NAME' runs under the default 'clive' adapter. The develop
+  rail (briefs -> worker -> tests -> gated merge) is target-generic and works as-is;
+  the scenario-eval loop expects clive's layout and needs a NEW adapter under
+  factory/adapters/ (wired in common/config.py get_adapter) for this target.
 NOTE
 fi
 
@@ -263,7 +348,7 @@ cat <<SUMMARY
    factory:    $FACTORY_DIR
    target:     $TARGET_DIR
    board:      http://127.0.0.1:$ASSIGNED_PORT   (factory-$NAME board)
-   fleet viz:  factory-$NAME viz --serve --port $FLEET_PORT
+   fleet viz:  factory-$NAME viz --serve   (port $FLEET_PORT — derived from the board port)
    launcher:   $LAUNCHER
 
  Manual next steps (never touched by this installer):

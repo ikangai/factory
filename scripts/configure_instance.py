@@ -28,10 +28,13 @@ Usage (list mode):
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import glob
 import os
 import re
 import socket
+import subprocess
 import sys
 
 import yaml
@@ -126,6 +129,30 @@ def assert_effective(doc: dict, expected: dict[tuple[str, str], object]) -> None
 
 
 # --- port assignment ---------------------------------------------------------------------
+def _instance_configs(instances_root: str) -> list[str]:
+    """Every instance's config.yaml under instances_root — the ONE definition of the
+    installer's forced layout (<root>/<name>/factory/config.yaml, because bin/factory
+    requires the clone dir be named `factory`). --list and the sibling-port scan must
+    always agree on what counts as an instance, so both call this."""
+    return sorted(glob.glob(os.path.join(instances_root, "*", "factory", "config.yaml")))
+
+
+@contextlib.contextmanager
+def _port_lock(instances_root: str):
+    """Serialize collect-siblings -> resolve -> write across CONCURRENT installs on this
+    host (two simultaneous `install.sh` runs would otherwise both scan before either
+    writes, and both walk to the same free pair). flock is advisory and same-host only —
+    exactly the scope of the collision it prevents."""
+    path = os.path.join(instances_root, ".ports.lock")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _port_free(port: int, host: str = "127.0.0.1") -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -145,8 +172,7 @@ def collect_sibling_ports(instances_root: str, exclude_path: str) -> set[int]:
     counts as its own sibling. A sibling that fails to parse is skipped, not fatal — a
     neighboring instance's drift is that instance's problem, not this patch's."""
     ports: set[int] = set()
-    pattern = os.path.join(instances_root, "*", "factory", "config.yaml")
-    for cfg_path in glob.glob(pattern):
+    for cfg_path in _instance_configs(instances_root):
         if os.path.realpath(cfg_path) == exclude_path:
             continue
         try:
@@ -160,34 +186,51 @@ def collect_sibling_ports(instances_root: str, exclude_path: str) -> set[int]:
     return ports
 
 
-def resolve_port(port_arg: str, current_port: int | None, sibling_ports: set[int]) -> int:
-    if port_arg != "auto":
+def resolve_port(port_arg: str, current_port: int | None, sibling_ports: set[int],
+                 port_base: int = DEFAULT_PORT_BASE) -> int:
+    """Three modes, chosen by the CALLER because only it knows install-vs-update:
+
+    - explicit <N>: used verbatim; warns (never fails) when N or N+1 collides with a
+      sibling's dashboard or fleet port.
+    - "auto" (fresh install): ALWAYS probes — the config's current value is the repo
+      default, which says nothing about what's free on this machine, so every candidate
+      pair gets a real bind test plus the sibling check.
+    - "keep" (re-run/update, passed by install.sh): keep the previously-assigned port
+      unless it collides with a sibling, with NO bind test — a live dashboard legitimately
+      holds its own port, and a bind test cannot tell "my own board" from "someone else's
+      process", so testing here would reassign a running instance out from under itself.
+
+    The taken-set counts every sibling's dashboard port AND its implied fleet port
+    (dashboard+1 — the `viz --serve` convention), in both directions: our pair (p, p+1)
+    must avoid both."""
+    taken = set(sibling_ports) | {p + 1 for p in sibling_ports}
+    if port_arg not in ("auto", "keep"):
         p = int(port_arg)
-        if p in sibling_ports:
-            print(f"WARNING: --port {p} collides with a sibling instance's dashboard.port "
-                  f"— proceeding anyway (explicit port always wins)", file=sys.stderr)
+        if p in taken or (p + 1) in taken:
+            print(f"WARNING: --port {p} (or its fleet port {p + 1}) collides with a sibling "
+                  f"instance's dashboard/fleet port — proceeding anyway (explicit port always "
+                  f"wins)", file=sys.stderr)
         return p
 
-    # Idempotent KEEP path: a config whose CURRENT port already differs from every sibling's
-    # is left untouched, with NO bind-test — a live dashboard legitimately holds its own port,
-    # and testing it here would misreport "taken" and silently reassign it out from under it.
-    if current_port is not None and current_port not in sibling_ports:
+    if (port_arg == "keep" and current_port is not None
+            and current_port not in taken and (current_port + 1) not in taken):
         return current_port
 
-    p = DEFAULT_PORT_BASE
+    p = port_base
     for _ in range(MAX_PORT_PROBES):
-        if (p not in sibling_ports and (p + 1) not in sibling_ports
+        if (p not in taken and (p + 1) not in taken
                 and _port_free(p) and _port_free(p + 1)):
             return p
         p += PORT_STEP
-    print(f"ERROR: no free dashboard-port pair found starting at {DEFAULT_PORT_BASE} "
+    print(f"ERROR: no free dashboard-port pair found starting at {port_base} "
           f"(probed {MAX_PORT_PROBES} candidates)", file=sys.stderr)
     sys.exit(1)
 
 
 # --- patch mode --------------------------------------------------------------------------
 def patch_config(config_path: str, target_root: str, provider: str, base_branch: str,
-                  port_arg: str, instances_root: str) -> int:
+                  port_arg: str, instances_root: str,
+                  port_base: int = DEFAULT_PORT_BASE) -> int:
     config_path = os.path.abspath(config_path)
     with open(config_path, "r", encoding="utf-8") as fh:
         original_text = fh.read()
@@ -201,9 +244,17 @@ def patch_config(config_path: str, target_root: str, provider: str, base_branch:
     if not isinstance(current_port, int):
         current_port = None
 
-    sibling_ports = collect_sibling_ports(instances_root, os.path.realpath(config_path))
-    assigned_port = resolve_port(port_arg, current_port, sibling_ports)
+    # The lock spans collect -> resolve -> write: concurrent installs must not both scan
+    # siblings before either has written its claim.
+    with _port_lock(instances_root):
+        sibling_ports = collect_sibling_ports(instances_root, os.path.realpath(config_path))
+        assigned_port = resolve_port(port_arg, current_port, sibling_ports, port_base)
+        return _write_patch(config_path, lines, target_root, provider, base_branch,
+                            assigned_port)
 
+
+def _write_patch(config_path: str, lines: list[str], target_root: str, provider: str,
+                 base_branch: str, assigned_port: int) -> int:
     # Always also set the safe-machine defaults (fresh machines have no Guest-House `agent`
     # user; the operator's own box re-enables consciously — see the module docstring).
     ops = [
@@ -229,15 +280,12 @@ def patch_config(config_path: str, target_root: str, provider: str, base_branch:
         print(f"ERROR: config.yaml no longer parses as YAML after patching: {e}", file=sys.stderr)
         sys.exit(1)
 
-    expected = {
-        ("target", "root"): target_root,
-        ("target", "provider"): provider,
-        ("target", "base_branch"): base_branch,
-        ("dashboard", "port"): assigned_port,
-        ("autopilot", "prod"): False,
-        ("super_worker", "user"): "",
-        ("super_worker", "claude_bin"): "claude",
-    }
+    # DERIVED from ops, never a second hand-maintained list: parsing each written value
+    # token yields exactly the typed value the patched file must read back, so a field
+    # added to ops is automatically asserted (a separate literal dict here would let an
+    # 8th field be set but silently never verified).
+    expected = {(block_key, field_key): yaml.safe_load(value)
+                for block_key, field_key, value in ops}
     assert_effective(doc, expected)
 
     if changed_any:
@@ -254,9 +302,21 @@ def patch_config(config_path: str, target_root: str, provider: str, base_branch:
 
 
 # --- list mode -----------------------------------------------------------------------------
+def _target_origin_url(factory_dir: str, target_root: str) -> str:
+    """The target's upstream URL — the one identity `list` exists to surface (two forks can
+    share the basename `clive`; target.root alone can't tell them apart). Failure-tolerant:
+    a missing/detached target is that instance's problem, shown as '?'."""
+    target_dir = os.path.normpath(os.path.join(factory_dir, target_root))
+    try:
+        out = subprocess.run(["git", "-C", target_dir, "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or "?"
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+
+
 def list_instances(instances_root: str) -> None:
-    pattern = os.path.join(instances_root, "*", "factory", "config.yaml")
-    matches = sorted(glob.glob(pattern))
+    matches = _instance_configs(instances_root)
     if not matches:
         print(f"no instances under {instances_root}")
         return
@@ -279,8 +339,9 @@ def list_instances(instances_root: str) -> None:
         if os.path.isfile(mode_path):
             with open(mode_path, "r", encoding="utf-8") as fh:
                 mode = fh.read().strip() or "-"
-        print(f"{name}  root={root}  provider={provider}  port={port}  "
-              f"fleet_port={fleet_port}  mode={mode}")
+        target_url = _target_origin_url(factory_dir, root) if root != "?" else "?"
+        print(f"{name}  root={root}  target={target_url}  provider={provider}  "
+              f"port={port}  fleet_port={fleet_port}  mode={mode}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -293,7 +354,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target-root")
     ap.add_argument("--provider")
     ap.add_argument("--base-branch")
-    ap.add_argument("--port", default="auto")
+    ap.add_argument("--port", default="auto",
+                     help="dashboard port: a number, 'auto' (fresh install: probe), or "
+                          "'keep' (update: keep the assigned port unless it collides)")
+    ap.add_argument("--port-base", type=int, default=DEFAULT_PORT_BASE,
+                     help="first candidate pair for probing (tests use an uncommon base "
+                          "so literal port assertions stay hermetic)")
     ap.add_argument("--instances-root", required=True)
     args = ap.parse_args(argv)
 
@@ -312,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     patch_config(args.config_path, args.target_root, args.provider, args.base_branch,
-                 args.port, args.instances_root)
+                 args.port, args.instances_root, args.port_base)
     return 0
 
 

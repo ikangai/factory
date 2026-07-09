@@ -48,9 +48,14 @@ def _run(args):
 
 
 def _patch(cfg, root, *, target_root="../t", provider="clive", base_branch="factory/base",
-           port="auto"):
-    return _run([str(cfg), "--target-root", target_root, "--provider", provider,
-                 "--base-branch", base_branch, "--port", port, "--instances-root", str(root)])
+           port="auto", port_base=None):
+    args = [str(cfg), "--target-root", target_root, "--provider", provider,
+            "--base-branch", base_branch, "--port", port, "--instances-root", str(root)]
+    if port_base is not None:
+        # Probing bind-tests REAL host ports; an uncommon per-test base keeps the literal
+        # port assertions hermetic on any machine (8787 may legitimately be busy here).
+        args += ["--port-base", str(port_base)]
+    return _run(args)
 
 
 # --- comment-preserving SET ------------------------------------------------------------
@@ -98,83 +103,120 @@ def test_duplicated_field_line_in_a_block_is_a_loud_non_zero_failure(tmp_path):
     assert cfg.read_text() == text
 
 
-# --- idempotent re-run -------------------------------------------------------------------
-def test_idempotent_rerun_is_a_content_noop_and_keeps_the_port(tmp_path):
+# --- idempotent install (auto) + update (keep) --------------------------------------------
+def test_fresh_auto_probes_then_keep_rerun_is_a_content_noop(tmp_path):
+    """Fresh install (--port auto) PROBES — the repo-default 8787 in a fresh clone says
+    nothing about what's free on this machine; the update re-run (--port keep, what
+    install.sh passes) then keeps the assigned port without churn."""
     cfg = _instance_config(tmp_path, "acme")
 
-    r1 = _patch(cfg, tmp_path, target_root="../acme-target", provider="clive",
-                base_branch="factory/base", port="auto")
+    r1 = _patch(cfg, tmp_path, target_root="../acme-target", port="auto", port_base=43870)
     assert r1.returncode == 0, r1.stderr
+    assert r1.stdout.strip() == "PORT=43870"  # nothing taken in the test range -> the base
     after_first = cfg.read_text()
 
-    r2 = _patch(cfg, tmp_path, target_root="../acme-target", provider="clive",
-                base_branch="factory/base", port="auto")
+    r2 = _patch(cfg, tmp_path, target_root="../acme-target", port="keep")
     assert r2.returncode == 0, r2.stderr
-    after_second = cfg.read_text()
-
-    assert after_first == after_second
-    assert r1.stdout.strip() == r2.stdout.strip() == "PORT=8787"  # no sibling -> keep the default
+    assert r2.stdout.strip() == "PORT=43870"
+    assert cfg.read_text() == after_first
 
 
-# --- auto-port vs siblings ----------------------------------------------------------------
-def test_auto_port_skips_a_sibling_instances_port(tmp_path):
-    sibling = _instance_config(tmp_path, "sibling")
-    r = _patch(sibling, tmp_path, target_root="../sibling-target", port="8787")
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "PORT=8787"
-
-    other = _instance_config(tmp_path, "other")  # fresh copy -> current port 8787 collides
-    r2 = _patch(other, tmp_path, target_root="../other-target", port="auto")
-    assert r2.returncode == 0, r2.stderr
-    assert r2.stdout.strip() == "PORT=8797"  # first free pair after the sibling's 8787
-    assert yaml.safe_load(other.read_text())["dashboard"]["port"] == 8797
-
-
-def test_auto_port_never_reassigns_a_live_instance_that_already_differs_from_siblings(tmp_path):
-    """The keep path: a config whose CURRENT port already differs from every sibling's must
-    be left alone on re-run, with no bind-test — reassigning it would knock a live dashboard
-    off its port."""
-    sibling = _instance_config(tmp_path, "sib")
-    _patch(sibling, tmp_path, target_root="../sib-target", port="8787")
-
-    mine = _instance_config(tmp_path, "mine")
-    r1 = _patch(mine, tmp_path, target_root="../mine-target", port="9500")
-    assert r1.returncode == 0, r1.stderr
-    assert r1.stdout.strip() == "PORT=9500"
-
-    r2 = _patch(mine, tmp_path, target_root="../mine-target", port="auto")
-    assert r2.returncode == 0, r2.stderr
-    assert r2.stdout.strip() == "PORT=9500"  # kept, not reassigned into some free pair
-
-
-# --- auto-port vs an actually-bound port --------------------------------------------------
-def test_auto_port_skips_a_port_that_is_actually_bound(tmp_path):
-    sibling = _instance_config(tmp_path, "sib3")
-    _patch(sibling, tmp_path, target_root="../sib3-target", port="8787")
-
-    fresh = _instance_config(tmp_path, "third")  # current port 8787 collides -> forces a probe
+def test_fresh_auto_does_bind_test_even_with_no_siblings(tmp_path):
+    """The first instance must not inherit a busy port just because it has no siblings —
+    auto always bind-tests (this was the 'probe loop is dead code for instance #1' bug)."""
+    cfg = _instance_config(tmp_path, "acme")
     held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    held.bind(("127.0.0.1", 8797))
+    held.bind(("127.0.0.1", 43890))
     held.listen(1)
     try:
-        r = _patch(fresh, tmp_path, target_root="../third-target", port="auto")
+        r = _patch(cfg, tmp_path, target_root="../acme-target", port="auto", port_base=43890)
     finally:
         held.close()
     assert r.returncode == 0, r.stderr
-    # 8787 taken by the sibling, 8797 actually bound -> first free pair is 8807
-    assert r.stdout.strip() == "PORT=8807"
+    assert r.stdout.strip() == "PORT=43900"  # base bound -> next pair
+
+
+# --- auto-port vs siblings (dashboard AND implied fleet ports) -----------------------------
+def test_auto_port_skips_a_sibling_instances_port_pair(tmp_path):
+    sibling = _instance_config(tmp_path, "sibling")
+    r = _patch(sibling, tmp_path, target_root="../sibling-target", port="43910")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "PORT=43910"
+
+    other = _instance_config(tmp_path, "other")
+    r2 = _patch(other, tmp_path, target_root="../other-target", port="auto", port_base=43910)
+    assert r2.returncode == 0, r2.stderr
+    assert r2.stdout.strip() == "PORT=43920"  # first free pair after the sibling's
+    assert yaml.safe_load(other.read_text())["dashboard"]["port"] == 43920
+
+
+def test_auto_port_skips_a_siblings_implied_fleet_port(tmp_path):
+    """A sibling on an off-grid explicit port implies fleet port +1; a probed pair must
+    dodge BOTH (this was the fleet-port blind spot)."""
+    sibling = _instance_config(tmp_path, "sibf")
+    _patch(sibling, tmp_path, target_root="../sibf-target", port="43931")  # fleet = 43932
+
+    other = _instance_config(tmp_path, "otherf")
+    # base pair (43930, 43931): 43931 is the sibling's dashboard port -> skip;
+    # next pair (43940, 43941) is clean.
+    r = _patch(other, tmp_path, target_root="../otherf-target", port="auto", port_base=43930)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "PORT=43940"
+
+
+def test_keep_never_reassigns_a_non_colliding_port(tmp_path):
+    """--port keep (the update path): a previously-assigned port that doesn't collide with
+    any sibling is kept with NO bind test — its own live board legitimately holds it, and
+    a bind test cannot tell 'my own board' from 'someone else's process'."""
+    mine = _instance_config(tmp_path, "mine")
+    r1 = _patch(mine, tmp_path, target_root="../mine-target", port="9500")
+    assert r1.returncode == 0, r1.stderr
+
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # simulate the LIVE board
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    held.bind(("127.0.0.1", 9500))
+    held.listen(1)
+    try:
+        r2 = _patch(mine, tmp_path, target_root="../mine-target", port="keep")
+    finally:
+        held.close()
+    assert r2.returncode == 0, r2.stderr
+    assert r2.stdout.strip() == "PORT=9500"  # kept even while bound — it's OUR board
+
+
+def test_keep_reassigns_only_on_a_sibling_collision(tmp_path):
+    mine = _instance_config(tmp_path, "minec")
+    _patch(mine, tmp_path, target_root="../minec-target", port="43950")
+
+    sibling = _instance_config(tmp_path, "sibc")  # operator forced the same port explicitly
+    _patch(sibling, tmp_path, target_root="../sibc-target", port="43950")
+
+    r = _patch(mine, tmp_path, target_root="../minec-target", port="keep", port_base=43950)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "PORT=43960"  # collides now -> probed to the next free pair
 
 
 # --- explicit port collision --------------------------------------------------------------
 def test_explicit_port_collision_warns_but_proceeds(tmp_path):
     sibling = _instance_config(tmp_path, "sib4")
-    _patch(sibling, tmp_path, target_root="../sib4-target", port="8787")
+    _patch(sibling, tmp_path, target_root="../sib4-target", port="43970")
 
     fresh = _instance_config(tmp_path, "fourth")
-    r = _patch(fresh, tmp_path, target_root="../fourth-target", port="8787")
+    r = _patch(fresh, tmp_path, target_root="../fourth-target", port="43970")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "PORT=8787"
+    assert r.stdout.strip() == "PORT=43970"
+    assert "collide" in r.stderr.lower()
+
+
+def test_explicit_port_warns_on_a_fleet_port_collision_too(tmp_path):
+    sibling = _instance_config(tmp_path, "sib5")
+    _patch(sibling, tmp_path, target_root="../sib5-target", port="43980")  # fleet = 43981
+
+    fresh = _instance_config(tmp_path, "fifth")
+    r = _patch(fresh, tmp_path, target_root="../fifth-target", port="43981")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "PORT=43981"
     assert "collide" in r.stderr.lower()
 
 
@@ -193,6 +235,7 @@ def test_list_includes_name_root_provider_ports_and_mode(tmp_path):
 
     lines = {l.split()[0]: l for l in r.stdout.splitlines() if l.strip()}
     assert "alpha" in lines["alpha"] and "../alpha-target" in lines["alpha"]
+    assert "target=?" in lines["alpha"]  # no git repo behind the root -> failure-tolerant "?"
     assert "port=9111" in lines["alpha"] and "fleet_port=9112" in lines["alpha"]
     assert "mode=shift" in lines["alpha"]
     assert "port=9121" in lines["beta"] and "fleet_port=9122" in lines["beta"]

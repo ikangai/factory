@@ -152,7 +152,8 @@ def test_rerun_is_idempotent_and_keeps_the_port(install_env):
 
 def test_target_named_factory_is_rejected(tmp_path_factory):
     """A target whose basename is literally `factory` would make the sibling target dir
-    collide with the factory clone itself — the guard must fire BEFORE anything is cloned."""
+    collide with the factory clone itself — the guard must fire BEFORE anything is cloned,
+    and point at the --target-dir escape hatch."""
     home = tmp_path_factory.mktemp("home-collide")
     root = tmp_path_factory.mktemp("root-collide") / "factories"
     r = _run_install([
@@ -163,7 +164,71 @@ def test_target_named_factory_is_rejected(tmp_path_factory):
     ], home)
     assert r.returncode != 0
     assert "collides" in (r.stdout + r.stderr)
+    assert "--target-dir" in (r.stdout + r.stderr)
     assert not root.exists()  # guard fired before mkdir/clone
+
+
+def test_target_dir_override_sidesteps_the_factory_name_collision(tmp_path_factory):
+    """--target-dir renames the sibling clone dir, so a target repo literally named
+    'factory' installs fine — the operator rarely controls an upstream repo's name."""
+    home = tmp_path_factory.mktemp("home-tdo")
+    root = tmp_path_factory.mktemp("root-tdo") / "factories"
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets-tdo"), "factory")
+    r = _run_install([
+        "--factory-repo", paths.FACTORY_ROOT,
+        "--branch", _current_branch(),
+        "--target", str(target),
+        "--target-dir", "factory-target",
+        "--name", "selfhost",
+        "--root", str(root),
+        "--skip-deps",
+    ], home)
+    assert r.returncode == 0, f"install failed\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    assert (root / "selfhost" / "factory-target" / ".git").is_dir()
+    doc = yaml.safe_load((root / "selfhost" / "factory" / "config.yaml").read_text())
+    assert doc["target"]["root"] == "../factory-target"
+
+
+def test_explicit_name_is_sanitized(tmp_path_factory):
+    """An operator-typed --name with spaces/slashes must not produce an un-execable
+    launcher or escape the instances root (the runbook advertises the name as sanitized)."""
+    home = tmp_path_factory.mktemp("home-name")
+    root = tmp_path_factory.mktemp("root-name") / "factories"
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets-name"), "sprocket")
+    r = _run_install([
+        "--factory-repo", paths.FACTORY_ROOT,
+        "--branch", _current_branch(),
+        "--target", str(target),
+        "--name", "my repo",
+        "--root", str(root),
+        "--skip-deps",
+    ], home)
+    assert r.returncode == 0, f"install failed\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    assert (root / "my-repo" / "factory" / "config.yaml").exists()
+    launcher = home / ".local" / "bin" / "factory-my-repo"
+    assert launcher.exists() and launcher.stat().st_mode & stat.S_IXUSR
+
+
+def test_clive_target_defaults_to_the_reference_base_branch(tmp_path_factory):
+    """The one hardcoded per-target policy — a target NAMED clive defaults base_branch to
+    chore/extract-factory — was previously untested (only synthetic non-clive names ran)."""
+    home = tmp_path_factory.mktemp("home-clive")
+    root = tmp_path_factory.mktemp("root-clive") / "factories"
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets-clive"), "clive")
+    r = _run_install([
+        "--factory-repo", paths.FACTORY_ROOT,
+        "--branch", _current_branch(),
+        "--target", str(target),
+        "--root", str(root),
+        "--skip-deps",
+    ], home)
+    assert r.returncode == 0, f"install failed\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    branch = subprocess.run(["git", "-C", str(root / "clive" / "clive"), "branch",
+                             "--show-current"], capture_output=True, text=True, timeout=10,
+                            check=True).stdout.strip()
+    assert branch == "chore/extract-factory"
+    doc = yaml.safe_load((root / "clive" / "factory" / "config.yaml").read_text())
+    assert doc["target"]["base_branch"] == "chore/extract-factory"
 
 
 def test_update_merge_works_without_git_identity(tmp_path_factory):
@@ -203,6 +268,84 @@ def test_update_merge_works_without_git_identity(tmp_path_factory):
     author = subprocess.run(["git", "-C", str(clone), "log", "-1", "--format=%an"],
                             capture_output=True, text=True, timeout=10, check=True).stdout.strip()
     assert author == "factory installer"
+
+
+def test_update_merge_auto_resolves_a_config_yaml_conflict(tmp_path_factory):
+    """The overlay commit and upstream both touch config.yaml, so update merges WILL
+    conflict there (git coalesces nearby hunks). That one conflict is mechanical: take
+    upstream's config.yaml, let step 5 re-apply the instance overlay — the re-run must
+    succeed and keep the instance's values without human intervention."""
+    home = tmp_path_factory.mktemp("home-cfl")
+    root = tmp_path_factory.mktemp("root-cfl") / "factories"
+    branch = _current_branch()
+    ident = {**os.environ, "GIT_AUTHOR_NAME": "tester", "GIT_AUTHOR_EMAIL": "t@example.com",
+             "GIT_COMMITTER_NAME": "tester", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    scratch = tmp_path_factory.mktemp("scratch-cfl") / "factory-src"
+    subprocess.run(["git", "clone", "-q", "--branch", branch, paths.FACTORY_ROOT, str(scratch)],
+                   check=True, timeout=120)
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets-cfl"), "gear")
+
+    args = ["--factory-repo", str(scratch), "--branch", branch,
+            "--target", str(target), "--root", str(root), "--skip-deps"]
+    r1 = _run_install(args, home)
+    assert r1.returncode == 0, f"install failed\nSTDOUT:\n{r1.stdout}\nSTDERR:\n{r1.stderr}"
+
+    # Upstream edits the exact line the overlay patched -> guaranteed content conflict.
+    cfg_upstream = scratch / "config.yaml"
+    text = cfg_upstream.read_text()
+    assert '  root: "../clive"' in text
+    cfg_upstream.write_text(text.replace('  root: "../clive"',
+                                         '  root: "../clive"   # upstream touched this line'))
+    subprocess.run(["git", "-C", str(scratch), "commit", "-aqm", "upstream config edit"],
+                   check=True, timeout=10, env=ident)
+
+    r2 = _run_install(args, home)
+    assert r2.returncode == 0, f"update failed\nSTDOUT:\n{r2.stdout}\nSTDERR:\n{r2.stderr}"
+    assert "auto-resolved" in r2.stdout
+    doc = yaml.safe_load((root / "gear" / "factory" / "config.yaml").read_text())
+    assert doc["target"]["root"] == "../gear"  # instance overlay re-applied over upstream's file
+
+
+def test_rerun_recovers_a_dirty_config_but_stops_on_other_dirty_files(tmp_path_factory):
+    """A run that crashed between the step-5 patch and the step-6 commit leaves config.yaml
+    dirty, which makes git refuse the update merge outright. config.yaml is regenerated, so
+    the re-run discards it and proceeds; any OTHER dirty tracked file aborts loudly."""
+    home = tmp_path_factory.mktemp("home-dirty")
+    root = tmp_path_factory.mktemp("root-dirty") / "factories"
+    branch = _current_branch()
+    ident = {**os.environ, "GIT_AUTHOR_NAME": "tester", "GIT_AUTHOR_EMAIL": "t@example.com",
+             "GIT_COMMITTER_NAME": "tester", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    scratch = tmp_path_factory.mktemp("scratch-dirty") / "factory-src"
+    subprocess.run(["git", "clone", "-q", "--branch", branch, paths.FACTORY_ROOT, str(scratch)],
+                   check=True, timeout=120)
+    target = _make_synthetic_target(tmp_path_factory.mktemp("targets-dirty"), "cam")
+
+    args = ["--factory-repo", str(scratch), "--branch", branch,
+            "--target", str(target), "--root", str(root), "--skip-deps"]
+    r1 = _run_install(args, home)
+    assert r1.returncode == 0, f"install failed\nSTDOUT:\n{r1.stdout}\nSTDERR:\n{r1.stderr}"
+    clone = root / "cam" / "factory"
+
+    # Move upstream so the re-run actually merges (a clean already-up-to-date merge would
+    # never hit the dirty-tree refusal).
+    subprocess.run(["git", "-C", str(scratch), "commit", "--allow-empty", "-qm", "move"],
+                   check=True, timeout=10, env=ident)
+
+    # Phase 1: dirty config.yaml only (the interrupted-run shape) -> discarded, run succeeds.
+    cfg = clone / "config.yaml"
+    cfg.write_text(cfg.read_text() + "# uncommitted leftover\n")
+    r2 = _run_install(args, home)
+    assert r2.returncode == 0, f"recovery failed\nSTDOUT:\n{r2.stdout}\nSTDERR:\n{r2.stderr}"
+    assert "discarding an uncommitted config.yaml" in r2.stdout
+
+    # Phase 2: a dirty tracked file that is NOT config.yaml is real local work -> abort.
+    subprocess.run(["git", "-C", str(scratch), "commit", "--allow-empty", "-qm", "move2"],
+                   check=True, timeout=10, env=ident)
+    readme = clone / "README.md"
+    readme.write_text(readme.read_text() + "\nlocal work\n")
+    r3 = _run_install(args, home)
+    assert r3.returncode != 0
+    assert "beyond config.yaml" in r3.stdout + r3.stderr
 
 
 def test_second_instance_gets_a_non_colliding_port(install_env, tmp_path_factory):
