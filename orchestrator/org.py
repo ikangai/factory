@@ -430,12 +430,33 @@ def plan_org(store, *, force: bool = False, shift_id: Optional[int] = None,
     return chart
 
 
-def cmd_org(store, action: str) -> None:
-    """The org chart's read-only CLI surface (Task 1.4):
-      factory org show   # the active chart's classes/bench/rationale, or "no active org chart"
-      factory org fit    # the rendered fit table (routing_outcomes aggregated by class x tier)
-    plan/replan arrive in Phase 2 (the organizer) — YAGNI for now; argparse's choices stay
-    exactly {show, fit} until then."""
+def maybe_plan_org(store, *, shift_id: Optional[int] = None,
+                   claude_fn: Optional[Callable] = None) -> Optional[dict]:
+    """The automatic trigger (design §3, Task 2.2): "a shift starts with a mission that
+    has NO chart" — which also covers "the active mission changed" for free, since a new
+    mission_id simply has no chart of its own yet either way (`get_active_org_chart` is
+    mission-scoped). STOP and "no active mission" are checked HERE, not inside `plan_org`
+    (which must keep working mission-less, for a bare `factory org plan` standing-chart
+    run) — no call in either case, mirroring the investigator's posture (killswitch
+    checked FIRST). Otherwise delegates straight to `plan_org` (force=False), which is
+    ITSELF the fast, call-free no-op once a chart exists for the mission — so the
+    frontier call happens exactly ONCE per mission, then stays cached; safe to call at
+    the top of every single shift."""
+    if killswitch.is_halted():
+        return None
+    if not store.active_mission():
+        return None
+    return plan_org(store, shift_id=shift_id, claude_fn=claude_fn)
+
+
+def cmd_org(store, action: str, *, claude_fn: Optional[Callable] = None) -> None:
+    """The org chart's CLI surface:
+      factory org show    # the active chart's classes/bench/rationale, or "no active org chart"
+      factory org fit     # the rendered fit table (routing_outcomes aggregated by class x tier)
+      factory org plan    # (Task 2.2) plan once — REFUSES if a chart already exists (points at replan)
+      factory org replan  # (Task 2.2) supersede the active chart and plan fresh (force=True)
+    `claude_fn` is test-only plumbing (passed straight through to plan_org) — the live CLI
+    never supplies it, so plan_org's own default (the real, isolated claude_p) applies."""
     if action == "show":
         row = _active_row(store)
         if row is None:
@@ -459,5 +480,27 @@ def cmd_org(store, action: str) -> None:
             print("  retire: " + ", ".join(retire))
     elif action == "fit":
         print(render_fit_table(fit_rows(store)))
+    elif action == "plan":
+        mission = store.active_mission()
+        existing = store.get_active_org_chart(mission["id"] if mission else None)
+        if existing is not None:
+            print(f"[org] an active chart already exists (v{existing['version']}) — "
+                  f"use `factory org replan` to supersede it and plan fresh")
+            return
+        chart = plan_org(store, claude_fn=claude_fn)
+        if chart is None:
+            print("[org] plan failed (transport/parse/validation) — see "
+                  "`factory learn list --role factory` for why")
+        else:
+            print(f"[org] planned {len(chart.get('classes') or [])} class(es), "
+                  f"default_class={chart.get('default_class', '')}")
+    elif action == "replan":
+        chart = plan_org(store, force=True, claude_fn=claude_fn)
+        if chart is None:
+            print("[org] replan failed (transport/parse/validation) — see "
+                  "`factory learn list --role factory` for why")
+        else:
+            print(f"[org] replanned {len(chart.get('classes') or [])} class(es), "
+                  f"default_class={chart.get('default_class', '')}")
     else:
-        print(f"[org] unknown action {action!r} — use show|fit")
+        print(f"[org] unknown action {action!r} — use show|fit|plan|replan")

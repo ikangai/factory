@@ -8,6 +8,7 @@ explicit instruction (existing test files are off-limits).
 """
 from factory.common.store import Blackboard
 from factory.orchestrator import org
+from factory.orchestrator import shift as shiftmod
 
 
 def _store(tmp_path):
@@ -320,3 +321,248 @@ def test_plan_org_works_with_no_active_mission_standing_chart(tmp_path):
         assert chart is not None
         row = s.get_active_org_chart(None)
         assert row is not None and row["mission_id"] is None
+
+
+# -- maybe_plan_org: the automatic shift-start / mission-change trigger (Task 2.2) -------
+def test_maybe_plan_org_plans_once_then_caches_across_two_calls(tmp_path):
+    """Simulates two shifts: the 1st has a mission with no chart (plans); the 2nd sees the
+    chart the 1st just planned (no-op) — the fake is called EXACTLY once across both."""
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        fake = _fake_claude(_VALID_REPLY_CHART)
+
+        first = org.maybe_plan_org(s, claude_fn=fake)
+        assert first is not None and fake.seen["n"] == 1
+
+        second = org.maybe_plan_org(s, claude_fn=fake)
+        assert second is None and fake.seen["n"] == 1   # NOT called again
+
+
+def test_maybe_plan_org_no_mission_no_call(tmp_path):
+    with _store(tmp_path) as s:
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        result = org.maybe_plan_org(s, claude_fn=fake)
+        assert result is None and fake.seen == {}
+
+
+def test_maybe_plan_org_stop_no_call(tmp_path, monkeypatch):
+    from factory.common import killswitch
+    monkeypatch.setattr(killswitch, "is_halted", lambda: True)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        result = org.maybe_plan_org(s, claude_fn=fake)
+        assert result is None and fake.seen == {}
+
+
+def test_maybe_plan_org_threads_shift_id_into_the_ledger(tmp_path):
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        sh = s.start_shift(token_budget=1000)
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        org.maybe_plan_org(s, claude_fn=fake, shift_id=sh)
+        rows = [r for r in s.ledger_rows(shift_id=sh) if r["notes"] == "organizer"]
+        assert rows and rows[0]["tokens"] == 50
+
+
+# -- cmd_org plan/replan (Task 2.2) -------------------------------------------------------
+def test_cmd_org_plan_plans_when_no_chart_exists(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        org.cmd_org(s, "plan", claude_fn=fake)
+        out = capsys.readouterr().out
+        assert "planned" in out.lower()
+        assert fake.seen["n"] == 1
+        assert s.get_active_org_chart(s.active_mission()["id"]) is not None
+
+
+def test_cmd_org_plan_refuses_when_chart_exists_points_at_replan(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        m = s.set_mission("ship it")
+        s.add_org_chart(m, _VALID_REPLY_CHART)
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        org.cmd_org(s, "plan", claude_fn=fake)
+        out = capsys.readouterr().out
+        assert "replan" in out.lower()
+        assert fake.seen == {}                                # never even called
+
+
+def test_cmd_org_replan_supersedes_and_plans_fresh(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        m = s.set_mission("ship it")
+        prior_id = s.add_org_chart(m, _VALID_REPLY_CHART)
+        fake = _fake_claude(_VALID_REPLY_CHART)
+        org.cmd_org(s, "replan", claude_fn=fake)
+        out = capsys.readouterr().out
+        assert "replanned" in out.lower() or "planned" in out.lower()
+        assert s._one("SELECT status FROM org_charts WHERE id = ?",
+                      (prior_id,))["status"] == "superseded"
+        assert s.get_active_org_chart(m) is not None
+        assert fake.seen["n"] == 1
+
+
+def test_cmd_org_plan_prints_a_failure_hint_when_plan_org_fails(tmp_path, capsys):
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+
+        def fake(prompt, **k):
+            return "not json", 5, 0.0
+
+        org.cmd_org(s, "plan", claude_fn=fake)
+        out = capsys.readouterr().out
+        assert "failed" in out.lower() or "learn list" in out.lower()
+
+
+# -- shift.py: the org_planner shift-start hook (Task 2.2) -------------------------------
+# NOTE: tests/test_shift_harness.py already covers run_shift end-to-end; per this plan's
+# scope guard (existing test files are off-limits), the NEW org_planner seam is exercised
+# here instead, alongside the rest of the organizer's own test surface.
+def test_run_shift_calls_org_planner_after_the_stop_check_with_the_new_shift_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        seen = {}
+
+        def org_planner(store, *, shift_id):
+            seen["shift_id"] = shift_id
+            seen["mission"] = store.active_mission()["statement"]
+
+        res = shiftmod.run_shift(s, token_budget=10, conductor=lambda *a, **k: {"status": "completed"},
+                                 org_planner=org_planner)
+        assert seen["mission"] == "ship it"
+        assert seen["shift_id"] == res["shift_id"] and res["shift_id"] is not None
+
+
+def test_run_shift_omitted_org_planner_defaults_to_no_call(tmp_path, monkeypatch):
+    """org_planner=None (the default) is a pure no-op — every EXISTING run_shift test
+    (none of which pass it) stays byte-identical."""
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        res = shiftmod.run_shift(s, token_budget=10, conductor=lambda *a, **k: {"status": "completed"})
+        assert res["action"] == "completed"       # no crash, no behavior change
+
+
+def test_run_shift_org_planner_blowup_does_not_sink_the_shift(tmp_path, monkeypatch):
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+
+        def boom(store, *, shift_id):
+            raise RuntimeError("organizer blew up")
+
+        res = shiftmod.run_shift(s, token_budget=10, conductor=lambda *a, **k: {"status": "completed"},
+                                 org_planner=boom)
+        assert res["action"] == "completed"       # the organizer's own failure never sinks the shift
+
+
+def test_run_shift_never_calls_org_planner_when_halted(tmp_path, monkeypatch):
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: True)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        called = {"n": 0}
+        shiftmod.run_shift(s, token_budget=10, conductor=lambda *a, **k: {"status": "completed"},
+                           org_planner=lambda store, **k: called.__setitem__("n", called["n"] + 1))
+        assert called["n"] == 0
+
+
+# -- orchestrator.cmd_run: wires maybe_plan_org when the config knob is on ---------------
+def _hermetic_cmd_run(monkeypatch):
+    """The same hermetic stubs test_run_cli.py's autouse fixture applies (that file is
+    off-limits to edit, so the new cmd_run wiring tests live here with their own copy)."""
+    from factory.orchestrator import orchestrator
+    from factory.roles import research_feed
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
+    monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
+    monkeypatch.setattr(orchestrator, "_seed_staffing", lambda store: [])
+    return orchestrator
+
+
+def _config_with_organizer_on(monkeypatch):
+    """Real config + super_worker.organizer=true — the load_config monkeypatch pattern
+    test_shift_harness.py uses, on a deepcopy so the lru-cached real dict is never mutated."""
+    import copy
+    from factory.common import config
+    cfg = copy.deepcopy(config.load_config())
+    cfg.setdefault("super_worker", {})["organizer"] = True
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+
+
+def test_cmd_run_wires_org_planner_when_the_config_knob_is_on(tmp_path, monkeypatch):
+    """With super_worker.organizer: true, cmd_run's DEFAULT executor-building path also
+    wires maybe_plan_org as the shift-start org_planner — the real production trigger.
+    Hermetic: monkeypatch org.maybe_plan_org itself (never a live claude_p in a test)."""
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+    _config_with_organizer_on(monkeypatch)
+    called = {}
+    monkeypatch.setattr(org, "maybe_plan_org",
+                        lambda store, **k: called.update(k) or None)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+
+        def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+            return {"status": "completed"}
+
+        res = orchestrator.cmd_run(s, conductor=conductor, token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"
+        assert called.get("shift_id") == res["shift_id"]
+
+
+def test_cmd_run_org_planner_stays_off_by_default(tmp_path, monkeypatch):
+    """The knob ships FALSE (config.yaml) — a default cmd_run (no executor injected, a
+    chartless mission) must NOT call maybe_plan_org: the same posture as every other
+    LLM-spending stage (scope_check/reviewer/investigate_blocked wire nothing when off),
+    and what keeps the existing cmd_run test surface hermetic."""
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+
+    def boom(store, **k):
+        raise AssertionError("must not call maybe_plan_org when the knob is off")
+
+    monkeypatch.setattr(org, "maybe_plan_org", boom)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+
+        def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+            return {"status": "completed"}
+
+        res = orchestrator.cmd_run(s, conductor=conductor, token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"
+
+
+def test_cmd_run_custom_executor_never_triggers_the_default_org_planner(tmp_path, monkeypatch):
+    """Even with the knob ON, a caller-supplied executor (test_run_cli.py's own pattern)
+    bypasses cmd_run's DEFAULT-building block entirely — org_planner stays None unless the
+    caller also supplies one. A hermetic test driving execute_claimed_tasks directly can
+    never trigger a live claude_p call from this wiring."""
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+    _config_with_organizer_on(monkeypatch)
+
+    def boom(store, **k):
+        raise AssertionError("must not call maybe_plan_org when a custom executor is supplied")
+
+    monkeypatch.setattr(org, "maybe_plan_org", boom)
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+
+        def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+            return {"status": "completed"}
+
+        def executor(store, *, shift_id):
+            return 0
+
+        res = orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                                   token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"
+
+
+def test_organizer_knob_is_config_only_never_in_settings_spec():
+    """The trigger gate must stay OUT of SETTINGS_SPEC: ORG_BOOL_KEYS derives from the
+    spec's bools, so listing it there would hand the organizer control of its own trigger
+    (and silently widen the authority line). Ships false (off by default)."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert "super_worker.organizer" not in SETTINGS_SPEC
+    assert "organizer" not in org.ORG_BOOL_KEYS
+    assert (load_config().get("super_worker") or {}).get("organizer") is False

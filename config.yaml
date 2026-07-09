@@ -181,6 +181,15 @@ super_worker:
   # spawning the narrowed task is a separate follow-up, NOT done here. Default OFF; board-toggleable
   # (in SETTINGS_SPEC — a trial gate the operator opts into, not a brake).
   investigate_blocked: false
+  # Self-organizing factory (Phase 2, Task 2.2): the shift-start ORGANIZER trigger. When true,
+  # a shift whose active mission has NO org chart runs ONE isolated frontier claude_p
+  # (roles/organizer/prompt.md) that designs a per-mission chart — classes, per-class stage
+  # toggles/tiers, bench — validated in code (fail-closed) and cached until the mission changes
+  # or `factory org replan`. Spend ledgers notes='organizer' WITH the shift_id. STOP vetoes the
+  # call (checked first). Default OFF; config-ONLY and deliberately NOT in SETTINGS_SPEC —
+  # ORG_BOOL_KEYS derives from the spec's bools, so listing it there would hand the organizer
+  # control of its own trigger. `factory org plan|replan` (explicit human acts) work regardless.
+  organizer: false
   # GSD auto-decomposition: when a worker returns no_candidate (brief too big to land), split it
   # into a sequenced chain of single-surface sub-tasks (open, source=worker) instead of just
   # blocking — turning the #1 failure into forward progress. Complements scope_check (#1 splits

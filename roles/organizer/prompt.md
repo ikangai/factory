@@ -21,8 +21,8 @@ say plainly when you're guessing.
 ## The open backlog (id: title — detail, capped)
 {BACKLOG}
 
-## The current bench (active worker profiles — omit these from your `bench` unless you're
-## changing them; you only need to list NEW or CHANGED profiles)
+## The current bench (active worker profiles)
+These already exist — list only NEW or CHANGED profiles in your `bench`.
 {BENCH}
 
 ## The fit table (routing_outcomes so far, aggregated class × tier)

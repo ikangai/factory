@@ -16,13 +16,19 @@ from ..common import config, killswitch
 
 def run_shift(store, *, token_budget: int, conductor: Callable, executor: Optional[Callable] = None,
               refill: Optional[Callable] = None, refill_threshold: int = 2,
+              org_planner: Optional[Callable] = None,
               mission: Optional[str] = None, wall_clock_s: int = 1800) -> dict:
     """Run one bounded conductor shift. The conductor PLANS (orients, claims the tasks to
     work); then the `executor` (deterministic, no LLM-driven Bash) runs each claimed task
     through the gated pipeline and closes it — keeping the long-running, backgroundable
     dispatch OUT of the headless conductor's hands. Returns {action, shift_id, reaped,
     shipped}. Always leaves the store clean: a crashed shift is reaped first, and the shift
-    row is always closed."""
+    row is always closed.
+
+    `org_planner` (self-organizing factory, Task 2.2): the shift-start trigger
+    (`orchestrator.org.maybe_plan_org`) — injected exactly like `executor`/`refill` so
+    every EXISTING run_shift test (none of which pass it) stays byte-identical. `None`
+    (the default) is a pure no-op."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
     store.reap_orphaned_approvals()                # + push approvals stranded 'executing' by a
                                                    #   crash between claim and resolve (Fix 4d)
@@ -37,6 +43,20 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
         return {"action": "no_mission", "shift_id": None, "reaped": len(reaped), "shipped": 0}
 
     sh = store.start_shift(token_budget=token_budget, mission_id=m["id"])
+
+    # Self-organizing factory (design: docs/plans/2026-07-09-self-organizing-factory-
+    # design.md §3; impl Task 2.2): the shift-start / mission-change trigger. Placed HERE —
+    # main thread, right after the STOP check + shift start, before anything below reads a
+    # knob — so a chart planned THIS call already applies to this same shift's dispatch
+    # (maybe_plan_org itself re-checks STOP and no-ops once a chart already exists for the
+    # mission, so the frontier call happens at most once per mission). Fail-open: an
+    # organizer blow-up is real judgment work, not a brake — it must never sink the shift
+    # it was trying to improve (mirrors the `refill` fail-open just below).
+    if org_planner is not None:
+        try:
+            org_planner(store, shift_id=sh)
+        except Exception:  # noqa: BLE001 — an organizer failure mustn't sink the shift
+            pass
 
     # Top up the backlog from research when it's THIN — the generative loop runs on the
     # RAIL, deterministically, not at the conductor's discretion (which left research dry).
