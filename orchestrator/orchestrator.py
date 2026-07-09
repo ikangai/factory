@@ -707,7 +707,15 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
     for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
-            print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
+            # Fix 8b (self-organizing-factory adversarial review — visibility): a task's
+            # org-chart classification/profile assignment (whether stamped by a chart or
+            # hand-pinned via `plan estimate --profile`) is otherwise invisible on this CLI
+            # — the conductor can't OBSERVE what it's steering around without querying the
+            # store directly. Appended only when set, so a chartless/unassigned task's line
+            # is byte-identical to before.
+            cls, prof = t.get("org_class") or "", t.get("profile") or ""
+            marker = f" [{cls}/{prof}]" if (cls or prof) else ""
+            print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}{marker}")
     elif action == "add":
         import uuid
         tid = f"task-{uuid.uuid4().hex[:8]}"
@@ -998,7 +1006,8 @@ def _write_mission_md(statement: str) -> None:
 
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
-            real: bool = False, conductor=None, executor=None, refill=None) -> dict:
+            real: bool = False, conductor=None, executor=None, refill=None,
+            org_planner=None) -> dict:
     """The conductor loop entry point (design step 6): run ONE bounded shift, then assess
     the mission and surface the status. State persists in the store, so each `run` resumes
     where the last left off — schedule it (launchd) for the unattended daily cadence."""
@@ -1065,22 +1074,42 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
             from ..reporting import scope_check
+            # Fix 1b/1d (self-organizing factory adversarial review): both callables now
+            # accept/forward an optional `model` kwarg — an org chart's per-class
+            # scope_judge/decomposer tier (execute_claimed_tasks wraps these per-task when
+            # a chart sets one; the default None here just passes straight through to each
+            # judge's own config-derived tier, byte-identical to before this fix).
             if scope_on:                                # #1: pass/split/reject BEFORE dispatch
-                sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
+                sj = lambda task, model=None: scope_check.scope_judge(
+                    task, as_user=as_user, claude_bin=claude_bin, model=model)
             if decompose_on:                            # #4: split a no_candidate AFTER the worker fails
-                dc = lambda task: scope_check.decompose_judge(task, as_user=as_user, claude_bin=claude_bin)
+                dc = lambda task, model=None: scope_check.decompose_judge(
+                    task, as_user=as_user, claude_bin=claude_bin, model=model)
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
             require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
             investigate_blocked=investigate)
+        # Self-organizing factory (Task 2.2): the real production wiring for the shift-
+        # start trigger — config-gated OFF by default, like every LLM-spending stage this
+        # rail grew (scope_check/reviewer/investigate_blocked): the maybe_plan_org
+        # callable only EXISTS when `super_worker.organizer: true` in config.yaml.
+        # Config-ONLY, deliberately NOT in SETTINGS_SPEC — ORG_BOOL_KEYS derives from the
+        # spec's bools, so listing it there would hand the organizer control of its own
+        # trigger (and silently widen the authority line). Nested INSIDE "executor is
+        # None" too: a caller supplying their OWN executor is taking full manual control
+        # of dispatch and must opt into org_planner explicitly — it must never fire a
+        # live frontier claude_p call just because cmd_run happened to run.
+        if org_planner is None and bool(sw.get("organizer", False)):
+            from .org import maybe_plan_org
+            org_planner = maybe_plan_org
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
     refill_threshold = _k("refill_threshold", 2)
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
-                    refill=refill, refill_threshold=refill_threshold,
+                    refill=refill, refill_threshold=refill_threshold, org_planner=org_planner,
                     mission=mission, wall_clock_s=wall_clock_s)
     print(f"[run] shift {res.get('shift_id')}: {res['action']} "
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
@@ -2066,6 +2095,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     wk.add_argument("--description", default="", help="capabilities (for the conductor + board)")
     wk.add_argument("--overlay", default="", help="persona/emphasis block injected at {PROFILE}")
     wk.add_argument("--model", default="", help="tier alias: frontier|standard|fast ('' = frontier)")
+    og = sub.add_parser("org")              # the org chart: per-mission routing (design §3)
+    og.add_argument("action", choices=["show", "fit", "plan", "replan"],
+                    help="show = the active chart's classes/bench/rationale; "
+                         "fit = the fit table (routing outcomes by class x tier); "
+                         "plan = the frontier organizer designs a chart (refuses if one "
+                         "already exists — use replan); "
+                         "replan = supersede the active chart and plan fresh")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -2210,6 +2246,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "worker":
             cmd_worker(store, a.action, rest=a.rest, description=a.description,
                        overlay=a.overlay, model=a.model)
+        elif a.cmd == "org":
+            from .org import cmd_org
+            cmd_org(store, a.action)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

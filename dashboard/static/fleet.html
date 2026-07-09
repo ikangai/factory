@@ -482,6 +482,9 @@ code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-
               <div><button class="formbtn" id="wp-add">Add profile</button> <span class="merr" style="color:var(--red)" id="wp-err"></span></div>
             </details>
           </div></section>
+        <section class="card"><div class="card-head"><div><div class="card-title">Org chart — self-organizing routing</div>
+          <div class="card-sub">per-class stage/tier overrides the organizer designed, cited against the fit table</div></div><span class="muted" id="org-h"></span></div>
+          <div class="card-body" id="org-body"><div class="muted">no org chart</div></div></section>
         <div class="two">
           <section class="card"><div class="card-head"><div><div class="card-title">Runtime knobs</div>
             <div class="card-sub">applies at the next shift</div></div></div>
@@ -847,8 +850,32 @@ function executionRender(d){
 }
 
 // ── Resources ─────────────────────────────────────────────────────────────
-function resourcesRender(r){
-  r=r||{};const profs=r.profiles||[];
+// `org` (Fix 8a, self-organizing-factory adversarial review): data.org from /api/fleet —
+// the active org chart's classes/tiers/stages, the fit table size, and the organizer knob
+// state. `orgRender` follows the profile-cards' own DOM/JS pattern (a .pcard grid); a
+// chartless mission renders the explicit "no org chart" state, never a blank section.
+function orgRender(org){
+  org=org||{};
+  el('org-h').textContent=org.state==='active'?('· v'+(org.version||0)):'';
+  if(org.state!=='active'){
+    el('org-body').innerHTML=`<div class="muted">no org chart · organizer: ${org.organizer_on?'on':'off'}</div>`;
+    return;
+  }
+  const classes=org.classes||[];
+  const head=`<div class="muted">default_class=${esc(org.default_class||'')} · organizer: ${org.organizer_on?'on':'off'} · `+
+    `fit evidence: ${(org.fit||[]).length} class×tier row(s)</div>`;
+  const cards=classes.map(c=>{
+    const stages=Object.entries(c.stages||{}).map(([k,v])=>`${k}=${v}`).join(', ')||'(none)';
+    const tiers=Object.entries(c.tiers||{}).map(([k,v])=>`${k}=${v||'frontier'}`).join(', ')||'(none)';
+    return `<div class="pcard"><div class="ph"><span class="pn">${esc(c.name)}</span><span class="tier">${esc(c.profile||'(none)')}</span></div>`+
+      `<div class="pd">stages: ${esc(stages)}<br>tiers: ${esc(tiers)}</div></div>`;
+  }).join('') || '<div class="muted">chart has no classes</div>';
+  el('org-body').innerHTML=head+`<div class="cards">${cards}</div>`;
+}
+
+function resourcesRender(r,d){
+  r=r||{};d=d||{};const profs=r.profiles||[];
+  orgRender(d.org);
   el('prof-h').textContent=profs.length?('· '+profs.filter(p=>p.active).length+' active'):'';
   el('prof-cards').innerHTML=profs.length?profs.map(p=>{
     const acc=p.est_accuracy!=null?p.est_accuracy.toFixed(1)+'×':'—';
@@ -953,7 +980,7 @@ function reportRender(d,e){
 async function refreshQueue(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);queueRender(d);}catch(e){el('off').style.display='flex';}}
 async function refreshPlan(){try{const [p,e,d]=await Promise.all([fetchJSON('/api/plan'),fetchJSON('/api/evm'),fetchJSON('/api/fleet')]);headerRender(d);planRender(p,e,d);}catch(e){}}
 async function refreshExecution(){try{const d=await fetchJSON('/api/fleet');el('off').style.display='none';headerRender(d);executionRender(d);}catch(e){el('off').style.display='flex';}}
-async function refreshResources(){try{resourcesRender(await fetchJSON('/api/resources'));}catch(e){}}
+async function refreshResources(){try{const [r,d]=await Promise.all([fetchJSON('/api/resources'),fetchJSON('/api/fleet')]);resourcesRender(r,d);}catch(e){}}
 async function refreshTimesheets(){try{timesheetsRender(await fetchJSON('/api/timesheets'));}catch(e){}}
 async function refreshFinance(){try{const [e,d]=await Promise.all([fetchJSON('/api/evm'),fetchJSON('/api/fleet')]);headerRender(d);financeRender(e,d);}catch(e){}}
 async function refreshResearch(){try{const [rb,d]=await Promise.all([fetchJSON('/api/research'),fetchJSON('/api/fleet')]);headerRender(d);researchRender(rb,d);}catch(e){}}

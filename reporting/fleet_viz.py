@@ -148,6 +148,59 @@ def profiles_compact(store) -> list[dict]:
     return out
 
 
+def org_state(store) -> dict:
+    """The self-organizing org chart's board surface (impl plan Task 3.1; design
+    §5: "the fleet-viz data JSON... a dedicated tab is follow-up polish"). Mirrors
+    plan_list/profiles_compact: a standalone function the payload calls directly (not
+    routed through build_fleet_state). ALWAYS the same keys whether or not a chart is
+    active — a chartless mission is the explicit state string "no org chart", never a
+    missing key, so a caller never has to guess from absence.
+
+    `organizer_on` reads the EXACT config-only knob orchestrator/shift.py arms the
+    auto-organizer trigger from (`super_worker.organizer`) — never resolve_setting/the
+    store override path, because that knob is deliberately kept OUT of SETTINGS_SPEC so a
+    chart can never gain control of its own trigger (see orchestrator/org.py's
+    ORG_BOOL_KEYS comment). `latest` surfaces the most recent org_charts row for the
+    mission REGARDLESS of status, so a REJECTED replan attempt stays visible (audit trail)
+    even when it never applied and the active chart below (if any) is an older, unaffected
+    one. Crash-proof, like every other section here — never raises to the caller."""
+    try:
+        from ..orchestrator import org as _org      # lazy: avoid a reporting<->orchestrator cycle
+        from ..common import config
+
+        m = store.active_mission()
+        mission_id = m["id"] if m else None
+        active_row = store.get_active_org_chart(mission_id) if mission_id is not None else None
+        if active_row is None:                       # standing-chart fallback (mirrors org.py's
+            active_row = store.get_active_org_chart(None)   # own _active_row helper)
+        latest_row = store.latest_org_chart(mission_id) if mission_id is not None else None
+        if latest_row is None:
+            latest_row = store.latest_org_chart(None)
+
+        organizer_on = bool((config.load_config().get("super_worker") or {}).get("organizer", False))
+        fit = _org.fit_rows(store)
+        latest = ({"version": int(latest_row.get("version") or 0),
+                   "status": latest_row.get("status", "")} if latest_row
+                  else {"version": 0, "status": ""})
+
+        if active_row is None:
+            return {"state": "no org chart", "version": 0, "default_class": "", "classes": [],
+                    "organizer_on": organizer_on, "fit": fit, "latest": latest}
+
+        chart = active_row.get("chart") or {}
+        classes = [
+            {"name": c.get("name", "") or "", "profile": c.get("profile", "") or "",
+             "stages": dict(c.get("stages") or {}), "tiers": dict(c.get("tiers") or {})}
+            for c in (chart.get("classes") or []) if isinstance(c, dict)
+        ]
+        return {"state": "active", "version": int(active_row.get("version") or 0),
+                "default_class": chart.get("default_class", "") or "", "classes": classes,
+                "organizer_on": organizer_on, "fit": fit, "latest": latest}
+    except Exception:  # noqa: BLE001 — never let the board section sink the whole payload
+        return {"state": "no org chart", "version": 0, "default_class": "", "classes": [],
+                "organizer_on": False, "fit": [], "latest": {"version": 0, "status": ""}}
+
+
 def _briefs_staged() -> int:
     """How many staged research briefs await conversion (crash-proof filesystem count)."""
     try:
@@ -331,6 +384,7 @@ def fleet_json(store) -> dict:
                             "rationale": r.get("rationale", "")} for r in ms],
         "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
         "profiles": profiles_compact(store),  # worker bench + outcomes (Resources tab; Task 5.7)
+        "org": org_state(store),            # self-organizing org chart + fit table (Task 3.1)
         "digests": [d["summary"][:140] for d in state["digests"]],
         # PMO redesign: the latest shift's resume note = the Report tab's "next steps".
         "resume_note": (shifts[0].get("resume_note") or "") if shifts else "",
@@ -390,7 +444,7 @@ def generate_fleet_html(store, *, out_path: Optional[str] = None, generated_at: 
     out_path = out_path or os.path.join(paths.LOGS_DIR, "fleet.html")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     html_doc = render_fleet_html(build_fleet_state(store), live=live_workers(),
-                                 generated_at=generated_at)
+                                 generated_at=generated_at, org=org_state(store))
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(html_doc)
     return out_path
@@ -443,7 +497,50 @@ def _board_column(status: str, tasks: list) -> str:
             f'{_esc(status)} <span class="muted">({len(tasks)})</span></div>{cards}</div>')
 
 
-def render_fleet_html(state: dict, *, live: Optional[list] = None, generated_at: str = "") -> str:
+def _org_section_html(org: Optional[dict]) -> str:
+    """ONE compact <section> for the org chart (Task 3.1 — "keep HTML minimal... a
+    dedicated tab is follow-up polish", design §5). Mirrors the digests section's own
+    pattern: it always renders (never omitted, even chartless), and a REJECTED latest
+    chart stays visible even when it isn't the active one (audit surfacing).
+
+    Fix 7 (simplification, self-organizing-factory adversarial review): the per-class
+    stages/tiers rendering is now `orchestrator.org.class_summary` — the SAME helper
+    `cmd_org show`'s plain-text rendering uses — instead of a second, slightly-divergent
+    `_kv`/`_TIER_KV_KEYS` implementation living here (the old `_kv`'s frontier-blank
+    substitution was unconditional in cmd_org's own text but restricted to real tier-role
+    keys here — two presentations of "one class" that could silently drift apart)."""
+    org = org or {}
+    knob = "on" if org.get("organizer_on") else "off"
+    latest = org.get("latest") or {}
+    reject_note = ""
+    if latest.get("status") == "rejected":
+        reject_note = (f' <span class="muted">— latest proposal v{latest.get("version", 0)} '
+                       f'was REJECTED (see `factory learn list --role factory`)</span>')
+    if org.get("state") == "active":
+        try:
+            from ..orchestrator.org import class_summary   # lazy: avoid a reporting<->orchestrator cycle
+        except Exception:  # noqa: BLE001 — never let a bad import sink the whole board page
+            class_summary = lambda c: {"name": c.get("name") or "", "profile": c.get("profile") or "(none)",
+                                       "stages_kv": "(none)", "tiers_kv": "(none)"}
+        rows = "".join(
+            f'<div class="task"><b>{_esc(cs["name"])}</b> '
+            f'<span class="src">profile={_esc(cs["profile"])}</span> '
+            f'<span class="muted">stages: {_esc(cs["stages_kv"])} '
+            f'· tiers: {_esc(cs["tiers_kv"])}</span></div>'
+            for cs in (class_summary(c) for c in org.get("classes") or []))
+        head = (f'v{org.get("version", 0)} · default_class={_esc(org.get("default_class", ""))} '
+               f'· organizer knob: {knob}{reject_note}')
+        body = f'<div class="muted">{head}</div>{rows}'
+    else:
+        body = f'<div class="muted">no org chart · organizer knob: {knob}{reject_note}</div>'
+    fit = org.get("fit") or []
+    fit_line = (f'<div class="muted">fit evidence: {len(fit)} class×tier row(s)</div>' if fit
+               else '<div class="muted">fit evidence: none yet</div>')
+    return f'<section><h2>Org chart</h2>{body}{fit_line}</section>'
+
+
+def render_fleet_html(state: dict, *, live: Optional[list] = None, generated_at: str = "",
+                      org: Optional[dict] = None) -> str:
     live = live or []
     m = state.get("mission")
     mission_txt = _esc(m["statement"]) if m else "— no mission set —"
@@ -481,10 +578,12 @@ def render_fleet_html(state: dict, *, live: Optional[list] = None, generated_at:
         dig_html = (f'<section><h2>Research digests <span class="muted">(what shipped → '
                     f'fuels the researchers)</span></h2>{items}</section>')
 
+    org_html = _org_section_html(org)
+
     return _PAGE.format(
         mission=mission_txt, target=target, generated=_esc(generated_at),
         live=live_html, shifts=shifts_html, board=board_html, ms=ms_html, digests=dig_html,
-        task_total=state["task_total"], shift_count=len(state["shifts"]))
+        org=org_html, task_total=state["task_total"], shift_count=len(state["shifts"]))
 
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -526,6 +625,7 @@ footer{{color:var(--muted);font-size:12px;margin-top:30px;border-top:1px solid v
 <section><h2>Backlog</h2><div class="board">{board}</div></section>
 {ms}
 {digests}
+{org}
 <footer>The factory's workers are its records: a shift is a conductor instance; each task it
 claimed→done/blocked is a developer-worker dispatch; research tasks are researcher output.
 Read-only snapshot of the blackboard — regenerate with <code>factory viz</code>.</footer>

@@ -53,6 +53,14 @@ Staffing rules:
 - **Generate a profile when none fits** — `./bin/factory worker add <name> --description "<what
   it's good at>" --overlay "<one tight persona paragraph: emphasis + working style>" --model
   standard`. The overlay is persona ONLY — never instructions to skip tests or bypass the gates.
+- **An active org chart may already have stamped a task's `org_class`/profile** — respect
+  that assignment and don't override it; re-routing the bench is the organizer's job
+  (`factory org replan`), not yours. Assignments are visible in `factory task list`'s
+  trailing `[class/profile]` marker, so you can see what's already been routed before
+  picking a profile yourself.
+- **Pinning a task to a specific profile is legitimate** — `./bin/factory plan estimate
+  <task-id> <tokens> --profile <name>` is an explicit operator/conductor pin, and it
+  SURVIVES a replan (the organizer preserves any profile it didn't itself stamp).
 - **Retire profiles that repeatedly under-perform** — low merge rate or estimate blow-ups in the
   bench above — with `./bin/factory worker retire <name>`, and say why in your report. Keep the
   bench small (there is an active cap); `generalist` cannot be retired.

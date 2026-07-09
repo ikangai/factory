@@ -57,6 +57,13 @@ factory/
   smoke_test.py   end-to-end smoke test (§13.10)
 ```
 
+Optional and off by default: `orchestrator/org.py` can devise a per-mission **org
+chart** — a frontier-designed routing table that partitions the backlog into task classes,
+each with its own pipeline-stage toggles, model tiers, and worker profile, learned from a
+recorded fit table (`factory org show|fit|plan|replan`). A chartless mission runs exactly
+as before this existed; full schema, authority line, and failure posture:
+docs/runbooks/self-organizing-org.md.
+
 ## Install
 
 One command clones the factory + the target repo, installs deps, and configures a
