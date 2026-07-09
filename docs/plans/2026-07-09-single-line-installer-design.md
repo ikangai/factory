@@ -49,8 +49,11 @@ be locally adapted per target. Therefore:
   with the config overlay committed on it (same pattern as the deploy kit's `deploy` branch);
 - updating an instance = re-running install.sh with the same args (idempotent): it fetches
   origin and merges `origin/main` into `instance/<name>`, re-applies the overlay, re-runs
-  deps + init + smoke. Merge conflicts stop loudly for the operator — local evolution wins
-  by default is NOT assumed.
+  deps + init + smoke. A conflict confined to config.yaml self-heals (take upstream's file,
+  re-apply the overlay — the conflict is expected, since the overlay commit and upstream
+  both touch it and git coalesces nearby hunks); an uncommitted config.yaml from an
+  interrupted run is likewise discarded and regenerated. Any OTHER conflict or dirty file
+  stops loudly for the operator — local evolution wins by default is NOT assumed.
 
 ## Per-instance isolation audit
 
@@ -60,7 +63,7 @@ be locally adapted per target. Therefore:
 | agora bus (.groupchat/.agora) | repo-local (bin/factory bus + roles pin AGORA_DIR into the clone) |
 | .factory-mode / STOP | repo-local; NOT git-tracked → installer writes mode=shift |
 | dashboard port | config.yaml `dashboard.port` → auto-assigned per instance |
-| fleet viz port | CLI arg (`viz --serve --port`) → convention: dashboard.port+1, printed + shown by `list` |
+| fleet viz port | DERIVED: `viz --serve` defaults to dashboard.port+1 from config (orchestrator fleet_viz_default_port) — collision-free by construction |
 | git identity, pip user site, claude/gh logins | shared per OS user — deliberately fine |
 | Guest-House `agent` user wiring | machine-specific → overlay resets to safe same-user defaults |
 
@@ -111,10 +114,14 @@ Sets:
   `super_worker.claude_bin` → `"claude"` (fresh machines have no Guest-House user;
   the operator's own box re-enables consciously)
 
-Port auto-assignment (`--port auto`): collect `dashboard.port` from every sibling
-instance's config under `<root>`, then probe pairs (p, p+1) from 8787 upward in steps
-of 10, skipping taken/bound ports (test-bind on 127.0.0.1). Deterministic and
-collision-free across instances.
+Port assignment, three modes chosen by install.sh (only it knows install-vs-update):
+`auto` (fresh install) ALWAYS probes pairs (p, p+1) from 8787 in steps of 10 against the
+taken-set — every sibling's `dashboard.port` AND its implied fleet port (+1) — plus a real
+bind test on 127.0.0.1; `keep` (re-run) keeps the previously-assigned port unless it now
+collides with a sibling, with NO bind test (a live board legitimately holds its own port
+and a bind test can't tell it from a foreign process); explicit `--port N` is verbatim,
+warn-only on collision. Assignment is serialized across concurrent installs via
+`<root>/.ports.lock` (flock). `--port-base` shifts the probe base (hermetic tests).
 
 Also `--list`: print one line per instance under root (name, target, provider, ports,
 mode) — backs `install.sh list`.
@@ -122,10 +129,14 @@ mode) — backs `install.sh list`.
 ### 3. Non-clive targets (honesty clause)
 
 Only the `clive` adapter is registered today. The installer wires config for ANY repo,
-but with `--provider` ≠ a registered adapter the eval loop would fail at
-`get_adapter()`. The installer validates the provider against `adapters/` and prints a
-loud note for non-clive targets: the develop rail (briefs → worker → tests → gated merge)
-is target-generic, the scenario-eval loop needs a new adapter under `factory/adapters/`.
+but with `--provider` ≠ a registered adapter the eval loop would fail at `get_adapter()`.
+Validating against an `adapters/` file listing would be wrong (base.py isn't a provider;
+`get_adapter`'s if-chain, not file presence, registers one), so the installer validates
+nothing and instead prints a loud note whenever the eval loop is predictably unwired:
+for any non-clive TARGET under the default clive adapter, and for any non-clive PROVIDER
+(usable only once registered). The develop rail (briefs → worker → tests → gated merge)
+is target-generic either way. A target repo literally named `factory` collides with the
+clone dir; `--target-dir` renames the sibling clone to sidestep it.
 
 ## Testing
 

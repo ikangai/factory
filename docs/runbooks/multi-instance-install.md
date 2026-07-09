@@ -31,7 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/ikangai/factory/main/install.sh | b
 | flag | default | meaning |
 |---|---|---|
 | `--target <url\|path>` | `https://github.com/ikangai/clive.git` | the repo this instance optimises |
-| `--name <n>` | target basename (`.git` stripped, sanitized) | instance name — the dir under `--root` |
+| `--target-dir <d>` | target basename | sibling clone dir name — use when the target repo is literally named `factory` (which would collide with the factory clone dir) |
+| `--name <n>` | target basename (`.git` stripped, sanitized) | instance name — the dir under `--root`; explicit names are sanitized to `[A-Za-z0-9._-]` too |
 | `--root <dir>` | `~/factories` | parent of every instance on this machine |
 | `--factory-repo <url\|path>` | `https://github.com/ikangai/factory.git` | a local path enables offline/hermetic installs |
 | `--branch <b>` | `main` | factory branch the instance is created/updated from |
@@ -76,25 +77,36 @@ branch). **Updating an instance is re-running the installer with the same args**
 - the target clone is only fetched, never force-reset — the factory's own graduation flow
   moves its base branch forward between installer runs, and a re-run must not discard that.
 
-**Merge conflicts stop loudly.** Local evolution winning by default is NOT assumed — a
-conflicting merge into `instance/<name>` prints `resolve by hand in <dir>` and exits 1. Go
-into that dir, resolve it like any other git conflict, then re-run the installer.
+**config.yaml conflicts self-heal; everything else stops loudly.** The overlay commit and
+upstream both touch config.yaml (and git coalesces nearby hunks), so that ONE conflict is
+expected and mechanical: the update takes upstream's config.yaml wholesale and re-applies the
+instance overlay right after. Likewise, an uncommitted config.yaml left by an interrupted
+prior run is discarded (the overlay regenerates it). Any OTHER conflicting or dirty file is
+real local evolution: the installer prints `resolve by hand in <dir>` (or lists the dirty
+files) and exits 1 — resolve like any other git conflict, then re-run.
 
 ## Ports
 
-`dashboard.port` is assigned per instance (config.yaml, auto by default): the installer probes
-pairs `(p, p+1)` from 8787 upward in steps of 10, skipping anything a sibling instance already
-claims or that fails a real bind test on 127.0.0.1. A re-run never reassigns a live instance's
-port — if the current value already differs from every sibling's, it's kept unchanged.
+`dashboard.port` is assigned per instance (config.yaml, auto by default), with fresh installs
+and updates deliberately different:
 
-The sibling scan only sees instances under `--root`. A process OUTSIDE it holding the assigned
-port (e.g. an operator's dev-checkout board on 8787) isn't detected on the keep path — the
-board then fails loudly at startup (`EADDRINUSE`); re-run the installer with an explicit
-`--port` to move the instance.
+- **fresh install** (`--port auto`): PROBE — pairs `(p, p+1)` from 8787 upward in steps of 10,
+  skipping anything a sibling instance claims (its dashboard port AND its implied fleet port)
+  or that fails a real bind test on 127.0.0.1. A busy 8787 on the machine is detected here.
+- **re-run/update** (the installer passes `keep`): the previously-assigned port is kept
+  unchanged unless it now collides with a sibling — with NO bind test, because a live
+  dashboard legitimately holds its own port and a bind test can't tell "my own board" from
+  "someone else's process".
+- **explicit `--port N`**: used verbatim; collisions with a sibling's dashboard/fleet port
+  warn but never fail.
 
-The **fleet viz port is a convention, not a config field**: `dashboard.port + 1`, passed
-explicitly (`viz --serve --port <port+1>`). `install.sh list` (and `configure_instance.py
---list`) print both.
+Concurrent installs on one host are serialized around port assignment via a lock file
+(`<root>/.ports.lock`), so two simultaneous runs can't walk to the same free pair.
+
+The **fleet viz port is derived, not remembered**: `viz --serve` defaults to
+`dashboard.port + 1` read from the instance's own config.yaml, so each instance's fleet
+server is collision-free by construction — no `--port` needed. `install.sh list` (and
+`configure_instance.py --list`) print both ports plus each instance's target upstream URL.
 
 ## Manual steps (never touched by the installer)
 
@@ -107,9 +119,13 @@ explicitly (`viz --serve --port <port+1>`). `install.sh list` (and `configure_in
 
 Only the `clive` adapter is registered today (`common/config.py get_adapter`). The installer
 wires config for **any** repo — the develop rail (briefs → worker → tests → gated merge) is
-target-generic — but with `--provider` set to anything other than `clive`, the scenario-eval
-loop has no adapter to run yet. `install.sh` prints a loud note for non-clive targets: write a
-new adapter under `factory/adapters/` before expecting the eval loop to function.
+target-generic — but the scenario-eval loop needs an adapter for the target's layout. The
+installer does not (and cannot meaningfully) validate `--provider` against a file listing;
+instead it prints a loud note whenever the eval loop is predictably unwired: for any
+non-clive **target** (running under the default clive adapter) and for any non-clive
+**provider** (usable only once you register it in `get_adapter`). Also note: target runtime
+deps are installed only from a top-level `requirements.txt`; a target that declares deps
+elsewhere needs them installed manually before the first real shift.
 
 ## Uninstall
 
