@@ -55,8 +55,19 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     if org_planner is not None:
         try:
             org_planner(store, shift_id=sh)
-        except Exception:  # noqa: BLE001 — an organizer failure mustn't sink the shift
-            pass
+        except Exception as e:  # noqa: BLE001 — an organizer failure mustn't sink the shift…
+            # …but Fix 3c (self-organizing-factory adversarial review) says it must never
+            # be SILENT either: a printed line + a durable factory learning, mirroring
+            # every other advisory-role blow-up in this file (refill just below) and in
+            # develop.py's own investigator guard.
+            print(f"[org] planner error (non-fatal — the shift continues): {e}", flush=True)
+            try:
+                from ..reporting import factory_memory
+                factory_memory.record_learning(
+                    store, "factory", f"the org planner blew up mid-shift: {e}"[:500],
+                    scope="organizer", shift_id=sh)
+            except Exception:  # noqa: BLE001 — the learning write itself must never sink the shift
+                pass
 
     # Top up the backlog from research when it's THIN — the generative loop runs on the
     # RAIL, deterministically, not at the conductor's discretion (which left research dry).

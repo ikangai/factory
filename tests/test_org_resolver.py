@@ -130,6 +130,108 @@ def test_validate_chart_rejects_non_slug_class_name():
     assert any("slug" in r.lower() for r in reasons)
 
 
+def test_validate_chart_rejects_blank_string_in_match_any():
+    """Fix 2a: a blank/whitespace-only keyword in match.any is a `"" in text` substring
+    test that matches EVERY task — an accidental catch-all."""
+    chart = _one_class_chart(class_overrides={"match": {"any": ["typo", "   "]}})
+    ok, reasons = org.validate_chart(chart, max_profiles=10)
+    assert ok is False
+    assert any("match.any" in r for r in reasons)
+
+
+def test_validate_chart_rejects_pure_empty_string_in_match_any():
+    chart = _one_class_chart(class_overrides={"match": {"any": [""]}})
+    ok, reasons = org.validate_chart(chart, max_profiles=10)
+    assert ok is False
+    assert any("match.any" in r for r in reasons)
+
+
+def test_validate_chart_rejects_duplicate_class_names():
+    """Fix 2b: classify() matches the FIRST same-named class, but apply's classes_by_name
+    dict keys on name and applies the LAST — a duplicate name means two different things
+    depending which code path reads it."""
+    chart = {"classes": [
+        {"name": "dup", "match": {"any": ["a"]}, "stages": {}, "tiers": {}, "profile": ""},
+        {"name": "dup", "match": {"any": ["b"]}, "stages": {}, "tiers": {}, "profile": ""},
+    ], "default_class": "dup", "bench": [], "retire": []}
+    ok, reasons = org.validate_chart(chart, max_profiles=10)
+    assert ok is False
+    assert any("dup" in r and "duplicate" in r.lower() for r in reasons)
+
+
+def test_validate_chart_rejects_more_than_max_classes():
+    """Fix 2c: MAX_CLASSES caps a chart at a handful of reusable buckets, not one class
+    per task."""
+    classes = [{"name": f"class-{i}", "match": {"any": ["x"]}, "stages": {}, "tiers": {},
+               "profile": ""} for i in range(org.MAX_CLASSES + 1)]
+    chart = {"classes": classes, "default_class": "class-0", "bench": [], "retire": []}
+    ok, reasons = org.validate_chart(chart, max_profiles=10)
+    assert ok is False
+    assert any(str(org.MAX_CLASSES) in r for r in reasons)
+
+
+def test_validate_chart_accepts_exactly_max_classes():
+    classes = [{"name": f"class-{i}", "match": {"any": ["x"]}, "stages": {}, "tiers": {},
+               "profile": ""} for i in range(org.MAX_CLASSES)]
+    chart = {"classes": classes, "default_class": "class-0", "bench": [], "retire": []}
+    ok, reasons = org.validate_chart(chart, max_profiles=10)
+    assert ok is True and reasons == []
+
+
+def test_validate_chart_stage_key_rejects_milestone_verify_and_investigate_blocked():
+    """Fix 2f: these two ARE legal SETTINGS_SPEC booleans (ORG_BOOL_KEYS) but have no live
+    per-task consult site — validate_chart's `stages` whitelist is ORG_WIRED_KEYS, the
+    narrower set, so naming either is now a hard rejection, not a silent no-op."""
+    for key in ("milestone_verify", "investigate_blocked"):
+        chart = _one_class_chart(class_overrides={"stages": {key: True}})
+        ok, reasons = org.validate_chart(chart, max_profiles=10)
+        assert ok is False
+        assert any(key in r for r in reasons)
+
+
+def test_org_wired_keys_is_a_subset_of_org_bool_keys():
+    """Drift guard: ORG_WIRED_KEYS must never name something ORG_BOOL_KEYS (the derived
+    SETTINGS_SPEC boolean set) doesn't even recognize as a legal boolean leaf."""
+    assert org.ORG_WIRED_KEYS <= org.ORG_BOOL_KEYS
+
+
+def test_validate_chart_bench_cap_counts_resulting_active_not_raw_bench_list():
+    """Fix 2d: cap arithmetic is EXISTING active (minus retires) plus bench adds, generalist
+    excluded — not a raw len(bench) count. Two bench entries that REPLACE two already-active
+    profiles (no retires) must not overflow a cap of 2."""
+    chart = _one_class_chart(bench=[
+        {"name": "python-dev", "model": "fast", "description": "d"},
+        {"name": "core-surgeon", "model": "standard", "description": "d"},
+    ], class_overrides={"profile": "python-dev"})
+    ok, reasons = org.validate_chart(chart, max_profiles=2,
+                                     active_profiles={"python-dev", "core-surgeon"})
+    assert ok is True and reasons == []
+
+
+def test_validate_chart_bench_cap_counts_retires_as_freeing_room():
+    chart = _one_class_chart(bench=[{"name": "new-hand", "model": "fast", "description": "d"}],
+                             retire=["stale-hand"], class_overrides={"profile": "new-hand"})
+    ok, reasons = org.validate_chart(chart, max_profiles=2,
+                                     active_profiles={"stale-hand", "other-hand"})
+    assert ok is True and reasons == []      # stale-hand retires → room for new-hand
+
+
+def test_validate_chart_bench_cap_rejects_when_resulting_count_exceeds_cap():
+    chart = _one_class_chart(bench=[{"name": "new-hand", "model": "fast", "description": "d"}],
+                             class_overrides={"profile": "new-hand"})
+    ok, reasons = org.validate_chart(chart, max_profiles=1,
+                                     active_profiles={"other-hand"})
+    assert ok is False
+    assert any("max_profiles" in r for r in reasons)
+
+
+def test_validate_chart_bench_cap_never_counts_generalist():
+    chart = _one_class_chart(bench=[{"name": "new-hand", "model": "fast", "description": "d"}],
+                             class_overrides={"profile": "new-hand"})
+    ok, reasons = org.validate_chart(chart, max_profiles=1, active_profiles={"generalist"})
+    assert ok is True and reasons == []
+
+
 def test_validate_chart_rejects_tier_role_outside_the_authority_line():
     """The authority line names exactly worker/scope_judge/decomposer/reviewer/investigator —
     a tier assigned to any other role (e.g. 'conductor') reaches past it."""
@@ -162,11 +264,35 @@ def test_task_params_no_active_chart_is_empty_overrides(tmp_path):
         assert params.stages == {} and params.tiers == {} and params.profile == ""
 
 
-def test_task_params_uses_the_tasks_stamped_org_class(tmp_path):
+def test_task_params_always_classifies_fresh_ignoring_a_stale_stamp(tmp_path):
+    """AMENDED (Fix 5a, self-organizing-factory adversarial review — staleness):
+    task_params no longer trusts a task's STAMPED org_class as an input — it's a WRITTEN
+    RECORD of a past classify() call, never a cache to read back (both the stamp and this
+    call are classify() outputs over the same chart; recomputing is strictly fresher). Here
+    the task is STAMPED 'mechanical-fix' but its title no longer matches that class's own
+    rules (staleness, e.g. after a `task reopen` or a replan that redefined the same class
+    name) — task_params must re-classify fresh and fall through to default_class, NOT
+    blindly honor the stale stamp. Supersedes this test's prior name/body, which pinned the
+    old (stale-trusting) behavior."""
     with _store(tmp_path) as s:
         m = s.set_mission("x")
         s.add_org_chart(m, VALID_CHART)
         s.add_task("t1", "irrelevant title", source="issue")
+        s.set_task_org_class("t1", "mechanical-fix")   # a stale/wrong stamp
+        t = s.get_task("t1")
+        params = org.task_params(s, t)
+        assert params.org_class == "standard-dev"       # fresh classify() wins, not the stamp
+        assert params.profile == ""
+
+
+def test_task_params_fresh_classify_agrees_with_an_accurate_stamp(tmp_path):
+    """A task whose title genuinely matches its stamped class still resolves correctly —
+    fresh classification and an accurate stamp simply agree (the stamp was never consulted,
+    but classify() lands on the same answer either way)."""
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        s.add_org_chart(m, VALID_CHART)
+        s.add_task("t1", "fix a typo in the README", source="issue")
         s.set_task_org_class("t1", "mechanical-fix")
         t = s.get_task("t1")
         params = org.task_params(s, t)
@@ -185,6 +311,45 @@ def test_task_params_classifies_on_the_fly_when_org_class_is_blank(tmp_path):
         params = org.task_params(s, t)
         assert params.org_class == "mechanical-fix"   # classified from title, not persisted here
         assert params.profile == "python-dev"
+
+
+# -- chart scoping correctness (Fix 4b) ---------------------------------------
+def test_active_mission_without_its_own_chart_is_chartless_not_inherited(tmp_path):
+    """Fix 4b (self-organizing-factory adversarial review): mission B becoming active must
+    NOT inherit mission A's still-active chart — an active mission without its own chart is
+    CHARTLESS, full stop (the design's own YAGNI list rules out cross-mission standing
+    orgs). RED before the fix: org.get_active_chart used to fall back to
+    get_active_org_chart(None), which (pre-4a) returned "the latest active chart of ANY
+    mission" — mission A's chart would leak into mission B."""
+    with _store(tmp_path) as s:
+        mission_a = s.set_mission("mission A")
+        s.add_org_chart(mission_a, VALID_CHART)
+        s.set_mission("mission B")             # switches the active mission; steps A down
+        assert org.get_active_chart(s) is None   # chartless — mission A's chart NOT inherited
+
+
+def test_standing_chart_still_applies_with_no_active_mission(tmp_path):
+    """The standing-chart fallback survives Fix 4b — it just narrows to "no active mission
+    at all", not "this mission happens to have none"."""
+    with _store(tmp_path) as s:
+        s.add_org_chart(None, VALID_CHART)
+        assert org.get_active_chart(s) == VALID_CHART
+
+
+# -- class_summary (Fix 7 simplification): shared by cmd_org show + fleet_viz -----------
+def test_class_summary_renders_stages_and_tiers_kv_with_frontier_default():
+    c = {"name": "mechanical-fix", "profile": "python-dev",
+        "stages": {"scope_check": False}, "tiers": {"worker": "fast", "reviewer": ""}}
+    cs = org.class_summary(c)
+    assert cs["name"] == "mechanical-fix" and cs["profile"] == "python-dev"
+    assert cs["stages_kv"] == "scope_check=False"
+    assert "worker=fast" in cs["tiers_kv"] and "reviewer=frontier" in cs["tiers_kv"]
+
+
+def test_class_summary_defaults_for_a_blank_class():
+    cs = org.class_summary({})
+    assert cs["name"] == "" and cs["profile"] == "(none)"
+    assert cs["stages_kv"] == "(none)" and cs["tiers_kv"] == "(none)"
 
 
 # -- render_fit_table ---------------------------------------------------------

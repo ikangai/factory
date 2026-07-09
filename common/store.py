@@ -673,18 +673,19 @@ class Blackboard:
         return cur.lastrowid
 
     def get_active_org_chart(self, mission_id: Optional[int] = None) -> Optional[dict]:
-        """The active chart for `mission_id`, or — when mission_id is None — the latest
-        active chart overall (any mission). Never returns a superseded/rejected row (fail-
-        closed: the caller's fallback is today's global resolve_setting behavior). The
-        parsed chart rides out under "chart" (chart_json stays too, for audit/debug)."""
-        if mission_id is not None:
-            row = self._one(
-                "SELECT * FROM org_charts WHERE mission_id IS ? AND status = 'active' "
-                "ORDER BY version DESC, id DESC LIMIT 1", (mission_id,))
-        else:
-            row = self._one(
-                "SELECT * FROM org_charts WHERE status = 'active' "
-                "ORDER BY id DESC LIMIT 1")
+        """The active chart for `mission_id` — `mission_id=None` selects STANDING charts
+        ONLY (mission_id IS NULL rows), never "the latest active chart of any mission"
+        (Fix 4a, self-organizing-factory adversarial review: the old any-mission fallback
+        let an unrelated mission's chart leak in as the "standing" answer, which is what
+        enabled the mission-B-inherits-mission-A-chart bug — fixed at the call site too,
+        orchestrator/org.py:_active_row). `mission_id IS ?` (not `=`) makes SQLite treat
+        NULL as a normal comparable bound value, so ONE query handles both the missioned
+        and standing cases — no branch needed. Never returns a superseded/rejected row
+        (fail-closed: the caller's fallback is today's global resolve_setting behavior).
+        The parsed chart rides out under "chart" (chart_json stays too, for audit/debug)."""
+        row = self._one(
+            "SELECT * FROM org_charts WHERE mission_id IS ? AND status = 'active' "
+            "ORDER BY version DESC, id DESC LIMIT 1", (mission_id,))
         if row is None:
             return None
         try:
@@ -714,12 +715,22 @@ class Blackboard:
             row["chart"] = {}
         return row
 
-    def supersede_org_charts(self, mission_id: Optional[int]) -> None:
-        """Flip every currently-active chart for `mission_id` to 'superseded' (a replan's
-        first step, per the design's apply order: supersede -> insert -> bench -> classify)."""
-        self._exec(
-            "UPDATE org_charts SET status = 'superseded' WHERE status = 'active' "
-            "AND mission_id IS ?", (mission_id,))
+    def supersede_org_charts(self, mission_id: Optional[int], *, except_id: Optional[int] = None) -> None:
+        """Flip every currently-active chart for `mission_id` to 'superseded'. `except_id`
+        (Fix 3a, self-organizing-factory review — the apply-path reorder) lets the NEW
+        chart's own row survive this call: `plan_org` now INSERTS the new chart first (so a
+        crash can never leave a mission with NO active chart, only ambiguity between two —
+        and get_active_org_chart's `ORDER BY version DESC, id DESC` already prefers the
+        newest, so even that window is benign), then supersedes every OTHER active chart —
+        never itself."""
+        if except_id is not None:
+            self._exec(
+                "UPDATE org_charts SET status = 'superseded' WHERE status = 'active' "
+                "AND mission_id IS ? AND id != ?", (mission_id, except_id))
+        else:
+            self._exec(
+                "UPDATE org_charts SET status = 'superseded' WHERE status = 'active' "
+                "AND mission_id IS ?", (mission_id,))
 
     def set_task_org_class(self, id: str, org_class: str) -> None:
         """Assign a task's org-chart class ('' = unclassified — the classify-on-the-fly

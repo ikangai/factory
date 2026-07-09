@@ -29,6 +29,20 @@ from ..common import config, killswitch
 # EXCLUDED — global load management stays operator-owned (design §"Never org-controllable").
 ORG_BOOL_KEYS = {key.split(".", 1)[1] for key, kind in config.SETTINGS_SPEC.items() if kind is bool}
 
+# Fix 2f (self-organizing-factory adversarial review): every ORG_BOOL_KEYS member
+# VALIDATES as a legal SETTINGS_SPEC boolean under the authority line, but only these SIX
+# have a real per-task dispatch consult site wired today (orchestrator/develop.py's
+# org.stage_on call sites: scope_check/auto_decompose are narrow-only — see
+# _NARROW_ONLY_STAGES — the other four work both ways). `milestone_verify` (a
+# milestone-level, not task-level, check) and `investigate_blocked` (the post-shift
+# investigator runs at one fixed global gate/tier) are legal SETTINGS_SPEC booleans but
+# have NO consult site — a chart naming either as a `stages` key is now REJECTED outright
+# (not silently accepted-but-inert, which is what validate_chart used to do against the
+# WIDER ORG_BOOL_KEYS). ORG_WIRED_KEYS is `stages`'s real whitelist; ORG_BOOL_KEYS stays
+# the derived (wider) set the authority line still recognizes as boolean-typed.
+ORG_WIRED_KEYS = {"scope_check", "auto_decompose", "require_test", "reviewer",
+                  "acceptance_exec", "retry_on_discard"}
+
 # The only tier aliases resolve_model understands. '' and 'frontier' are synonyms (both
 # resolve to the account default) but a chart may name either explicitly.
 TIER_PALETTE = ("", "frontier", "standard", "fast")
@@ -36,7 +50,18 @@ TIER_PALETTE = ("", "frontier", "standard", "fast")
 # The pipeline roles whose MODEL TIER the design's authority line grants the organizer
 # control over — the worker plus each isolated judge/reviewer role. Any other key in a
 # class's `tiers` dict (e.g. 'conductor') reaches past the line and fails validation.
+# Fix 1e: `investigator` validates here (it's still within the authority line) but has NO
+# live per-task consult site today — the post-shift investigator (factory_memory.
+# investigate_blocked) runs at a single FIXED tier for the whole shift (Task 4.1's own
+# scope); a chart naming an `investigator` tier is accepted but has NO EFFECT until a
+# future wiring (see _bounds_text and docs/runbooks/self-organizing-org.md).
 ROLE_TIER_KEYS = ("worker", "scope_judge", "decomposer", "reviewer", "investigator")
+
+# Fix 2c: a chart that partitions the backlog into more than a handful of classes has
+# stopped being "a handful of reusable buckets" (the organizer's own brief: 2-5) and
+# started being per-task micromanagement — reject outright rather than let sprawl in
+# quietly. The prompt's own guidance (2-5) stays tighter than this hard cap on purpose.
+MAX_CLASSES = 8
 
 _CLASS_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")   # mirrors store._PROFILE_SLUG_RE
 
@@ -60,21 +85,35 @@ def validate_chart(chart, *, max_profiles: int, active_profiles=None) -> tuple[b
     classes = chart.get("classes")
     if not isinstance(classes, list) or not classes:
         return False, ["chart has no classes (at least one is required)"]
+    if len(classes) > MAX_CLASSES:                    # Fix 2c: a handful of reusable buckets,
+        reasons.append(f"chart has {len(classes)} classes — exceeds MAX_CLASSES "  # not per-task
+                       f"({MAX_CLASSES})")                                          # micromanagement
 
     # addition A: bench entries are validated (name/model/description) — and their names
     # collected — BEFORE the classes loop, so a class's `profile` can be checked for
     # self-containment (below) against bench_names ∪ active_profiles in the SAME pass.
+    # Fix 2d/2e (self-organizing-factory adversarial review): bench validation now REUSES
+    # worker_admin.validate_add (the same guardrail the `factory worker`/`POST /api/worker`
+    # surfaces enforce) per entry, instead of reimplementing the slug/tier/overlay checks —
+    # so a bench entry can never be MORE permissive than a hand-added profile. Lazy import
+    # (mirrors plan_org's own convention below): org.py stays "pure store+config reads, no
+    # LLM" at module level; worker_admin has no LLM either, but the lazy import keeps this
+    # module's import graph minimal and matches the rest of the file's style.
+    from ..reporting import worker_admin
     bench = chart.get("bench")
     if bench is not None and not isinstance(bench, list):
         reasons.append("bench must be a list")
         bench = []
     bench = bench or []
-    bench_names: set = set()
+    bench_names: set = set()        # VALID slugs only — self-containment resolution (below)
+    bench_names_all: set = set()    # any named entry — the cap's resulting-count arithmetic (2d)
     for b in bench:
         if not isinstance(b, dict):
             reasons.append("a bench entry is not a dict")
             continue
         bname = b.get("name")
+        if isinstance(bname, str) and bname:
+            bench_names_all.add(bname)
         if isinstance(bname, str) and _CLASS_SLUG_RE.match(bname):
             bench_names.add(bname)
         else:
@@ -86,8 +125,39 @@ def validate_chart(chart, *, max_profiles: int, active_profiles=None) -> tuple[b
                            f"palette {TIER_PALETTE}")
         if not isinstance(b.get("description"), str) or not b.get("description", "").strip():
             reasons.append(f"bench entry {bname!r}: description must be a non-empty string")
-    if len(bench) > max_profiles:
-        reasons.append(f"bench size {len(bench)} exceeds max_profiles {max_profiles}")
+        overlay = b.get("overlay")
+        if overlay is not None and not isinstance(overlay, str):
+            reasons.append(f"bench entry {bname!r}: overlay must be a string")
+            overlay = ""
+        # Fix 2e: worker_admin.validate_add re-checks name/model (redundant with the two
+        # checks above when THOSE already failed — harmless, `reasons` tolerates repeats)
+        # and ADDS the one bound org.py never enforced: overlay length (MAX_OVERLAY_CHARS).
+        verr = worker_admin.validate_add(bname if isinstance(bname, str) else "",
+                                         bmodel, overlay or "")
+        if verr:
+            reasons.append(f"bench entry {bname!r}: {verr}")
+
+    retire_raw = chart.get("retire")
+    retire_names: set = set()
+    if retire_raw is not None and not isinstance(retire_raw, list):
+        reasons.append("retire must be a list")
+    elif retire_raw:
+        for r in retire_raw:
+            if not isinstance(r, str):
+                reasons.append(f"retire entry {r!r} must be a string")
+            else:
+                retire_names.add(r)
+
+    # Fix 2d: bench cap mirrors worker_admin.cap_error's EXACT semantics — the RESULTING
+    # active, NON-generalist profile count (today's active profiles, plus this chart's
+    # bench adds, minus this chart's retires) vs max_profiles. A raw len(bench) count (the
+    # prior check) both UNDER-counts a chart that adds 2 new profiles to an already-full
+    # bench and OVER-counts one that only retunes profiles that are already active.
+    resulting_active = ((set(active_profiles or ()) | bench_names_all) - retire_names) - {"generalist"}
+    if len(resulting_active) > max_profiles:
+        reasons.append(f"bench size after apply ({len(resulting_active)} resulting active "
+                       f"profiles) exceeds max_profiles {max_profiles} — mirrors "
+                       f"worker_admin.cap_error's semantics (generalist never counts)")
 
     known_profiles = bench_names | set(active_profiles or ())
 
@@ -106,18 +176,27 @@ def validate_chart(chart, *, max_profiles: int, active_profiles=None) -> tuple[b
 
         match = c.get("match") if isinstance(c.get("match"), dict) else {}
         any_list = match.get("any")
+        # Fix 2a: a blank/whitespace-only keyword in match.any is a `"" in text` substring
+        # test — which matches EVERY task unconditionally (an accidental catch-all), so a
+        # blank entry is rejected the same as a missing/non-list one.
         if not isinstance(any_list, list) or not any_list or not all(
-                isinstance(x, str) for x in any_list):
-            reasons.append(f"class {name!r}: match.any must be a non-empty list of strings")
+                isinstance(x, str) and x.strip() for x in any_list):
+            reasons.append(f"class {name!r}: match.any must be a non-empty list of "
+                           f"non-blank strings (a blank keyword matches EVERY task)")
 
         stages = c.get("stages") if isinstance(c.get("stages"), dict) else {}
         if not isinstance(c.get("stages", {}), dict):
             reasons.append(f"class {name!r}: stages must be a dict")
         for key in stages:
-            if key not in ORG_BOOL_KEYS:                      # capacity ints + unknown keys land here
-                reasons.append(f"class {name!r}: stage {key!r} is not an org-controllable "
-                               f"boolean (capacity ints and unknown keys are never "
-                               f"org-controllable — see the design's authority line)")
+            # Fix 2f: the whitelist is ORG_WIRED_KEYS (the six with a live per-task
+            # consult site), not the wider ORG_BOOL_KEYS — milestone_verify/
+            # investigate_blocked validate as legal SETTINGS_SPEC booleans but have no
+            # dispatch-side effect; naming them here is now a hard rejection, not a silent
+            # no-op (see the ORG_WIRED_KEYS comment above for the full rationale).
+            if key not in ORG_WIRED_KEYS:                     # capacity ints + unwired/unknown keys
+                reasons.append(f"class {name!r}: stage {key!r} is not a WIRED "
+                               f"org-controllable boolean (only {sorted(ORG_WIRED_KEYS)} "
+                               f"have a live per-task consult site today)")
 
         tiers = c.get("tiers") if isinstance(c.get("tiers"), dict) else {}
         if not isinstance(c.get("tiers", {}), dict):
@@ -139,18 +218,20 @@ def validate_chart(chart, *, max_profiles: int, active_profiles=None) -> tuple[b
             reasons.append(f"class {name!r}: profile {profile!r} names neither an existing "
                            f"active profile nor a bench entry (the chart must be self-contained)")
 
+    # Fix 2b: a duplicate class name is ambiguous in TWO different, silently-diverging ways
+    # — classify() matches the FIRST one with that name, but apply's classes_by_name dict
+    # (org.py's plan_org, and dispatch's own task_params) keys on name and so applies the
+    # LAST one's stages/tiers/profile. Reject outright rather than let a chart mean two
+    # different things depending which code path reads it.
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        reasons.append(f"duplicate class name(s) {dupes} (classify() matches the FIRST, "
+                       f"but apply keys a dict on name and applies the LAST — ambiguous)")
+
     default_class = chart.get("default_class")
     if default_class not in names:
         reasons.append(f"default_class {default_class!r} does not name a defined class "
                        f"({names})")
-
-    retire = chart.get("retire")
-    if retire is not None and not isinstance(retire, list):
-        reasons.append("retire must be a list")
-    elif retire:
-        for r in retire:                                       # addition A: every entry a string
-            if not isinstance(r, str):
-                reasons.append(f"retire entry {r!r} must be a string")
 
     return (len(reasons) == 0), reasons
 
@@ -180,40 +261,51 @@ class OrgParams:
 
 
 def _active_row(store) -> Optional[dict]:
-    """The raw active org_charts row (chart parsed under "chart") for the CURRENT mission,
-    falling back to the latest active STANDING chart (mission_id NULL) when there's no
-    active mission — shared by get_active_chart (dispatch) and cmd_org show (the CLI,
-    which also wants version/rationale/created_by, not just the chart body)."""
+    """The raw active org_charts row (chart parsed under "chart") — for the CURRENT
+    mission when one is active, or the latest active STANDING chart (mission_id NULL) only
+    when there is NO active mission at all. Fix 4b (self-organizing-factory adversarial
+    review): an active mission WITHOUT its own chart is CHARTLESS, full stop — it no
+    longer falls back to a standing chart (which, combined with the old any-mission
+    get_active_org_chart(None), was the mission-B-inherits-mission-A-chart bug; the
+    design's own YAGNI list rules out "cross-mission standing orgs" explicitly). A
+    mission-less dev/test run still gets the standing-chart fallback. Shared by
+    get_active_chart (dispatch) and cmd_org show (the CLI, which also wants
+    version/rationale/created_by, not just the chart body)."""
     m = store.active_mission()
-    row = store.get_active_org_chart(m["id"]) if m else None
-    if row is None:
-        row = store.get_active_org_chart(None)
-    return row
+    if m:
+        return store.get_active_org_chart(m["id"])    # None here = CHARTLESS (no inheritance)
+    return store.get_active_org_chart(None)            # no active mission → standing chart applies
 
 
 def get_active_chart(store) -> Optional[dict]:
-    """The parsed chart document (not the store row) for the CURRENT mission — falls back
-    to the latest active STANDING chart (mission_id NULL) when there's no active mission,
-    so a mission-less dev/test run can still exercise a hand-authored chart. None when
-    nothing is active (the chartless-behavior path)."""
+    """The parsed chart document (not the store row) — for the CURRENT mission when one is
+    active (CHARTLESS if it has no chart of its own — see _active_row), else the latest
+    active STANDING chart (mission_id NULL) when there is NO active mission, so a
+    mission-less dev/test run can still exercise a hand-authored chart. None when nothing
+    is active (the chartless-behavior path)."""
     row = _active_row(store)
     return row["chart"] if row else None
 
 
 def task_params(store, task: dict, chart: Optional[dict] = None) -> OrgParams:
     """Resolve one task's OrgParams. `chart` may be passed in (dispatch loads it ONCE,
-    main thread, per shift) or left None to resolve it here. A task's STAMPED org_class
-    wins when it names a class the CURRENT chart still defines; otherwise (blank, or a
-    stale class from a superseded chart) classify-on-the-fly from title+detail — never a
-    crash, always a valid class or ''."""
+    main thread, per shift) or left None to resolve it here.
+
+    Fix 5a (self-organizing-factory adversarial review — staleness): ALWAYS classify
+    fresh against the CURRENT chart. A task's STAMPED `org_class` is a WRITTEN RECORD of a
+    past classify() call, never an input to this one — both the stamp and this call are
+    classify() outputs over the same task text and the same-or-newer chart, so recomputing
+    is strictly fresher (or identical). Trusting a stale stamp just because its class NAME
+    still happens to exist in the current chart was the bug: a replan can redefine what
+    that same class name MATCHES without renaming it, and a task's title/detail can itself
+    change (`task reopen`) after the stamp was written — either way the old stamp would
+    silently outlive its own accuracy. Never a crash, always a valid class or ''."""
     if chart is None:
         chart = get_active_chart(store)
     if not chart:
         return OrgParams()
-    org_class = task.get("org_class") or ""
+    org_class = classify(chart, task)
     classes = {c.get("name"): c for c in (chart.get("classes") or []) if isinstance(c, dict)}
-    if org_class not in classes:
-        org_class = classify(chart, task)
     cls = classes.get(org_class)
     if cls is None:                        # default_class itself undefined (shouldn't happen
         return OrgParams(org_class=org_class)  # post-validation, but never crash a dispatch)
@@ -221,13 +313,45 @@ def task_params(store, task: dict, chart: Optional[dict] = None) -> OrgParams:
                      profile=cls.get("profile") or "", org_class=org_class)
 
 
-def stage_on(params: OrgParams, store, key: str, default) -> bool:
-    """The per-task stage-gate consult point: the chart's override for `key` wins; else
-    fall through to today's global resolve_setting. `key` is the SETTINGS_SPEC leaf name
-    (e.g. 'scope_check'), not the dotted 'super_worker.scope_check' key."""
-    if key in params.stages:
-        return bool(params.stages[key])
-    return bool(config.resolve_setting(store, f"super_worker.{key}", default)[0])
+def stage_on(params: OrgParams, key: str, current):
+    """The per-task stage-gate consult point: the chart's override for `key` wins (coerced
+    to bool — chart JSON is validated but this stays defensive); else `current` PASSES
+    THROUGH UNCHANGED, including None.
+
+    Fix 7 (simplification, self-organizing-factory review): PURE override-or-passthrough,
+    no store I/O — absorbs develop.py's former `_class_override` helper (now deleted; every
+    call site converged on this one function). `current` is the caller's ALREADY-RESOLVED
+    global value (e.g. cmd_run's own `config.resolve_setting` call, done ONCE at shift
+    start) — re-deriving it here via a second `resolve_setting` call per task per key (the
+    old behavior) was pure waste (same store, same config, main thread only — no race, so
+    always the identical result) AND a latent bug: require_test's `None` sentinel ("fall
+    through to develop_and_merge's OWN further default") would have collapsed to `False`
+    under a bool()-coercing passthrough, silently changing behavior. `key` is the
+    SETTINGS_SPEC leaf name (e.g. 'scope_check'), not the dotted 'super_worker.scope_check'
+    key."""
+    return bool(params.stages[key]) if key in params.stages else current
+
+
+_TIER_KV_ROLE_KEYS = ROLE_TIER_KEYS   # frontier-blank substitution applies only to real tier roles
+
+
+def class_summary(c: dict) -> dict:
+    """One class's rendering fields — SHARED (Fix 7 simplification) by cmd_org's `show`
+    (plain text) and fleet_viz's `_org_section_html` (HTML), so the two presentations of
+    "one class" can never drift out of sync. `c` may be a raw chart class dict OR
+    fleet_viz.org_state's own per-class summary dict — both share the name/profile/stages/
+    tiers shape. A blank tier renders 'frontier' (the palette's synonym for the account
+    default) for a REAL tier-role key only, never a blank string."""
+    stages = c.get("stages") or {}
+    tiers = c.get("tiers") or {}
+    stages_kv = ", ".join(f"{k}={v}" for k, v in stages.items()) or "(none)"
+
+    def _tier_fmt(k, v):
+        return f"{k}=frontier" if (k in _TIER_KV_ROLE_KEYS and not v) else f"{k}={v}"
+
+    tiers_kv = ", ".join(_tier_fmt(k, v) for k, v in tiers.items()) or "(none)"
+    return {"name": c.get("name") or "", "profile": c.get("profile") or "(none)",
+           "stages_kv": stages_kv, "tiers_kv": tiers_kv}
 
 
 def fit_rows(store) -> list[dict]:
@@ -268,14 +392,23 @@ def _backlog_bullets(store, limit: int = 60) -> str:
     """The {BACKLOG} seam: open tasks id/title/detail, capped — the organizer classifies
     the WHOLE backlog at apply time (below), this is only what it gets to SEE while
     designing the chart (a large backlog would blow the prompt budget for no benefit:
-    classes are reusable buckets, not a per-task decision)."""
+    classes are reusable buckets, not a per-task decision).
+
+    Fix 6 (prompt-injection hygiene, self-organizing-factory adversarial review): task
+    titles/details are UNTRUSTED (issue titles, worker-authored sub-task titles, …) flowing
+    into a role prompt, exactly like research_feed.py's GitHub issue titles — sanitized
+    with the SAME established helper (`common.textutil.clean_line`): printable-only,
+    whitespace-collapsed (so an embedded newline + a forged '## heading' can't start a new
+    markdown line inside the prompt), length-capped per line."""
+    from ..common.textutil import clean_line
     tasks = store.list_tasks(status="open")[:limit]
     if not tasks:
         return "(empty — nothing to organize yet)"
     lines = []
     for t in tasks:
-        line = f"- {t['id']}: {t['title']}"
-        detail = " ".join((t.get("detail") or "").split())[:200]
+        title = clean_line(t.get("title") or "")
+        line = f"- {t['id']}: {title}"
+        detail = clean_line(t.get("detail") or "", cap=200)
         if detail:
             line += f" — {detail}"
         lines.append(line)
@@ -299,21 +432,31 @@ def _bounds_text(max_profiles: int) -> str:
     stated verbatim-clear enough that the model never has to guess where it is. Every
     fact here is asserted literally by tests/test_organizer.py — this text is read by an
     LLM, not executed, so accuracy of WORDING is the whole point."""
-    both_ways = sorted(ORG_BOOL_KEYS - set(_NARROW_ONLY_STAGES))
+    # Fix 2f: the controllable stage booleans are ORG_WIRED_KEYS (the six with a live
+    # per-task consult site) — NOT the wider ORG_BOOL_KEYS, two of whose members
+    # (milestone_verify, investigate_blocked) validate as legal SETTINGS_SPEC booleans but
+    # have no dispatch-side effect and are now REJECTED outright if named in `stages`.
+    both_ways = sorted(ORG_WIRED_KEYS - set(_NARROW_ONLY_STAGES))
     narrow_only = ", ".join(sorted(_NARROW_ONLY_STAGES))
     both_ways_s = ", ".join(both_ways)
-    all_stages = ", ".join(sorted(ORG_BOOL_KEYS))
+    wired_stages = ", ".join(sorted(ORG_WIRED_KEYS))
+    global_only_stages = ", ".join(sorted(ORG_BOOL_KEYS - ORG_WIRED_KEYS))
     tiers_s = ", ".join(t or "''" for t in TIER_PALETTE)
     return (
-        f"- Controllable stage booleans (per class, in `stages`): {all_stages}.\n"
+        f"- Controllable stage booleans (per class, in `stages`): {wired_stages}.\n"
         f"  - `{narrow_only}` can only be NARROWED per class (turned OFF where the "
         f"shift-level knob is on) — they can NEVER be turned on when the shift-level knob "
         f"is off, because the judge/decomposer callable simply won't exist to run.\n"
         f"  - `{both_ways_s}` work BOTH ways — a class may force any of these on or off, "
         f"independent of the shift-level default.\n"
-        f"- Tiers (per class, in `tiers`, for roles worker/scope_judge/decomposer/"
-        f"reviewer/investigator): the palette is {tiers_s} — '' and 'frontier' are "
-        f"SYNONYMS (both mean the account's default, most capable model).\n"
+        f"  - `{global_only_stages}` are NEVER legal `stages` keys — naming either is "
+        f"REJECTED, not silently ignored — they stay GLOBAL-ONLY (config/board-controlled) "
+        f"until a future per-task consult site wires them.\n"
+        f"- Tiers (per class, in `tiers`, for roles {', '.join(ROLE_TIER_KEYS)}): the "
+        f"palette is {tiers_s} — '' and 'frontier' are SYNONYMS (both mean the account's "
+        f"default, most capable model). `investigator` validates as a legal tier role but "
+        f"has NO live per-task consult site today (the post-shift investigator runs at one "
+        f"FIXED global tier) — setting it is accepted but has no effect yet.\n"
         f"- Bench cap: at most {max_profiles} active profiles total (`max_profiles`) — "
         f"retire stale ones to make room; `generalist` cannot be retired.\n"
         f"- PERMANENTLY OUT OF REACH, no matter what: STOP/mode, every brake/budget "
@@ -329,10 +472,15 @@ def build_organizer_prompt(store, *, mission: Optional[dict], max_profiles: int,
     """Fill roles/organizer/prompt.md's seams from the live store. `fit_text` may be
     passed in (plan_org computes it once, to both prompt AND store as `evidence`) or left
     None to resolve it here."""
+    from ..common.textutil import clean_line
     from ..reporting import factory_memory
     from ..roles.common import _load_prompt
     fit_text = fit_text if fit_text is not None else render_fit_table(fit_rows(store))
-    mission_text = ((mission or {}).get("statement") or "").strip()
+    # Fix 6: the mission statement is operator-authored today, but it flows through the
+    # SAME untrusted-text seam discipline as the backlog (a future research-sourced or
+    # issue-derived mission must not need a second hardening pass) — one clean line, capped
+    # generously (missions run longer than a task title).
+    mission_text = clean_line((mission or {}).get("statement") or "", cap=1000)
     return (_load_prompt("organizer")
             .replace("{MISSION}", mission_text or "(no active mission — design a standing chart)")
             .replace("{BACKLOG}", _backlog_bullets(store))
@@ -404,12 +552,31 @@ def plan_org(store, *, force: bool = False, shift_id: Optional[int] = None,
             scope="organizer", shift_id=shift_id)
         return None
 
-    # Apply ATOMICALLY, in the design's order: supersede -> chart insert -> bench ->
-    # classify+assign. All main-thread store writes (Binding rule) — plan_org is only
-    # ever called from the CLI or the shift-start hook, never from a worker thread.
-    store.supersede_org_charts(mission_id)
-    store.add_org_chart(mission_id, chart, rationale=rationale, evidence=fit_text,
-                        status="active", created_by="organizer")
+    # Fix 3b (self-organizing-factory adversarial review — operator-pin preservation):
+    # capture the OLD active chart's class→profile set BEFORE anything changes, so
+    # re-stamping (below) can tell "a profile the OLD chart itself stamped" apart from "an
+    # operator's own hand-picked profile" (via `plan estimate --profile`, or a conductor
+    # assignment). Only the FORMER is safe to silently overwrite on replan.
+    old_row = store.get_active_org_chart(mission_id)
+    old_stamped_profiles: set = set()
+    if old_row:
+        for c in (old_row.get("chart") or {}).get("classes") or []:
+            if isinstance(c, dict) and c.get("profile"):
+                old_stamped_profiles.add(c["profile"])
+
+    # Apply ATOMICALLY. Fix 3a (self-organizing-factory adversarial review — REORDERED so
+    # a crash can never destroy the old chart without a replacement): insert the NEW chart
+    # FIRST (status active) — get_active_org_chart always picks the newest active row
+    # (`ORDER BY version DESC, id DESC`), so it takes over immediately even while the OLD
+    # chart row is still technically 'active' too — THEN supersede every OTHER active chart
+    # for the mission (`except_id` spares the new row), then bench, then classification. A
+    # crash in the window between insert and supersede is benign: the mission never has
+    # ZERO active charts, only (harmlessly) two for a moment, and the newest always wins.
+    # All main-thread store writes (Binding rule) — plan_org is only ever called from the
+    # CLI or the shift-start hook, never from a worker thread.
+    new_id = store.add_org_chart(mission_id, chart, rationale=rationale, evidence=fit_text,
+                                 status="active", created_by="organizer")
+    store.supersede_org_charts(mission_id, except_id=new_id)
     for b in chart.get("bench") or []:
         if not isinstance(b, dict):
             continue
@@ -424,8 +591,15 @@ def plan_org(store, *, force: bool = False, shift_id: Optional[int] = None,
     for t in store.list_tasks(status="open"):
         cls_name = classify(chart, t)
         store.set_task_org_class(t["id"], cls_name)
-        profile = (classes_by_name.get(cls_name) or {}).get("profile") or ""
-        store.set_task_profile(t["id"], profile)
+        new_profile = (classes_by_name.get(cls_name) or {}).get("profile") or ""
+        current_profile = t.get("profile") or ""
+        # Fix 3b: overwrite a task's profile ONLY when it's currently blank or names a
+        # profile the OLD chart itself stamped — never blank a non-empty profile, never
+        # clobber an operator pin. This makes precedence CONSISTENT everywhere (Fix 5b):
+        # operator pin > chart, at dispatch time (the sticky-profile rule) AND at replan
+        # time (here).
+        if current_profile == "" or current_profile in old_stamped_profiles:
+            store.set_task_profile(t["id"], new_profile)
 
     return chart
 
@@ -468,10 +642,9 @@ def cmd_org(store, action: str, *, claude_fn: Optional[Callable] = None) -> None
         if row.get("rationale"):
             print(f"  rationale: {row['rationale']}")
         for c in chart.get("classes") or []:
-            stages = ", ".join(f"{k}={v}" for k, v in (c.get("stages") or {}).items()) or "(none)"
-            tiers = ", ".join(f"{k}={v or 'frontier'}" for k, v in (c.get("tiers") or {}).items()) or "(none)"
-            print(f"  class {c.get('name')}: profile={c.get('profile') or '(none)'} "
-                  f"stages=[{stages}] tiers=[{tiers}]")
+            cs = class_summary(c)     # Fix 7: shared with fleet_viz._org_section_html
+            print(f"  class {cs['name']}: profile={cs['profile']} "
+                  f"stages=[{cs['stages_kv']}] tiers=[{cs['tiers_kv']}]")
         bench = chart.get("bench") or []
         if bench:
             print("  bench: " + ", ".join(b.get("name", "?") for b in bench))

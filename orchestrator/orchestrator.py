@@ -707,7 +707,15 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
     for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
-            print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}")
+            # Fix 8b (self-organizing-factory adversarial review — visibility): a task's
+            # org-chart classification/profile assignment (whether stamped by a chart or
+            # hand-pinned via `plan estimate --profile`) is otherwise invisible on this CLI
+            # — the conductor can't OBSERVE what it's steering around without querying the
+            # store directly. Appended only when set, so a chartless/unassigned task's line
+            # is byte-identical to before.
+            cls, prof = t.get("org_class") or "", t.get("profile") or ""
+            marker = f" [{cls}/{prof}]" if (cls or prof) else ""
+            print(f"{t['id']}\t{t['status']}\t[{t['source']}] {t['title']}{marker}")
     elif action == "add":
         import uuid
         tid = f"task-{uuid.uuid4().hex[:8]}"
@@ -1066,10 +1074,17 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
             from ..reporting import scope_check
+            # Fix 1b/1d (self-organizing factory adversarial review): both callables now
+            # accept/forward an optional `model` kwarg — an org chart's per-class
+            # scope_judge/decomposer tier (execute_claimed_tasks wraps these per-task when
+            # a chart sets one; the default None here just passes straight through to each
+            # judge's own config-derived tier, byte-identical to before this fix).
             if scope_on:                                # #1: pass/split/reject BEFORE dispatch
-                sj = lambda task: scope_check.scope_judge(task, as_user=as_user, claude_bin=claude_bin)
+                sj = lambda task, model=None: scope_check.scope_judge(
+                    task, as_user=as_user, claude_bin=claude_bin, model=model)
             if decompose_on:                            # #4: split a no_candidate AFTER the worker fails
-                dc = lambda task: scope_check.decompose_judge(task, as_user=as_user, claude_bin=claude_bin)
+                dc = lambda task, model=None: scope_check.decompose_judge(
+                    task, as_user=as_user, claude_bin=claude_bin, model=model)
         executor = lambda st, *, shift_id: execute_claimed_tasks(
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,

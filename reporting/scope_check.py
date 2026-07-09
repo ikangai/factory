@@ -227,9 +227,16 @@ def decompose_no_candidate(store, task: dict, *, shift_id, decomposer) -> list[s
     return ids
 
 
-def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
+def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude", model=None):
     """Production decomposer: one LLM call over roles/decompose/prompt.md → a raw dict with a
-    `subtasks` chain. Returns {} on any failure so decompose_no_candidate falls back."""
+    `subtasks` chain. Returns {} on any failure so decompose_no_candidate falls back.
+
+    `model` (self-organizing factory, Fix 1d — mirrors scope_judge's own `model` kwarg): an
+    optional tier ALIAS override (an org chart's per-class decomposer tier). None (the
+    default) preserves today's behavior — no `decompose_tier` config knob existed before
+    this fix either, so `sw.get("decompose_tier") or ""` resolves to '' (frontier) exactly
+    as omitting `model` from claude_super always has. None, not '', is the "no override"
+    sentinel, because '' is itself a legal alias (frontier)."""
     from ..roles import common
     from ..common import config
     sw = config.load_config().get("super_worker", {}) or {}
@@ -237,12 +244,14 @@ def decompose_judge(task: dict, *, as_user=None, claude_bin: str = "claude"):
     prompt = common._load_prompt("decompose").replace("{TASK}", text)
     import time
     t0 = time.monotonic()
+    tier = model if model is not None else (sw.get("decompose_tier") or "")
     try:
         reply, t, c = common.claude_super(
             prompt, workdir=_target_root(), allowed_tools=("Read", "Grep", "Glob"),
             as_user=as_user, claude_bin=claude_bin, settings=sw.get("settings", "user"),
             max_turns=int(sw.get("decompose_max_turns", 8)),
-            timeout=int(sw.get("decompose_timeout_s", 240)))
+            timeout=int(sw.get("decompose_timeout_s", 240)),
+            model=config.resolve_model(tier))
         obj = common._parse_obj(reply)
         obj = obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001 — fall back

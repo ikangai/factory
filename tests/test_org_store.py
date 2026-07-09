@@ -39,12 +39,20 @@ def test_add_and_get_active_org_chart_round_trips_and_latest_active_wins(tmp_pat
         assert got2["version"] == 2                          # bumped, not reset
 
 
-def test_get_active_org_chart_with_no_mission_id_returns_latest_active_overall(tmp_path):
+def test_get_active_org_chart_with_no_mission_id_returns_only_standing_charts(tmp_path):
+    """AMENDED (Fix 4a, self-organizing-factory adversarial review): mission_id=None must
+    select ONLY standing charts (mission_id IS NULL) — NOT "the latest active chart of ANY
+    mission", which is what this test used to pin. That old behavior is exactly what let a
+    newly-active mission with no chart of its own "inherit" an unrelated mission's chart
+    via the fallback in orchestrator/org.py:_active_row (Fix 4b) — a real bug, not a
+    feature. Supersedes this test's prior name/body."""
     with _store(tmp_path) as s:
         s.add_org_chart(1, CHART)
-        cid2 = s.add_org_chart(2, CHART)
-        latest = s.get_active_org_chart()                    # mission_id=None → latest active, any mission
-        assert latest["id"] == cid2
+        s.add_org_chart(2, CHART)
+        assert s.get_active_org_chart() is None               # no STANDING chart exists yet
+        cid_standing = s.add_org_chart(None, CHART)            # a genuine standing chart
+        latest = s.get_active_org_chart()
+        assert latest["id"] == cid_standing
 
 
 def test_supersede_org_charts_flips_actives_to_superseded(tmp_path):
@@ -63,6 +71,19 @@ def test_supersede_org_charts_scopes_to_the_mission(tmp_path):
         cid2 = s.add_org_chart(2, CHART)
         s.supersede_org_charts(1)
         assert s.get_active_org_chart(2)["id"] == cid2         # untouched
+
+
+def test_supersede_org_charts_except_id_spares_the_named_row(tmp_path):
+    """Fix 3a: the apply-path reorder inserts the NEW chart (active) first, then supersedes
+    every OTHER active chart for the mission — `except_id` must spare the new row itself so
+    a mission is never left with zero active charts, even transiently."""
+    with _store(tmp_path) as s:
+        old1 = s.add_org_chart(1, CHART)
+        new = s.add_org_chart(1, CHART)          # both 'active' at this point (pre-supersede)
+        s.supersede_org_charts(1, except_id=new)
+        assert s._one("SELECT status FROM org_charts WHERE id = ?", (old1,))["status"] == "superseded"
+        assert s._one("SELECT status FROM org_charts WHERE id = ?", (new,))["status"] == "active"
+        assert s.get_active_org_chart(1)["id"] == new
 
 
 def test_set_task_org_class_and_legacy_default(tmp_path):

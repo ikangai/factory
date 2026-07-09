@@ -190,3 +190,216 @@ def test_scope_judge_default_model_is_unchanged_when_omitted(monkeypatch):
     monkeypatch.setattr(roles_common, "claude_super", fake_claude_super)
     scope_check.scope_judge({"title": "t", "detail": ""})
     assert seen["model"] == org.config.resolve_model("")
+
+
+# -- Fix 1: WIRE THE TIERS — a chart's per-class tiers reach the actual call ------------
+CHART_WORKER_TIER = {
+    "classes": [{"name": "mechanical-fix", "match": {"any": ["typo"]},
+                "stages": {}, "tiers": {"worker": "fast"}, "profile": ""}],
+    "default_class": "mechanical-fix", "bench": [], "retire": [],
+}
+
+
+def test_chart_worker_tier_overrides_the_profiles_tier_and_records_the_effective_tier(tmp_path):
+    """Fix 1a: a class's tiers.worker overrides the profile's OWN tier alias for model
+    resolution (the overlay still comes from the profile); routing_outcomes.tier records the
+    EFFECTIVE (overridden) tier, not the profile's static default."""
+    from factory.common import config
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART_WORKER_TIER)
+    s.add_profile("slow-hand", description="d", overlay="be terse", model="standard")
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "fix a typo", source="issue")
+    s.set_task_profile("t1", "slow-hand")            # sticky profile — chart never overrides it
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def fake(text, *, model=None, profile_overlay=None, **k):
+        seen["model"] = model
+        seen["overlay"] = profile_overlay
+        return {"action": "merged", "merge_sha": "x"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake)
+
+    assert seen["model"] == config.resolve_model("fast")   # NOT "standard" (the profile's own)
+    assert seen["overlay"] == "be terse"                    # the overlay still comes from the profile
+    row = s._all("SELECT * FROM routing_outcomes WHERE task_id = 't1'")[0]
+    assert row["tier"] == "fast"      # the EFFECTIVE tier, not the profile's static "standard"
+    s.close()
+
+
+CHART_SCOPE_JUDGE_TIER = {
+    "classes": [{"name": "mechanical-fix", "match": {"any": ["typo"]},
+                "stages": {}, "tiers": {"scope_judge": "fast"}, "profile": ""}],
+    "default_class": "mechanical-fix", "bench": [], "retire": [],
+}
+
+
+def test_chart_scope_judge_tier_reaches_the_injected_judge(tmp_path):
+    """Fix 1b: a class's tiers.scope_judge reaches the injected judge as an explicit
+    `model=` kwarg — resolved via config.resolve_model, never a raw tier alias."""
+    from factory.common import config
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART_SCOPE_JUDGE_TIER)
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "fix a typo", source="issue")
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def scope_fake(task, model=None):
+        seen["model"] = model
+        return {"decision": "pass"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=lambda text, **k: {"action": "merged", "merge_sha": "x"},
+        scope_judge=scope_fake)
+
+    assert seen["model"] == config.resolve_model("fast")
+    s.close()
+
+
+def test_chart_scope_judge_tier_absent_calls_the_judge_single_arg(tmp_path):
+    """No tiers.scope_judge override on the class → the judge is called the OLD, single-arg
+    way (no `model` kwarg at all) — so an injected judge that doesn't accept `model` (every
+    caller predating Fix 1b) keeps working unchanged. Uses CHART's 'risky-core' class
+    (stages: {}, tiers: {}) — 'mechanical-fix' disables scope_check entirely, which would
+    bypass the judge instead of exercising the no-override call path."""
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART)     # this module's own CHART — tiers: {} on every class
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "touch the concurrency code", source="issue")   # → risky-core
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    calls = []
+
+    def scope_fake(task):        # single positional arg — would TypeError if model= were forced
+        calls.append(task["id"])
+        return {"decision": "pass"}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=lambda text, **k: {"action": "merged", "merge_sha": "x"},
+        scope_judge=scope_fake)
+
+    assert calls == ["t1"]
+    s.close()
+
+
+CHART_REVIEWER_TIER = {
+    "classes": [{"name": "risky-core", "match": {"any": ["concurrency"]},
+                "stages": {"reviewer": True}, "tiers": {"reviewer": "fast"}, "profile": ""}],
+    "default_class": "risky-core", "bench": [], "retire": [],
+}
+
+
+def test_chart_reviewer_tier_threads_through_to_dispatch(tmp_path):
+    """Fix 1c: a class's tiers.reviewer threads all the way to develop_task/develop_and_merge
+    as an explicit `reviewer_model` kwarg (resolved inside _review_candidate, not here) —
+    proven at the dispatch boundary the way the other three wired roles are: the injected
+    develop_fn receives the raw tier alias for its own review call to resolve."""
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART_REVIEWER_TIER)
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "touch the concurrency code", source="issue")
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def fake(text, **k):
+        seen.update(k)
+        return {"action": "merged", "merge_sha": "x"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake)
+
+    assert seen.get("reviewer") is True
+    assert seen.get("reviewer_model") == "fast"
+    s.close()
+
+
+def test_chart_reviewer_tier_absent_threads_none(tmp_path):
+    """No tiers.reviewer override → reviewer_model=None reaches dispatch — the sentinel
+    _review_candidate reads as "fall back to config.yaml's reviewer_tier exactly"."""
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART)      # tiers: {} on every class
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "fix a typo", source="issue")
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def fake(text, **k):
+        seen.update(k)
+        return {"action": "merged", "merge_sha": "x"}
+
+    develop.execute_claimed_tasks(s, sh, develop_fn=fake)
+
+    assert seen.get("reviewer_model") is None
+    s.close()
+
+
+CHART_DECOMPOSER_TIER = {
+    "classes": [{"name": "mechanical-fix", "match": {"any": ["typo"]},
+                "stages": {}, "tiers": {"decomposer": "fast"}, "profile": ""}],
+    "default_class": "mechanical-fix", "bench": [], "retire": [],
+}
+
+
+def test_chart_decomposer_tier_reaches_the_injected_decomposer(tmp_path):
+    """Fix 1d: a class's tiers.decomposer reaches the injected decomposer as an explicit
+    `model=` kwarg, mirroring the scope judge's own wrapper (1b)."""
+    from factory.common import config
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART_DECOMPOSER_TIER)
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "fix a typo", source="issue")
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    seen = {}
+
+    def decomposer_fake(task, model=None):
+        seen["model"] = model
+        return {"subtasks": [{"title": "sub1"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=lambda text, **k: {"action": "no_candidate"},
+        decomposer=decomposer_fake)
+
+    assert seen["model"] == config.resolve_model("fast")
+    s.close()
+
+
+def test_chart_decomposer_tier_absent_calls_the_decomposer_single_arg(tmp_path):
+    """No tiers.decomposer override → the decomposer is called the OLD, single-arg way."""
+    s = Blackboard(str(tmp_path / "f.db"))
+    s.init_db()
+    m = s.set_mission("ship it")
+    s.add_org_chart(m, CHART)      # tiers: {} on every class
+    sh = s.start_shift(token_budget=1)
+    s.add_task("t1", "fix a typo", source="issue")
+    s.set_task_status("t1", "in_progress", shift_id=sh)
+
+    calls = []
+
+    def decomposer_fake(task):     # single positional arg
+        calls.append(task["id"])
+        return {"subtasks": [{"title": "sub1"}]}
+
+    develop.execute_claimed_tasks(
+        s, sh, develop_fn=lambda text, **k: {"action": "no_candidate"},
+        decomposer=decomposer_fake)
+
+    assert calls == ["t1"]
+    s.close()

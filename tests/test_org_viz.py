@@ -227,3 +227,40 @@ def test_latest_org_chart_with_no_mission_id_returns_latest_overall(tmp_path):
         cid2 = s.add_org_chart(2, CHART, status="rejected")
         latest = s.latest_org_chart()
     assert latest["id"] == cid2
+
+
+# --------------------------------------------------------------------------- #
+# Fix 8b: `factory task list` surfaces [class/profile] markers when set        #
+# --------------------------------------------------------------------------- #
+def test_task_list_appends_class_profile_marker_when_set(tmp_path, capsys):
+    from factory.orchestrator import orchestrator
+    with _store(tmp_path) as s:
+        s.add_task("t1", "fix a typo", source="issue")
+        s.set_task_org_class("t1", "mechanical-fix")
+        s.set_task_profile("t1", "python-dev")
+        orchestrator.cmd_task(s, "list")
+        out = capsys.readouterr().out
+    assert "[mechanical-fix/python-dev]" in out
+
+
+def test_task_list_omits_the_marker_when_unassigned(tmp_path, capsys):
+    """A task with no class/profile renders its line byte-identical to before this fix —
+    no trailing bracket noise for the common (chartless) case."""
+    from factory.orchestrator import orchestrator
+    with _store(tmp_path) as s:
+        s.add_task("t1", "fix a typo", source="issue")
+        orchestrator.cmd_task(s, "list")
+        out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if ln.startswith("t1"))
+    assert line == "t1\topen\t[issue] fix a typo"
+    assert "[" not in line.split("]", 1)[1]   # no SECOND bracket group after "[issue]"
+
+
+def test_task_list_marker_shows_a_class_with_no_profile(tmp_path, capsys):
+    from factory.orchestrator import orchestrator
+    with _store(tmp_path) as s:
+        s.add_task("t1", "fix a typo", source="issue")
+        s.set_task_org_class("t1", "standard-dev")   # class set, profile stays generalist ('')
+        orchestrator.cmd_task(s, "list")
+        out = capsys.readouterr().out
+    assert "[standard-dev/]" in out

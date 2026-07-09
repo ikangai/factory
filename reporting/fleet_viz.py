@@ -497,23 +497,18 @@ def _board_column(status: str, tasks: list) -> str:
             f'{_esc(status)} <span class="muted">({len(tasks)})</span></div>{cards}</div>')
 
 
-_TIER_KV_KEYS = ("worker", "scope_judge", "decomposer", "reviewer", "investigator")
-
-
-def _kv(d: dict, *, tier_keys: bool = False) -> str:
-    """Compact 'k=v, k=v' rendering of a class's stages/tiers dict for the org section.
-    A blank tier value renders 'frontier' (the palette's synonym for the account default),
-    never a blank — mirrors cmd_org's own `show` rendering in orchestrator/org.py."""
-    def fmt(k, v):
-        return f"{k}=frontier" if (tier_keys and k in _TIER_KV_KEYS and not v) else f"{k}={v}"
-    return ", ".join(fmt(k, v) for k, v in d.items()) or "—"
-
-
 def _org_section_html(org: Optional[dict]) -> str:
     """ONE compact <section> for the org chart (Task 3.1 — "keep HTML minimal... a
     dedicated tab is follow-up polish", design §5). Mirrors the digests section's own
     pattern: it always renders (never omitted, even chartless), and a REJECTED latest
-    chart stays visible even when it isn't the active one (audit surfacing)."""
+    chart stays visible even when it isn't the active one (audit surfacing).
+
+    Fix 7 (simplification, self-organizing-factory adversarial review): the per-class
+    stages/tiers rendering is now `orchestrator.org.class_summary` — the SAME helper
+    `cmd_org show`'s plain-text rendering uses — instead of a second, slightly-divergent
+    `_kv`/`_TIER_KV_KEYS` implementation living here (the old `_kv`'s frontier-blank
+    substitution was unconditional in cmd_org's own text but restricted to real tier-role
+    keys here — two presentations of "one class" that could silently drift apart)."""
     org = org or {}
     knob = "on" if org.get("organizer_on") else "off"
     latest = org.get("latest") or {}
@@ -522,12 +517,17 @@ def _org_section_html(org: Optional[dict]) -> str:
         reject_note = (f' <span class="muted">— latest proposal v{latest.get("version", 0)} '
                        f'was REJECTED (see `factory learn list --role factory`)</span>')
     if org.get("state") == "active":
+        try:
+            from ..orchestrator.org import class_summary   # lazy: avoid a reporting<->orchestrator cycle
+        except Exception:  # noqa: BLE001 — never let a bad import sink the whole board page
+            class_summary = lambda c: {"name": c.get("name") or "", "profile": c.get("profile") or "(none)",
+                                       "stages_kv": "(none)", "tiers_kv": "(none)"}
         rows = "".join(
-            f'<div class="task"><b>{_esc(c.get("name", ""))}</b> '
-            f'<span class="src">profile={_esc(c.get("profile") or "(none)")}</span> '
-            f'<span class="muted">stages: {_esc(_kv(c.get("stages") or {}))} '
-            f'· tiers: {_esc(_kv(c.get("tiers") or {}, tier_keys=True))}</span></div>'
-            for c in org.get("classes") or [])
+            f'<div class="task"><b>{_esc(cs["name"])}</b> '
+            f'<span class="src">profile={_esc(cs["profile"])}</span> '
+            f'<span class="muted">stages: {_esc(cs["stages_kv"])} '
+            f'· tiers: {_esc(cs["tiers_kv"])}</span></div>'
+            for cs in (class_summary(c) for c in org.get("classes") or []))
         head = (f'v{org.get("version", 0)} · default_class={_esc(org.get("default_class", ""))} '
                f'· organizer knob: {knob}{reject_note}')
         body = f'<div class="muted">{head}</div>{rows}'
