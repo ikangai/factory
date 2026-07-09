@@ -128,6 +128,17 @@ class Blackboard:
         if lcols and "blocked_after" not in lcols:
             self.conn.execute(
                 "ALTER TABLE learnings ADD COLUMN blocked_after INTEGER NOT NULL DEFAULT 0")
+        # pending_approvals gained a claim timestamp (Fix B, final adversarial re-
+        # verification): reap_orphaned_approvals used to key its 1h age floor on created_at
+        # (proposal time). An operator approving a >1h-old card while the loop is mid-shift
+        # starts a fresh push right now — keying on proposal time reaped that SUCCESSFUL
+        # push and mislabeled it "crashed — verify with git ls-remote". claim_approval now
+        # stamps this on pending->executing; the reaper keys on it instead (falling back to
+        # created_at for pre-migration rows that were claimed before this column existed).
+        pcols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(pending_approvals)").fetchall()}
+        if pcols and "claimed_at" not in pcols:
+            self.conn.execute("ALTER TABLE pending_approvals ADD COLUMN claimed_at TEXT")
 
     def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         cur = self.conn.execute(sql, tuple(params))
@@ -432,6 +443,22 @@ class Blackboard:
         params.append(id)
         self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
 
+    def reframe_task(self, id: str, *, title: Optional[str] = None,
+                     detail: Optional[str] = None) -> None:
+        """Operator reframe from the dashboard Queue tab (Task 6, docs/plans/2026-07-08-
+        factory-owned-bus-human-queue.md §2): rewrite title and/or detail (either, both, or
+        neither — callers guard "at least one" before calling), clear the stale result
+        (`result` is NOT NULL — the schema default '' is the clear value, same convention as
+        set_task_status's retry path) and REOPEN the task (status -> 'open') so the next
+        shift picks it back up instead of staying blocked/dropped under a now-stale brief."""
+        sets, params = ["status = ?", "result = ?", "updated_at = ?"], ["open", "", now_iso()]
+        if title is not None:
+            sets.append("title = ?"); params.append(title)
+        if detail is not None:
+            sets.append("detail = ?"); params.append(detail)
+        params.append(id)
+        self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
+
     # -- shifts: bounded sessions that resume -------------------------------
     def start_shift(self, *, token_budget: int, mission_id: Optional[int] = None) -> int:
         cur = self._exec(
@@ -689,6 +716,43 @@ class Blackboard:
                            tokens_used=max(int(sh["tokens_used"] or 0), ledgered))
         return orphans
 
+    def reap_orphaned_approvals(self, *, max_age_hours: float = 1.0) -> list[dict]:
+        """Crash recovery for the approval gate, called on startup alongside
+        reap_orphaned_shifts (final whole-branch review Fix 4d). execute_approval claims a row
+        'executing' for the duration of ONE synchronous push (seconds–minutes) in the
+        dashboard process; a crash BETWEEN the push and resolve_approval strands it in
+        'executing' forever — invisible (the queue lists only 'pending') and unapprovable
+        (claim_approval refuses a non-pending row). Resolve rows stuck 'executing' longer than
+        `max_age_hours` to a terminal 'stale'. FAIL-SAFE by design: we cannot know from here
+        whether the push actually reached origin, so the note tells the operator to VERIFY
+        with `git ls-remote` — never assume success (a false 'approved' would let a
+        half-finished push masquerade as done). The age floor spares a legitimately in-flight
+        execution running in a SEPARATE process from being reaped mid-push.
+
+        The floor keys on COALESCE(claimed_at, created_at) — CLAIM time, not proposal time
+        (Fix B, final adversarial re-verification). created_at alone was a false-positive
+        generator: an operator can Approve a card that sat in the queue for hours — nothing
+        wrong with that — and that click starts a BRAND NEW push right now. Keying on the
+        card's age instead of the execution's age let a push seconds from completing (e.g. a
+        shift starting mid-approve) get reaped out from under it and mislabeled "crashed",
+        even though it went on to succeed. claimed_at is NULL only for rows claimed before
+        this column existed, so those still fall back to created_at exactly as before.
+        Returns the reaped rows (payload parsed) for the caller's report."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+        orphans = self._all(
+            "SELECT * FROM pending_approvals WHERE status = 'executing' "
+            "AND COALESCE(claimed_at, created_at) < ? ORDER BY id", (cutoff,))
+        note = ("execution crashed before it resolved; the push may or may not have reached "
+                "origin — verify with `git ls-remote` before trusting it")
+        for r in orphans:
+            self._exec(
+                "UPDATE pending_approvals SET status = 'stale', note = ?, resolved_at = ? "
+                "WHERE id = ? AND status = 'executing'", (note, now_iso(), r["id"]))
+            self.record_operator_action("reap-orphaned-approval", f"approval-{r['id']}", note)
+        return [self._with_payload(r) for r in orphans]
+
     # -- digests: the research<->dev feedback loop --------------------------
     def add_digest(self, *, shift_id: Optional[int], shipped: list,
                    summary: str = "") -> int:
@@ -873,3 +937,129 @@ class Blackboard:
             "INSERT OR REPLACE INTO issue_sync(issue_number, commit_sha, action, url, "
             "created_at) VALUES (?,?,?,?,?)",
             (issue_number, commit_sha, action, url, now_iso()))
+
+    # -- human work queue: approval gate + operator action audit ------------
+    # (design: docs/plans/2026-07-08-factory-owned-bus-human-queue-design.md)
+    @staticmethod
+    def _with_payload(row: Optional[dict]) -> Optional[dict]:
+        if row is not None:
+            try:
+                row["payload"] = json.loads(row.get("payload_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty payload
+                row["payload"] = {}
+        return row
+
+    def add_pending_approval(self, kind: str, payload: dict) -> int:
+        """File a new approval proposal (a graduation/publication dry-run preview).
+        SUPERSEDE-FIRST: any existing 'pending' row of the SAME kind is marked 'superseded'
+        (resolved_at stamped) in the same transaction before the new row lands — one live
+        proposal per kind, so a stale proposal can never be approved once a fresher one
+        exists. Returns the new row's id."""
+        self.conn.execute(
+            "UPDATE pending_approvals SET status = 'superseded', resolved_at = ? "
+            "WHERE kind = ? AND status = 'pending'", (now_iso(), kind))
+        cur = self.conn.execute(
+            "INSERT INTO pending_approvals(kind, status, payload_json, note, created_at) "
+            "VALUES (?, 'pending', ?, '', ?)", (kind, json.dumps(payload), now_iso()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def pending_approvals(self, status: str = "pending") -> list[dict]:
+        """Approval rows in `status`, newest first (id DESC — monotonic, stable within a
+        tick), payload parsed back to a dict under "payload"."""
+        rows = self._all(
+            "SELECT * FROM pending_approvals WHERE status = ? ORDER BY id DESC", (status,))
+        return [self._with_payload(r) for r in rows]
+
+    def get_approval(self, approval_id: int) -> Optional[dict]:
+        return self._with_payload(
+            self._one("SELECT * FROM pending_approvals WHERE id = ?", (approval_id,)))
+
+    def claim_approval(self, approval_id: int) -> bool:
+        """ATOMICALLY claim a pending approval for execution (pending → 'executing').
+        The rowcount-guarded single UPDATE is the whole race defense: of two concurrent
+        Approve clicks (double-click, two dashboards, dashboard + CLI) exactly one call
+        observes status='pending' and wins; the loser gets False and must not push.
+        Stamps claimed_at (Fix B) — reap_orphaned_approvals' age floor keys on THIS, not
+        created_at, so a card proposed hours ago but claimed just now is not mistaken for a
+        stale/crashed execution. Returns True iff THIS call performed the transition."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = 'executing', claimed_at = ? "
+            "WHERE id = ? AND status = 'pending'", (now_iso(), approval_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unclaim_approval(self, approval_id: int) -> bool:
+        """Revert a claimed approval (executing → 'pending') after a failed or
+        stale-preview execution attempt, so the operator can retry the SAME card.
+        Corner case, accepted: if a shift-end refile added a NEW pending row of the same
+        kind while this one was executing (supersede only touches 'pending' rows), the
+        unclaim briefly yields two pending rows of that kind — the next
+        add_pending_approval supersedes both, so the invariant self-heals."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = 'pending' "
+            "WHERE id = ? AND status = 'executing'", (approval_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def update_approval_payload(self, approval_id: int, payload: dict) -> bool:
+        """Refresh a live approval's preview payload in place (the stale-preview path:
+        reality moved since the card was filed, so the card is re-rendered from a fresh
+        dry-run rather than approved on outdated consent). Only legal while the row is
+        still live ('pending' or 'executing') — a resolved row's payload is part of the
+        immutable decision record. Returns True iff a row was updated."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET payload_json = ? "
+            "WHERE id = ? AND status IN ('pending','executing')",
+            (json.dumps(payload), approval_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def resolve_approval(self, approval_id: int, status: str, note: str = "") -> bool:
+        """Resolve a live approval (approved/rejected/stale). Legal FROM 'pending' or
+        'executing' (the atomic-claim flow resolves executing→approved after a successful
+        push) — a resolved row is immutable, so a duplicate or late resolution attempt
+        changes nothing and returns False rather than silently overwriting an earlier
+        decision. Returns True iff the row was live and got resolved."""
+        cur = self.conn.execute(
+            "UPDATE pending_approvals SET status = ?, note = ?, resolved_at = ? "
+            "WHERE id = ? AND status IN ('pending','executing')",
+            (status, note, now_iso(), approval_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def latest_resolved_approval(self, kind: Optional[str] = None) -> Optional[dict]:
+        """The most recently RESOLVED approval (resolved_at stamped — i.e. no longer
+        pending/executing: approved/rejected/stale/superseded), optionally filtered by kind,
+        newest-first by id. The conductor's {RESUME} seam reads this to surface a rejection
+        so a rejected outward-push proposal feeds back into planning instead of being
+        silently re-filed (design §3; final whole-branch review Fix 3a). A newer resolved
+        row of the same kind wins, so the feedback stops nagging once the operator moves on."""
+        if kind is None:
+            return self._with_payload(self._one(
+                "SELECT * FROM pending_approvals WHERE resolved_at IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1"))
+        return self._with_payload(self._one(
+            "SELECT * FROM pending_approvals WHERE kind = ? AND resolved_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (kind,)))
+
+    def latest_rejected_approval(self, kind: str) -> Optional[dict]:
+        """The most recent REJECTED approval of `kind` (newest-first by id), or None. The
+        proposal sites compare a fresh preview against this row's pinned payload to skip
+        re-filing an UNCHANGED proposal the operator already declined (final whole-branch
+        review Fix 3b) — any difference (new commits, moved tip, changed lag) proposes anew."""
+        return self._with_payload(self._one(
+            "SELECT * FROM pending_approvals WHERE kind = ? AND status = 'rejected' "
+            "ORDER BY id DESC LIMIT 1", (kind,)))
+
+    def record_operator_action(self, action: str, item_ref: str, detail: str = "") -> int:
+        """Append one audit row for an action taken from the dashboard's Queue tab."""
+        cur = self._exec(
+            "INSERT INTO operator_actions(action, item_ref, detail, created_at) "
+            "VALUES (?,?,?,?)", (action, item_ref, detail, now_iso()))
+        return cur.lastrowid
+
+    def recent_operator_actions(self, limit: int = 50) -> list[dict]:
+        """The last `limit` operator actions, newest first."""
+        return self._all(
+            "SELECT * FROM operator_actions ORDER BY id DESC LIMIT ?", (limit,))

@@ -55,6 +55,27 @@ def _bullets(rows, fmt, empty: str) -> str:
     return "\n".join(fmt(r) for r in rows) or empty
 
 
+def _append_rejection_feedback(store, resume: str) -> str:
+    """Fix 3a (final whole-branch review): a rejected outward-push proposal used to land ONLY
+    in operator_actions (which nothing reads), so the next shift re-filed the identical card
+    — design §3 promised the rejection surfaces HERE, in the conductor's {RESUME} seam.
+    Append one line per push kind whose MOST RECENT resolved approval was a rejection,
+    carrying the operator's note (an empty note still states the rejection). A newer
+    approval/supersede of that kind makes it no longer the latest resolved → the line drops,
+    so it stops nagging once the operator has moved on. Never raises — the bus/store may be
+    momentarily unavailable, and a planning seam must not take down prompt assembly."""
+    lines = []
+    for kind in ("graduation", "publication"):
+        try:
+            row = store.latest_resolved_approval(kind)
+        except Exception:  # noqa: BLE001 — feedback is a nicety, never a build dependency
+            row = None
+        if row and row.get("status") == "rejected":
+            note = (row.get("note") or "").strip()
+            lines.append(f'operator rejected the last {kind} proposal: "{note}"')
+    return resume + "\n" + "\n".join(lines) if lines else resume
+
+
 def _evm_header(store) -> str:
     """Task 1.5: one EVM header line for the {PLAN} seam — CPI (earned ÷ actual tokens),
     percent complete, overhead share of the whole ledger. This is the factory's only
@@ -143,6 +164,7 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
     from .research_feed import fetch_issues
     prior = store.prior_shift(shift_id)
     resume = (prior.get("resume_note") if prior else "") or "(first shift — no prior note)"
+    resume = _append_rejection_feedback(store, resume)
     backlog = _bullets(
         store.list_tasks(status="open"),
         lambda t: f"- [{t['source']}{('/' + t['source_ref']) if t['source_ref'] else ''}] "
@@ -172,7 +194,10 @@ def build_conductor_prompt(store, mission: dict, *, shift_id: int, token_budget:
             .replace("{BLOCKED}", blocked)
             .replace("{PLAN}", _plan_bullets(store))
             .replace("{WORKERS}", _workers_bullets(store))
-            .replace("{DIGESTS}", digests))
+            .replace("{DIGESTS}", digests)
+            # See roles/common.py:develop_candidate — same reason: no SessionStart hook to
+            # supply the vendored bus path in the deployed factory user.
+            .replace("{FACTORY_ROOT}", paths.FACTORY_ROOT))
 
 
 def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
@@ -189,7 +214,13 @@ def run_conductor(store, *, shift_id: int, mission: dict, token_budget: int,
         allowed_tools=CONDUCTOR_TOOLS,
         as_user=as_user, claude_bin=claude_bin,
         settings=sw.get("settings", "user"),               # full instance: agora + diary + MCP
-        extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor")},
+        # AGORA_DIR pin: the prompt tells the conductor to post via the raw vendored chat.py,
+        # which resolves the bus from the shell's CURRENT cwd — and the conductor's persistent
+        # Bash cwd can wander into a target clone mid-shift, where an unpinned post would land
+        # on the clone's throwaway bus and be silently lost (the trap factory_agora_dir()'s
+        # docstring warns about). Same plumbing developer/researcher get via worker_bus_env().
+        extra_env={"AGORA_SQUAD": sw.get("conductor_squad", "factory-conductor"),
+                   "AGORA_DIR": common.factory_agora_dir()},
         max_turns=int(sw.get("conductor_max_turns", 60)),  # it loops internally across the shift
         timeout=wall_clock_s)
     # Ledger the shift lead's own spend (Task 0.4). Placed BEFORE the sentinel branch so both

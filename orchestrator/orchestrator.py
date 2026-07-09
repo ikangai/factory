@@ -1108,6 +1108,10 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
                               if r.get("action") in ("comment", "close"))
                 print(f"[run] graduated → pushed {grad.get('n_commits', 0)} commit(s) to origin; "
                       f"{touched} issue(s) synced")
+            elif grad.get("action") == "proposed":
+                print(f"[run] graduation proposed for approval — #{grad.get('approval_id')} "
+                      f"({grad.get('n_commits', 0)} commit(s)) — approve from the dashboard "
+                      f"Queue tab (autonomy.push_approval)")
             elif grad.get("action") in ("skip", "error"):
                 print(f"[run] graduate: {grad['action']} "
                       f"({grad.get('reason') or grad.get('error', '')})")
@@ -1236,16 +1240,64 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     """`factory graduate [--dry-run]` — the operator's manual handle on the same flow the
     autopilot runs after a shift ships: ff base→factory/auto, push base to origin, and
     sync the target's GitHub issues for the pushed commits (keyword-gated close).
-    --dry-run previews the range + issue actions, mutating nothing."""
-    from ..reporting import issue_sync
+    --dry-run previews the range + issue actions, mutating nothing.
+
+    Fix 1 (final whole-branch review): this CLI is reachable by the AUTONOMOUS conductor
+    (it has Bash + ./bin/factory), so an ungated real push here let an LLM push to
+    production with zero human approval — defeating the very structural brake this branch
+    exists to install. So when `autonomy.push_approval` is ON (config default) and this is
+    not an explicit --dry-run, cmd_graduate does NOT push: it captures the SAME dry-run
+    preview (under the SAME cross-process lock the real push takes) and files/refreshes a
+    pending approval via reporting.approvals.propose_graduation (supersede handles refresh),
+    exactly like `_graduate_after_shift`'s gate-ON branch — the operator approves it from
+    the fleet GUI. NO bypass flag by design: turning autonomy up is a config-FILE edit, the
+    operator's deliberate override, never a CLI arg. Gate OFF and --dry-run stay
+    byte-identical to the pre-fix behavior."""
+    from ..reporting import issue_sync, approvals
+    from ..common import filelock
     repo = config.target_repo_slug()
     if not repo:
         print("[graduate] no target repo resolved (set target.repo in config.yaml) — skipping.")
         return None
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
-    res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
-                                       test_fn=_graduation_test_fn(), dry_run=dry_run)
+    gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+    propose = gate_on and not dry_run       # gate ON + not an explicit preview → file, don't push
+    try:
+        # Same cross-process push lock as execute_approval / the gate-off shift-end path:
+        # every actor that pushes this repo outward (or previews it under the gate) serializes.
+        with filelock.repo_lock(root):
+            res = issue_sync.graduate_and_push(root=root, base=base, repo=repo, store=store,
+                                               test_fn=_graduation_test_fn(),
+                                               dry_run=dry_run or propose)
+    except filelock.LockBusyError:
+        res = {"action": "skip", "reason": "lock-busy"}
+    if propose:
+        if res.get("action") != "dry_run":
+            # The preview came back abnormal (lock-busy, or graduate_and_push skipped) — the
+            # pipeline is broken; surface it as-is rather than filing a meaningless card.
+            print(f"[graduate] {res.get('action')}: {res.get('reason') or res.get('error', '')}")
+            return res
+        n = res.get("n_commits", 0)
+        if n <= 0:
+            print("[graduate] nothing to graduate — base is already current.")
+            return {"action": "skip", "reason": "no-op"}
+        # Fix C (final adversarial re-verification): `_graduate_after_shift`'s gate-ON
+        # branch already skips re-filing when the fresh preview is IDENTICAL (count + both
+        # endpoint SHAs, `_same_graduation`) to the latest REJECTED graduation — otherwise a
+        # rejection nags forever, re-filed by the very next shift. This CLI path files
+        # through the SAME propose_graduation but never consulted that check, so a
+        # conductor-invoked `factory graduate` (it has Bash) could re-propose the identical
+        # card the operator just declined. Reuse `_same_graduation` (module-level, this
+        # file) rather than re-deriving the compare — one source of truth for "unchanged".
+        rej = store.latest_rejected_approval("graduation")
+        if rej is not None and _same_graduation(rej.get("payload") or {}, res):
+            print("[graduate] unchanged since operator rejection — not re-proposing")
+            return {"action": "skip", "reason": "rejected-unchanged"}
+        approval_id = approvals.propose_graduation(store, preview=res)
+        print(f"graduation proposed → approval #{approval_id} pending (autonomy.push_approval)"
+              f" — approve in the fleet GUI or set autonomy.push_approval: false")
+        return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
     action = res.get("action")
     if action in ("synced", "dry_run"):
         synced = res.get("synced", [])
@@ -1325,6 +1377,16 @@ def _graduation_test_fn():
     return lambda root: config.get_adapter().run_tests(root)
 
 
+def _same_graduation(payload: dict, preview: dict) -> bool:
+    """True iff a fresh graduation preview pins the SAME consent-critical endpoints as a
+    stored payload (Fix 3b re-proposal suppression): the commit COUNT and BOTH endpoint SHAs
+    (base_sha/tip_sha, Fix 2). The `range` string is a constant symbolic literal, so it is
+    deliberately NOT part of the identity — only the actual endpoints are."""
+    return (payload.get("n_commits") == preview.get("n_commits")
+            and payload.get("base_sha", "") == preview.get("base_sha", "")
+            and payload.get("tip_sha", "") == preview.get("tip_sha", ""))
+
+
 def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                           graduate_fn=None, repo: Optional[str] = None,
                           root: Optional[str] = None, base: Optional[str] = None,
@@ -1333,26 +1395,81 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
     origin + sync the target's GitHub issues (design:
     docs/plans/2026-06-27-factory-auto-issue-sync-design.md). Fail-CLOSED and NEVER
     raises — any graduate/sync error is logged and swallowed so it cannot kill the
-    autonomous loop. Skips entirely unless real AND something shipped."""
+    autonomous loop. Skips entirely unless real AND something shipped.
+
+    Gated by `autonomy.push_approval` (default ON, config.yaml-only — see design:
+    docs/plans/2026-07-08-factory-owned-bus-human-queue-design.md §3): when the gate is
+    ON this function NEVER pushes. It instead calls `graduate_fn` with `dry_run=True`,
+    turns the preview into a `pending_approvals` row (`reporting.approvals.
+    propose_graduation`) and returns `{"action": "proposed", ...}` — the real push only
+    happens later, from a SEPARATE call (`reporting.approvals.execute_approval`) when the
+    operator approves it from the dashboard's Queue tab. Gate OFF reproduces the
+    pre-2026-07-08 behavior exactly (calls `graduate_fn` for real, as before)."""
     if not (real and shipped):
         return {"action": "skip", "reason": "not-real-or-nothing-shipped"}
     try:
-        from ..reporting import issue_sync
-        from ..common import killswitch
+        from ..reporting import issue_sync, approvals
+        from ..common import killswitch, filelock
         graduate_fn = graduate_fn or issue_sync.graduate_and_push
         repo = repo if repo is not None else config.target_repo_slug()
         if not repo:
             return {"action": "skip", "reason": "no-repo"}
         root = root or config.get_adapter().entry()[0]
         base = base or (config.target_config().get("base_branch") or "chore/extract-factory")
-        res = graduate_fn(root=root, base=base, repo=repo, store=store,
-                          stop_check=stop_check or killswitch.is_halted,
-                          test_fn=_graduation_test_fn())
+        sc = stop_check or killswitch.is_halted
+        test_fn = _graduation_test_fn()
+
+        gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+        if gate_on:
+            # Fix 4a (final whole-branch review): the gate-ON preview FETCHES, and
+            # execute_approval holds this SAME lock across its re-derivation + push — so the
+            # preview must take it too, or a shift-end preview could interleave a fetch with
+            # an in-flight Approve. Lock-busy is a benign skip (a preview isn't worth queueing
+            # behind a full push+retest), exactly like the gate-OFF real path below.
+            try:
+                with filelock.repo_lock(root):
+                    preview = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                          stop_check=sc, test_fn=test_fn, dry_run=True)
+            except filelock.LockBusyError:
+                return {"action": "skip", "reason": "lock-busy"}
+            if preview.get("action") == "dry_run":
+                n = preview.get("n_commits", 0)
+                if n <= 0:                        # nothing to propose — quiet, like a real no-op
+                    return {"action": "skip", "reason": "no-op"}
+                # Fix 3b (final whole-branch review): don't re-propose a graduation the
+                # operator already REJECTED unchanged — the reject used to land only in
+                # operator_actions, so the next shift re-filed the identical card and the
+                # reject nagged forever. Compare the fresh preview's pinned endpoints (count
+                # + SHAs, Fix 2) against the most recent rejected row; identical → skip
+                # filing. Any difference (new commit, moved tip) proposes normally.
+                rej = store.latest_rejected_approval("graduation")
+                if rej is not None and _same_graduation(rej.get("payload") or {}, preview):
+                    print("[run] graduation unchanged since operator rejection — not re-proposing")
+                    return {"action": "skip", "reason": "rejected-unchanged"}
+                approval_id = approvals.propose_graduation(store, preview=preview)
+                print(f"[run] graduation proposed → approval #{approval_id} pending "
+                      f"(autonomy.push_approval)")
+                return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
+            # The preview itself came back abnormal (STOP tripped mid-preview, or an
+            # injected graduate_fn that doesn't honor dry_run) — fall through to the SAME
+            # abnormal-skip escalation a real push's skip would get, below.
+            res = preview
+        else:
+            # Gate OFF pushes for real → serialize with every other push-side actor
+            # (an operator's Approve executing in the dashboard process, a manual
+            # `factory graduate`) via the cross-process repo lock.
+            try:
+                with filelock.repo_lock(root):
+                    res = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                      stop_check=sc, test_fn=test_fn)
+            except filelock.LockBusyError:
+                res = {"action": "skip", "reason": "lock-busy"}
         # A silent abnormal skip is how a broken graduation pipeline stays invisible
         # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
         # broken" through the same deduped failure seam as a raised graduate error;
-        # benign: stop = operator brake, no-op = nothing worth pushing.
-        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op"):
+        # benign: stop = operator brake, no-op = nothing worth pushing, lock-busy =
+        # another pusher holds the repo lock (the push IS happening — just elsewhere).
+        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op", "lock-busy"):
             _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
         return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
@@ -1416,6 +1533,23 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                                f"graduation pushes the base branch but nothing promotes it to "
                                f"the default branch",
                         ref="graduation:lag-publication")
+                # Task 5.5: gated the same as the push path (autonomy.push_approval) — file
+                # a publication proposal so the operator can promote base→release from the
+                # dashboard's Queue tab. add_pending_approval's supersede-per-kind semantics
+                # refreshes a stale proposal on every alarm, so no separate "already filed"
+                # check is needed here.
+                gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+                if gate_on:
+                    # Fix 3b (final whole-branch review): suppress re-filing a publication the
+                    # operator REJECTED unchanged (same ahead + release) — else the reject
+                    # (which lives only in operator_actions) nagged with the identical card
+                    # every shift. A changed lag / different release proposes normally.
+                    rej = store.latest_rejected_approval("publication")
+                    rp = (rej.get("payload") or {}) if rej is not None else {}
+                    if rej is not None and rp.get("ahead") == p and rp.get("release") == release:
+                        print("[run] publication unchanged since operator rejection — not re-proposing")
+                    else:
+                        store.add_pending_approval("publication", {"ahead": p, "release": release})
         return {**lag, "publication": pub}
     except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
         print(f"[run] lag alarm skipped (non-fatal): {e}")

@@ -15,7 +15,9 @@ Design: docs/plans/2026-06-27-factory-auto-issue-sync-design.md
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import tempfile
 
 # A close keyword immediately followed by an (optionally gh-prefixed) issue ref.
 # \b anchors the keyword to a word start so 'prefix #9' does not read as 'fix #9'.
@@ -184,6 +186,13 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     def git(*args):
         return runner(["git", "-C", root, *args], capture_output=True, text=True, timeout=60)
 
+    def rev(ref):
+        """Resolved sha of `ref`, or "" when unresolvable (fail-closed: a "" endpoint can
+        never equal a real pinned SHA in the approval stale-check, so the consent gate
+        refuses to push on an unverifiable endpoint rather than trusting it)."""
+        r = git("rev-parse", ref)
+        return (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
+
     # Refresh the remote ref before reading it — it is BOTH the sync-range floor (dry-run
     # preview) and the divergence truth (real merge/push): reading a possibly week-old
     # local remote-tracking ref is exactly what masked 105 commits of upstream drift with
@@ -195,7 +204,14 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
         rng = f"{remote}/{base}..{auto_branch}"
         commits = commits_in_range(root, rng, runner=runner)
         synced = sync_issues(repo, commits, store=store, runner=runner, dry_run=True)
-        result = {"action": "dry_run", "range": rng, "n_commits": len(commits), "synced": synced}
+        # Fix 2 (final whole-branch review): `range` is a CONSTANT symbolic literal
+        # (origin/<base>..<auto_branch>) — byte-identical every run — so a count-only
+        # stale-check (approvals.execute_approval) is blind to a commit-count-preserving
+        # amend/force-push on either endpoint. Pin the ACTUAL resolved endpoint SHAs so the
+        # consent re-derivation can refuse when either tip moved under the operator.
+        result = {"action": "dry_run", "range": rng, "n_commits": len(commits),
+                  "synced": synced, "base_sha": rev(f"{remote}/{base}"),
+                  "tip_sha": rev(auto_branch)}
         if fetch_failed:      # a stale preview beats no preview — flag it, don't withhold it
             result["fetch_failed"] = True
         return result
@@ -211,8 +227,7 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     if getattr(ff, "returncode", 1) != 0:
         return {"action": "skip", "reason": "not-fast-forward"}
 
-    old = git("rev-parse", f"{remote}/{base}")      # pre-push tip → the sync range floor
-    old_sha = (old.stdout or "").strip() if getattr(old, "returncode", 1) == 0 else ""
+    old_sha = rev(f"{remote}/{base}")               # pre-push tip → the sync range floor
     if not old_sha:
         return {"action": "skip", "reason": "no-remote-ref"}
 
@@ -238,4 +253,76 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
     rng = f"{old_sha}..{new_sha}"
     commits = commits_in_range(root, rng, runner=runner)
     synced = sync_issues(repo, commits, store=store, runner=runner)
-    return {"action": "synced", "range": rng, "n_commits": len(commits), "synced": synced}
+    # base_sha/tip_sha added for symmetry with the dry-run preview (Fix 2) — harmless on the
+    # real path (nothing compares them post-push): the pre-push remote tip and the pushed HEAD.
+    return {"action": "synced", "range": rng, "n_commits": len(commits), "synced": synced,
+            "base_sha": old_sha, "tip_sha": new_sha}
+
+
+def promote_to_release(*, root: str, base: str, release: str = "main", remote: str = "origin",
+                       runner=subprocess.run) -> dict:
+    """Mechanizes the manual 2026-07-08 promotion procedure: merge the graduated `base`
+    branch into the target's default/`release` branch and push it — the SECOND hop after
+    `graduate_and_push` lands work on `base` (`origin/<base>..origin/<release>` is exactly
+    the "publication lag" `graduation_lag`/`_warn_graduation_lag` measure). Runs entirely
+    in a detached temp worktree so the caller's own checkout of `root` is never touched or
+    switched. Fails CLOSED at every step, mirroring `graduate_and_push`: a fetch failure,
+    nothing to promote (release already has everything base has), a failed worktree add,
+    or a merge conflict all skip without mutating the remote — never forced, never a
+    partial push. `runner(argv, …)` runs git; injected for tests. The temp worktree is
+    always removed (git-side `worktree remove` + a real `shutil.rmtree` — the latter matters
+    under a faked runner, whose git calls never touch disk, so the real `tempfile.mkdtemp()`
+    dir would otherwise leak in every test)."""
+    def git(*args, cwd=None):
+        return runner(["git", "-C", cwd or root, *args], capture_output=True, text=True, timeout=60)
+
+    fetched_base = git("fetch", remote, base)
+    fetched_release = git("fetch", remote, release)
+    if (getattr(fetched_base, "returncode", 1) != 0
+            or getattr(fetched_release, "returncode", 1) != 0):
+        return {"action": "skip", "reason": "fetch-failed"}
+
+    count = git("rev-list", "--count", f"{remote}/{release}..{remote}/{base}")
+    try:
+        n_commits = int((count.stdout or "").strip())
+    except ValueError:
+        n_commits = 0
+    # A failed rev-list is folded into the same skip as a genuine zero — either way there
+    # is nothing we can safely promote.
+    if getattr(count, "returncode", 1) != 0 or n_commits <= 0:
+        return {"action": "skip", "reason": "nothing-to-promote"}
+
+    # Exposure note (bounded, pre-existing): only push-side actors share the
+    # common.filelock push lock — the develop rail's own worktree operations on this repo
+    # are NOT serialized with this function. The risk is bounded by distinct worktree
+    # namespaces (the rail's candidate worktrees live under its own dirs; this one is a
+    # fresh mkdtemp), so the only shared surface is .git/worktrees metadata, which git
+    # guards with its own internal locks.
+    wt = tempfile.mkdtemp(prefix="factory-promote-")
+    try:
+        added = git("worktree", "add", "--detach", wt, f"{remote}/{release}")
+        if getattr(added, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "worktree-failed"}
+
+        msg = f"Merge {base} into {release}: factory promotion (approved via human queue)"
+        merged = git("merge", "--no-ff", f"{remote}/{base}", "-m", msg, cwd=wt)
+        if getattr(merged, "returncode", 1) != 0:
+            git("merge", "--abort", cwd=wt)              # best-effort — never leaves a conflicted worktree
+            return {"action": "skip", "reason": "merge-conflict"}
+
+        pushed = git("push", remote, f"HEAD:{release}", cwd=wt)   # plain push: never forced
+        if getattr(pushed, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "push-failed"}
+
+        new_sha = (git("rev-parse", "HEAD", cwd=wt).stdout or "").strip()
+        return {"action": "promoted", "sha": new_sha, "n_commits": n_commits}
+    finally:
+        # Ordering matters: remove → rmtree → prune. rmtree BEFORE the prune, so that when
+        # `worktree remove --force` fails (locked/dirty tree) the directory is still gone
+        # by prune time and prune can actually drop the dangling .git/worktrees metadata —
+        # pruning first would leave that metadata behind forever. rmtree also matters under
+        # a faked test runner, whose git calls never touch disk (the real mkdtemp dir
+        # would otherwise leak in every test).
+        git("worktree", "remove", "--force", wt)          # best-effort: return code not checked
+        shutil.rmtree(wt, ignore_errors=True)
+        git("worktree", "prune")

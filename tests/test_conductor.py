@@ -73,6 +73,51 @@ def test_build_conductor_prompt_includes_the_workforce(tmp_path, monkeypatch):
     assert "--profile" in p                                              # assign a profile per task
 
 
+def test_build_conductor_prompt_substitutes_factory_root(tmp_path, monkeypatch):
+    """Task 8: {FACTORY_ROOT} must resolve to the real absolute path — the deployed factory
+    user has no agora-plugin SessionStart hook to supply the vendored bus path otherwise."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert paths.FACTORY_ROOT in p
+    assert "{FACTORY_ROOT}" not in p
+
+
+def test_build_conductor_prompt_surfaces_a_rejected_approval(tmp_path, monkeypatch):
+    """Fix 3a (final whole-branch review): a rejected outward-push proposal used to land only
+    in operator_actions (which nothing reads), so the next shift re-filed the identical card.
+    Design §3 promises the rejection surfaces in the conductor's {RESUME} seam — carrying the
+    operator's note (empty note still states the rejection)."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x", target_repo="o/r")
+        aid = s.add_pending_approval("graduation", {"n_commits": 3})
+        s.resolve_approval(aid, "rejected", note="wait for the release window")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert 'operator rejected the last graduation proposal: "wait for the release window"' in p
+
+
+def test_build_conductor_prompt_drops_rejection_after_a_newer_decision(tmp_path, monkeypatch):
+    """Stops nagging: once a NEWER proposal of the same kind is resolved (approved here), the
+    rejection is no longer the latest resolved decision and the {RESUME} line drops."""
+    from factory.roles import research_feed
+    monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
+    with _store(tmp_path) as s:
+        m = s.set_mission("x", target_repo="o/r")
+        a1 = s.add_pending_approval("graduation", {"n_commits": 3})
+        s.resolve_approval(a1, "rejected", note="no")
+        a2 = s.add_pending_approval("graduation", {"n_commits": 4})
+        s.resolve_approval(a2, "approved", note="shipped")
+        cur = s.start_shift(token_budget=1, mission_id=m)
+        p = conductor.build_conductor_prompt(s, s.active_mission(), shift_id=cur, token_budget=1)
+    assert "operator rejected" not in p
+
+
 def test_build_conductor_prompt_empty_plan_prompts_to_draft(tmp_path, monkeypatch):
     from factory.roles import research_feed
     monkeypatch.setattr(research_feed, "fetch_issues", lambda repo, **k: "")
@@ -107,6 +152,22 @@ def test_run_conductor_spawns_a_full_lead_and_parses_its_result(tmp_path, monkey
     assert "Write" not in captured["allowed_tools"]              # it dispatches; it doesn't edit code
     assert captured["timeout"] == 1800                           # the wall-clock ceiling
     assert captured["extra_env"]["AGORA_SQUAD"]                  # its own squad → no barrier hang
+
+
+def test_run_conductor_pins_agora_dir_to_the_factory_bus(tmp_path, monkeypatch):
+    """Task 8 follow-up: the conductor posts with the raw vendored chat.py command, which
+    resolves the bus from the shell's CURRENT cwd — without this pin, a post issued while its
+    persistent Bash cwd sits inside a target clone would land on the clone's throwaway bus
+    and be silently lost. Same AGORA_DIR plumbing developer/researcher get via worker_bus_env()."""
+    captured = {}
+    monkeypatch.setattr(common, "claude_super",
+                        lambda prompt, **k: captured.update(k) or ("done", 1, 0.0))
+    with _store(tmp_path) as s:
+        m_id = s.set_mission("x")
+        cur = s.start_shift(token_budget=1, mission_id=m_id)
+        conductor.run_conductor(s, shift_id=cur, mission=s.active_mission(),
+                                token_budget=1, wall_clock_s=10)
+    assert captured["extra_env"]["AGORA_DIR"] == common.factory_agora_dir()
 
 
 def test_run_conductor_falls_back_when_reply_has_no_json(tmp_path, monkeypatch):

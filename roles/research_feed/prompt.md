@@ -41,10 +41,11 @@ backlog above.
   answer if nothing is genuinely worth doing right now — say so rather than padding.
 
 ## Announce on the team bus (agora)
-You're on the factory's shared bus — your SessionStart briefing has the `send` command + your
-handle. Post ONE short line when you START (what you're investigating) and ONE when you finish
-("proposed N directions from issues #X + the code"), so the operator sees research working in
-the live feed. Two posts — don't let it distract from the research.
+You're on the factory's shared bus. Post with:
+`python3 {FACTORY_ROOT}/vendor/agora/chat.py send --from researcher "..."`. Post ONE short line
+when you START (what you're investigating) and ONE when you finish ("proposed N directions from
+issues #X + the code"), so the operator sees research working in the live feed. Two posts —
+don't let it distract from the research.
 
 ## Final message (REQUIRED)
 End with exactly one fenced JSON block — the factory adds each `directions` entry to the

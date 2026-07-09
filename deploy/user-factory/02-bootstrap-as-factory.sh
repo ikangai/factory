@@ -150,7 +150,7 @@ if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; th
 else
     echo "  claude CLI already present — skipping install"
 fi
-echo "  MANUAL next (runbook §3, via fast user switching): 'claude login' (+ the no-session auth check), agora plugin install."
+echo "  MANUAL next (runbook §3, via fast user switching): 'claude login' (+ the no-session auth check). The bus is vendored — nothing to install."
 
 # --- 8. blackboard seed (optional) --------------------------------------------------------
 echo "[8/10] blackboard seed ..."
@@ -199,7 +199,7 @@ cat <<'EOF'
 
 ============================================================
  Bootstrap complete. Next:
-   - runbook §3: manual logins (claude login + no-session auth check, agora plugin)
+   - runbook §3: manual logins (claude login + no-session auth check)
    - runbook §4: supervised smoke shift
    docs/runbooks/factory-user-deployment.md
 ============================================================

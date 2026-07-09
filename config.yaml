@@ -277,6 +277,14 @@ autonomy:
   # stays on factory/auto, fully reversible). A BRAKE, config.yaml-only like enforce_shift_budget
   # (the board can't disable it). Set false if the target's suite is too slow to run per graduation.
   graduation_retest: true
+  # Human-queue approval gate (2026-07-08 design, §3): outward GitHub pushes (base-branch
+  # graduation AND base→release publication) pause as `pending_approvals` rows for GUI
+  # approval instead of pushing directly — nothing leaves the machine without an explicit
+  # Approve click in the fleet dashboard's Queue tab. A BRAKE, config.yaml-only like
+  # enforce_shift_budget/graduation_retest: autonomy is turned UP by a file edit, never by
+  # a browser click, so this is deliberately NOT in SETTINGS_SPEC (the board can't disable
+  # it). Set false to restore the pre-2026-07-08 behavior (push immediately after a shift).
+  push_approval: true
   # Task 5.1 — unattended-failure event trigger. When true, a swallowed REAL-mode
   # graduation/issue-sync error becomes a DEDUPED, conductor-only backlog task (escalate
   # to @human — the rail cannot fix factory infrastructure) + a factory learning, instead

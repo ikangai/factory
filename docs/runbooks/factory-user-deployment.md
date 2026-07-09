@@ -119,7 +119,7 @@ This clones `fab/factory` (from the bare repo) and `fab/clive` (from GitHub), ch
 installs the `claude` CLI if absent, seeds the blackboard if a snapshot was provided, and
 smoke-checks `factory status` / `gh auth status`.
 
-Three things `02` **cannot** do headlessly and must be done via **fast user switching** into
+Two things `02` **cannot** do headlessly and must be done via **fast user switching** into
 the `factory` account (⌘ from the login window, or Apple menu → Fast User Switching once the
 `factory` user is visible in the menu):
 
@@ -139,13 +139,10 @@ the `factory` account (⌘ from the login window, or Apple menu → Fast User Sw
    ```
    export CLAUDE_CODE_OAUTH_TOKEN=<paste>
    ```
-3. **agora plugin install** (the factory's inter-agent bus):
-   ```bash
-   claude plugin marketplace add <the operator's agora marketplace source>
-   ```
-   If the marketplace repo is unreachable from the `factory` account, fall back to copying
-   the operator's own plugin cache via `/Users/Shared` (e.g. `~/.claude/plugins/`) rather than
-   granting `factory` broader network/credential reach.
+
+The inter-agent bus needs no install step: it's vendored straight into the repo at
+`<factory>/vendor/agora/chat.py` and travels with every clone/pull — there is no plugin,
+marketplace, or SessionStart hook to set up.
 
 ### Headless-auth proof — critical go/no-go gate
 
@@ -214,6 +211,16 @@ Watch both dashboards from the operator's own browser via `localhost` (they bind
 
 - `http://127.0.0.1:9787` — board (tasks, shifts, EVM)
 - `http://127.0.0.1:9788` — fleet / mission control
+
+**Human queue**: the fleet dashboard's **Queue** tab is the operator's actionable work list —
+answer `@human` escalations, reframe/retry/drop blocked tasks, add new tasks, and
+approve/reject graduation + publication proposals, all from the browser (no shell needed for
+routine steering). With `autonomy.push_approval: true` (a config-file-only brake, ON by
+default) **nothing reaches GitHub** — no `factory/auto`→base graduation, no publication push —
+without an explicit approval on this tab; an unattended approval card goes **stale after ~3
+days** and is flagged so it doesn't silently rot. You can also drive the bus itself from a
+shell: `./bin/factory bus <send|log|...>` (wraps the vendored `vendor/agora/chat.py`, targeting
+the factory's own bus regardless of your `cwd`).
 
 **The brake trap**: with `mode=auto` and the fleet daemon alive, clearing `STOP` alone
 respawns a runner within roughly the fleet daemon's poll interval (~5 min) — `KeepAlive` and

@@ -32,8 +32,13 @@ class _Boom:
 
 
 def _gate(monkeypatch, *, on: bool):
+    # push_approval pinned OFF here: these tests exercise the failure_tasks escalation
+    # seam via a graduate_fn that raises/skips regardless of dry_run, so the outcome is
+    # gate-independent either way — but pinning it keeps the scenario legible as "a real
+    # push attempt failed", not an accidental preview, and decouples the test from
+    # config.yaml's live push_approval default (ON as of 2026-07-08).
     monkeypatch.setattr(orch.config, "load_config",
-                        lambda: {"autonomy": {"failure_tasks": on}})
+                        lambda: {"autonomy": {"failure_tasks": on, "push_approval": False}})
 
 
 # -- prod-push quality gate wiring (Theme 4) --------------------------------
@@ -47,7 +52,7 @@ def test_graduation_retest_wires_the_adapter_suite_when_on(tmp_path, monkeypatch
             return {"action": "synced"}
 
         monkeypatch.setattr(orch.config, "load_config",
-                            lambda: {"autonomy": {"graduation_retest": True}})
+                            lambda: {"autonomy": {"graduation_retest": True, "push_approval": False}})
         monkeypatch.setattr(orch.config, "get_adapter",
                             lambda: types.SimpleNamespace(run_tests=lambda cwd, **k: (True, "ok")))
         orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=capture,
@@ -65,7 +70,7 @@ def test_graduation_retest_passes_no_test_fn_when_off(tmp_path, monkeypatch):
             return {"action": "synced"}
 
         monkeypatch.setattr(orch.config, "load_config",
-                            lambda: {"autonomy": {"graduation_retest": False}})
+                            lambda: {"autonomy": {"graduation_retest": False, "push_approval": False}})
         orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=capture,
                                    repo="o/r", root="/root", base="base")
         assert captured.get("test_fn") is None
@@ -100,8 +105,10 @@ def test_graduation_error_files_conductor_task_and_learning_when_gated_on(tmp_pa
 
 def test_graduation_error_is_noop_when_gate_off_by_default(tmp_path, monkeypatch):
     with _store(tmp_path) as s:
-        # autonomy present but the key absent -> default OFF
-        monkeypatch.setattr(orch.config, "load_config", lambda: {"autonomy": {}})
+        # autonomy present but the key absent -> default OFF (failure_tasks); push_approval
+        # pinned OFF too so this stays a genuine real-push error, not a preview error.
+        monkeypatch.setattr(orch.config, "load_config",
+                            lambda: {"autonomy": {"push_approval": False}})
         g = _Boom()
         res = orch._graduate_after_shift(s, real=True, shipped=1, graduate_fn=g,
                                          repo="o/r", root="/x", base="base")

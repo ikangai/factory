@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from ..common import mode as modemod
 from ..common.store import Blackboard
 from ..orchestrator import autopilot
-from ..reporting import fleet_viz
+from ..reporting import fleet_viz, human_queue
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -29,7 +29,18 @@ def fleet_state() -> dict:
     autopilot.restart_if_auto()   # brake-respecting self-heal: revive a crashed runner in AUTO (Task 5.3)
     with Blackboard() as store:
         store.init_db()   # idempotent — a pre-init board shows empty, not a 500
-        return fleet_viz.fleet_json(store)
+        state = fleet_viz.fleet_json(store)
+        # The Queue tab's data (Task 6, design §2). derive_human_queue already degrades each
+        # of its three sections to [] on its own failure (see reporting/human_queue.py's
+        # module docstring) — this try/except is a second, outer belt: a future change to
+        # that contract, or a raise from a section this module doesn't yet wrap, must still
+        # leave the REST of the dashboard rendering rather than 500 the whole poll.
+        try:
+            state["human_queue"] = human_queue.derive_human_queue(store)
+        except Exception as e:  # noqa: BLE001
+            print(f"[queue] human_queue unavailable: {e}")
+            state["human_queue"] = {"items": [], "counts": {}}
+        return state
 
 
 def plan_state() -> list:
@@ -117,6 +128,109 @@ def _apply_worker(action: str, name: str, *, description: str = "", overlay: str
         raise ValueError(f"unknown worker action {action!r}")
 
 
+def _queue_answer(payload: dict) -> dict:
+    """POST /api/queue/answer: reply to bus escalation `id` as the operator (Task 6, design
+    §2). `common.bus.answer` NEVER raises (see common/bus.py's module docstring) — a bus
+    outage returns ok:False rather than a 500. Only a SUCCESSFUL reply is audited: a phantom
+    audit row for a reply nobody actually received (because the bus was down) would be
+    worse than no row at all."""
+    from ..common import bus
+    msg_id = payload.get("id")
+    if msg_id is None:
+        raise ValueError("id required")
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text required")
+    ok = bus.answer(msg_id, text)
+    if ok:
+        with Blackboard() as store:
+            store.init_db()
+            store.record_operator_action("answer", f"bus-{msg_id}", text[:200])
+    return {"ok": ok}
+
+
+def _queue_task(payload: dict) -> dict:
+    """POST /api/queue/task: reframe/retry/drop an existing backlog task, or add a new
+    operator-authored one (Task 6, design §2). reframe/retry/drop require an existing
+    `task_id` — an unknown id is a ValueError (-> 400), the same guard-rejection convention
+    _apply_setting/_apply_worker use above. Every branch records an operator_action on
+    success only."""
+    from ..reporting import scope_check
+    import uuid
+    op = payload.get("op")
+    if op not in ("reframe", "retry", "drop", "add"):
+        raise ValueError(f"unknown op {op!r}")
+    with Blackboard() as store:
+        store.init_db()
+        if op == "add":
+            title = (payload.get("title") or "").strip()
+            if not title:
+                raise ValueError("title required")
+            # Born spec-complete, like a research-fed task (roles/research_feed.py):
+            # optional target_surface/acceptance/out_of_scope fold into detail via the same
+            # helper the scope check reads.
+            spec = {"target_surface": str(payload.get("target_surface") or ""),
+                    "acceptance": str(payload.get("acceptance") or ""),
+                    "out_of_scope": str(payload.get("out_of_scope") or "")}
+            detail = str(payload.get("detail") or "") + scope_check.spec_detail_suffix(spec)
+            tid = f"task-{uuid.uuid4().hex[:8]}"
+            # source='human': store/schema.sql's tasks.source CHECK reserves this value for
+            # exactly this case — operator-authored, distinct from 'research'/'worker'/
+            # 'issue'/'mission'.
+            store.add_task(tid, title, source="human", detail=detail, spec=spec)
+            store.record_operator_action("add", tid, title[:200])
+            return {"ok": True, "task_id": tid}
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id required")
+        if store.get_task(task_id) is None:
+            raise ValueError(f"unknown task_id {task_id!r}")
+        if op == "reframe":
+            title = payload.get("title")
+            detail = payload.get("detail")
+            title = title if isinstance(title, str) else None
+            detail = detail if isinstance(detail, str) else None
+            if title is None and detail is None:
+                raise ValueError("reframe needs a title and/or detail")
+            store.reframe_task(task_id, title=title, detail=detail)
+            store.record_operator_action(
+                "reframe", task_id, title[:200] if title is not None else "(detail only)")
+            return {"ok": True, "task_id": task_id}
+        if op == "retry":
+            # result is NOT NULL (schema default '') — clear it via '' per set_task_status's
+            # own convention (it only touches result when the kwarg is not None).
+            store.set_task_status(task_id, "open", result="")
+            store.record_operator_action("retry", task_id)
+            return {"ok": True, "task_id": task_id}
+        store.set_task_status(task_id, "dropped")   # op == "drop"
+        store.record_operator_action("drop", task_id)
+        return {"ok": True, "task_id": task_id}
+
+
+def _queue_approval(payload: dict) -> dict:
+    """POST /api/queue/approval: approve/reject a pending_approvals row (Task 6, design §2/3).
+    `execute_approval` already claims/verifies/resolves/audits internally on EVERY outcome
+    (approve / approve-failed / approve-stale-refreshed — see reporting/approvals.py) — this
+    must NOT add a second audit row on approve. `reject_approval` audits itself too. Both
+    results pass through VERBATIM: a stale-preview approve returns
+    {"ok": False, "error": "preview-stale", "fresh": ...} and the Queue tab needs that exact
+    shape to re-render the fresh card."""
+    from ..reporting import approvals
+    try:
+        approval_id = int(payload.get("approval_id"))
+    except (TypeError, ValueError):
+        raise ValueError("approval_id required")
+    op = payload.get("op")
+    if op not in ("approve", "reject"):
+        raise ValueError(f"unknown op {op!r}")
+    with Blackboard() as store:
+        store.init_db()
+        if op == "approve":
+            return approvals.execute_approval(store, approval_id)
+        note = payload.get("note")
+        return approvals.reject_approval(store, approval_id, note if isinstance(note, str) else "")
+
+
 def _set_mission(statement: str) -> dict:
     """Apply a mission steer from the board: set the active mission in a FRESH per-request store
     (ground rule 2 — never share a store across handler threads), THEN rewrite MISSION.md's
@@ -175,7 +289,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path not in ("/api/mode", "/api/stop", "/api/resume", "/api/mission",
-                        "/api/settings", "/api/worker"):
+                        "/api/settings", "/api/worker",
+                        "/api/queue/answer", "/api/queue/task", "/api/queue/approval"):
             return self._send(404, b'{"error":"unknown write action"}', "application/json")
         if not self._local_origin():
             return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
@@ -203,6 +318,28 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.OperationalError:           # store busy (WAL cross-process contention)
                 return self._send(503, b'{"error":"store busy, retry"}', "application/json")
             return self._send(200, json.dumps(info).encode(), "application/json")
+        if path.startswith("/api/queue/"):   # human queue actions (Task 6, design §2)
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError) as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            if not isinstance(payload, dict):
+                return self._send(400, b'{"error":"body must be a JSON object"}', "application/json")
+            try:
+                if path == "/api/queue/answer":
+                    info = _queue_answer(payload)
+                elif path == "/api/queue/task":
+                    info = _queue_task(payload)
+                else:                                       # /api/queue/approval
+                    info = _queue_approval(payload)
+            except ValueError as e:                    # a validation rejection → 400
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            except sqlite3.OperationalError:           # store busy (WAL cross-process contention)
+                return self._send(503, b'{"error":"store busy, retry"}', "application/json")
+            # info can carry a nested "fresh" preview dict (approve's stale-preview shape) —
+            # default=str keeps json.dumps robust the same way the GET /api/fleet path does.
+            return self._send(200, json.dumps(info, default=str).encode(), "application/json")
         if path == "/api/mission":            # the human's steering wheel, live on the board
             length = int(self.headers.get("Content-Length", 0) or 0)
             try:

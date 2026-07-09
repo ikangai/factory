@@ -299,6 +299,42 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT NOT NULL
 );
 
+-- Human work queue: pending approvals gate outward pushes (autonomy.push_approval) and
+-- publication promotions; operator_actions is the append-only audit trail of every action
+-- taken from the dashboard's Queue tab. Both are NEW tables, so init_db's IF NOT EXISTS
+-- re-run is the whole migration for existing DBs — same pattern as task_evidence/
+-- gate_eval_results above. (design: docs/plans/2026-07-08-factory-owned-bus-human-queue-design.md)
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT CHECK (kind IN ('graduation','publication')),
+    -- 'executing' = an operator's Approve is mid-push (claim_approval's atomic
+    -- pending→executing transition makes a double-click / two-dashboard race impossible);
+    -- it reverts to 'pending' on a failed/stale attempt, resolves to 'approved' on success.
+    status       TEXT NOT NULL DEFAULT 'pending'   -- one live 'pending' row per kind (supersede-first)
+                   CHECK (status IN ('pending','executing','approved','rejected','stale','superseded')),
+    payload_json TEXT NOT NULL,               -- dry-run preview: range/commits/subjects/…
+    note         TEXT NOT NULL DEFAULT '',    -- the operator's approve/reject rationale
+    created_at   TEXT NOT NULL,
+    -- stamped by claim_approval (pending->executing), NULL until claimed. The reaper's age
+    -- floor keys on THIS, not created_at (Fix B, final adversarial re-verification): an
+    -- operator approving a card proposed hours ago starts a fresh push right now, and
+    -- reap_orphaned_approvals must not mislabel that in-flight (or just-succeeded) push
+    -- "crashed" just because the PROPOSAL was old.
+    claimed_at   TEXT,
+    resolved_at  TEXT                          -- stamped on approve/reject/stale/supersede
+);
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_kind_status ON pending_approvals(kind, status);
+
+-- Every write action taken from the dashboard's Queue tab (answer/reframe/retry/drop/add/
+-- approve/reject) — an accountable, append-only log of what the human did and why.
+CREATE TABLE IF NOT EXISTS operator_actions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    action     TEXT NOT NULL,                 -- 'answer'|'task_reframe'|'task_retry'|'task_drop'|'task_add'|'approval_approve'|'approval_reject'|…
+    item_ref   TEXT NOT NULL,                  -- the escalation/task/approval id it acted on
+    detail     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume
