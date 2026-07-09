@@ -98,7 +98,8 @@ def test_factory_clone_is_on_the_instance_branch(install_env):
 def test_config_yaml_is_patched(install_env):
     doc = yaml.safe_load((_factory_dir(install_env) / "config.yaml").read_text())
     assert doc["target"]["root"] == "../widget"
-    assert doc["target"]["provider"] == "clive"
+    # a non-clive target defaults to the config-driven GENERIC adapter (eval loop wired)
+    assert doc["target"]["provider"] == "generic"
     assert isinstance(doc["dashboard"]["port"], int)
     assert doc["autopilot"]["prod"] is False
 

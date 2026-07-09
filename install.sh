@@ -27,7 +27,7 @@ NAME=""
 ROOT="$HOME/factories"
 FACTORY_REPO="https://github.com/ikangai/factory.git"
 BRANCH="main"
-PROVIDER="clive"
+PROVIDER=""
 BASE_BRANCH=""
 PORT="auto"
 SKIP_DEPS=false
@@ -109,6 +109,17 @@ fi
 if [ -z "$NAME" ]; then
     NAME="$TARGET_BASENAME"
 fi
+# Provider default follows the target's identity: clive gets its dedicated adapter; any
+# other repo gets the config-driven GENERIC adapter (adapters/generic.py) so the eval loop
+# is wired, not dormant. --provider overrides either way.
+if [ -z "$PROVIDER" ]; then
+    if [ "$TARGET_REPO_NAME" = "clive" ]; then
+        PROVIDER="clive"
+    else
+        PROVIDER="generic"
+    fi
+fi
+
 if [ -z "$BASE_BRANCH" ]; then
     # clive is the reference target (its factory-extraction work lives on this branch
     # upstream); any other target gets a fresh factory/base the installer owns end to end.
@@ -264,25 +275,26 @@ case "$PORT_LINE" in
     *) echo "ERROR: configure_instance.py did not print a PORT= line (got: $PORT_LINE)" >&2
        exit 1 ;;
 esac
-# The eval-loop honesty note must fire on the DEFAULT path too: a non-clive target under the
-# default clive provider is exactly the case where the scenario-eval loop will predictably
-# fail (CliveAdapter expects clive's layout), and gating the note on --provider alone warned
-# nobody on the installer's headline use case.
-if [ "$PROVIDER" != "clive" ]; then
-    cat >&2 <<NOTE
+# Eval-loop honesty notes. The develop rail (briefs -> worker -> tests -> gated merge) is
+# target-generic either way; these are about the scenario-eval loop only.
+case "$PROVIDER" in
+    clive) : ;;
+    generic) cat >&2 <<NOTE
+  NOTE: target '$TARGET_REPO_NAME' runs under the GENERIC adapter: the eval loop
+  invokes '<target.python> <target.entry> [target.exec.args]' with spec knobs as
+  env vars. Set target.entry (and optionally the target.exec block) in the
+  instance's config.yaml before the first eval run — the adapter never guesses an
+  entry point. Write a dedicated adapter under factory/adapters/ (wired in
+  common/config.py get_adapter) for richer, target-specific actuation.
+NOTE
+        ;;
+    *) cat >&2 <<NOTE
   NOTE: provider '$PROVIDER' is only usable if you have registered its adapter in
-  common/config.py get_adapter (only 'clive' ships registered). The develop rail
-  (briefs -> worker -> tests -> gated merge) is target-generic; the scenario-eval
+  common/config.py get_adapter (shipped: 'clive', 'generic'). The scenario-eval
   loop needs that adapter.
 NOTE
-elif [ "$TARGET_REPO_NAME" != "clive" ]; then
-    cat >&2 <<NOTE
-  NOTE: target '$TARGET_REPO_NAME' runs under the default 'clive' adapter. The develop
-  rail (briefs -> worker -> tests -> gated merge) is target-generic and works as-is;
-  the scenario-eval loop expects clive's layout and needs a NEW adapter under
-  factory/adapters/ (wired in common/config.py get_adapter) for this target.
-NOTE
-fi
+        ;;
+esac
 
 # --- 6. commit the patched config.yaml if changed --------------------------------------------
 echo "[6/10] committing config overlay ..."

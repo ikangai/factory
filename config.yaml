@@ -5,9 +5,14 @@
 # The factory is REPO-AGNOSTIC: it optimises whatever TARGET this section names.
 # `provider` selects the adapter (factory/adapters/<provider>.py) that knows how
 # to actuate a spec into, and invoke, that target. `clive` is the default and the
-# reference adapter. Pointing the factory at a DIFFERENT repo = (1) write a new
-# adapter under factory/adapters/, (2) register it in common.config.get_adapter,
-# (3) set `provider` here + the target's root/entry/interpreter below.
+# reference adapter; `generic` is a config-driven command adapter for any repo
+# invocable as `<python> <entry> [args…]` — spec knobs become env vars and an
+# optional `exec:` block here declares the conventions (args template with
+# {goal}, spec_env_prefix, max_tokens_env, model_env, session_dir_regex); see
+# adapters/generic.py. Pointing the factory at a DIFFERENT repo = set `provider`
+# to `generic` + root/entry below (install.sh does this), or for richer
+# actuation (1) write a dedicated adapter under factory/adapters/, (2) register
+# it in common.config.get_adapter, (3) name it here.
 #
 # BACKWARD COMPAT: a legacy top-level `clive:` block (the previous layout) is
 # still honoured — common.config.target_config() treats it as the clive target,

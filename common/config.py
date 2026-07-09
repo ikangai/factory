@@ -192,6 +192,11 @@ def get_adapter(cfg: dict[str, Any] | None = None):
     if provider == "clive":
         from ..adapters.clive import CliveAdapter
         return CliveAdapter()
+    if provider == "generic":
+        # Config-driven command target (target.exec conventions) — the eval loop for
+        # any repo without a dedicated adapter. See adapters/generic.py.
+        from ..adapters.generic import GenericAdapter
+        return GenericAdapter()
     raise ValueError(
         f"unknown target provider: {provider!r} (no adapter registered; "
         f"add one under factory/adapters/ and wire it in config.get_adapter)")

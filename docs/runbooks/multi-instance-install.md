@@ -117,15 +117,19 @@ server is collision-free by construction — no `--port` needed. `install.sh lis
 
 ## Non-clive targets (honesty clause)
 
-Only the `clive` adapter is registered today (`common/config.py get_adapter`). The installer
-wires config for **any** repo — the develop rail (briefs → worker → tests → gated merge) is
-target-generic — but the scenario-eval loop needs an adapter for the target's layout. The
-installer does not (and cannot meaningfully) validate `--provider` against a file listing;
-instead it prints a loud note whenever the eval loop is predictably unwired: for any
-non-clive **target** (running under the default clive adapter) and for any non-clive
-**provider** (usable only once you register it in `get_adapter`). Also note: target runtime
-deps are installed only from a top-level `requirements.txt`; a target that declares deps
-elsewhere needs them installed manually before the first real shift.
+Two adapters ship registered (`common/config.py get_adapter`): `clive` (the reference) and
+`generic` — a fully config-driven command adapter (`adapters/generic.py`), which non-clive
+targets get **by default**. The develop rail (briefs → worker → tests → gated merge) is
+target-generic regardless; the `generic` adapter additionally wires the scenario-eval loop:
+it invokes `<target.python> <target.entry> [target.exec.args]` with candidate spec knobs as
+env vars (`target.exec.spec_env_prefix`), the goal substituted for `{goal}` in the args
+template, and the panel model mapped to env via `target.exec.model_env`. Before the first
+eval run, set `target.entry` (and optionally the `target.exec` block) in the instance's
+config.yaml — the adapter refuses to guess an entry point. For richer, target-specific
+actuation write a dedicated adapter and register it in `get_adapter`; an unregistered
+`--provider` gets a loud note at install time. Also note: target runtime deps are installed
+only from a top-level `requirements.txt`; a target that declares deps elsewhere needs them
+installed manually before the first real shift.
 
 ## Uninstall
 
