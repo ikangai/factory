@@ -42,6 +42,10 @@ cat <<'EOF'
    1. Ask the deployment to stop cleanly first:
         sudo -u factory -i bash -lc 'touch $HOME/fab/factory/STOP && $HOME/fab/factory/bin/factory mode shift'
    2. Then kick the daemons to pick up the new code:
-        sudo launchctl kickstart -k system/com.factory.board system/com.factory.fleet
+        sudo launchctl kickstart -k system/com.factory.board
+        sudo launchctl kickstart -k system/com.factory.fleet
+      ("Could not find service" = the daemons were never installed — run step 03 once:
+        sudo bash /Users/factory/fab/factory/deploy/user-factory/03-install-daemons.sh
+      it is idempotent and doubles as the reload command.)
 ============================================================
 EOF
