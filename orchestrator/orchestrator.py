@@ -1114,6 +1114,31 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
     print(f"[run] shift {res.get('shift_id')}: {res['action']} "
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
 
+    # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,
+    # Component E): the shift-END trigger, AFTER outcomes are recorded — routing_outcomes/
+    # task_evidence are written by the executor INSIDE run_shift, so by the time control
+    # returns here this shift's own evidence already reflects in the store. Config-gated
+    # OFF by default, the same posture as every other LLM-spending stage this rail grew;
+    # try/except + a factory learning on failure, mirroring the org-planner shift-START
+    # hook's own failure posture (orchestrator/shift.py) — the harness engineer's own
+    # blow-up must never look silent or sink a shift that otherwise ran fine.
+    if res.get("shift_id") and bool(sw.get("harness_engineer", False)):
+        try:
+            from .harness import maybe_plan_harness
+            harness_result = maybe_plan_harness(store, shift_id=res["shift_id"])
+            if harness_result:
+                print(f"[harness] proposed {len(harness_result)} proposal(s) this shift — "
+                      f"review with `factory harness show`")
+        except Exception as e:  # noqa: BLE001 — the harness engineer's own failure must
+            print(f"[harness] planner error (non-fatal): {e}", flush=True)  # never sink the shift
+            try:
+                from ..reporting import factory_memory
+                factory_memory.record_learning(
+                    store, "factory", f"the harness engineer blew up mid-shift: {e}"[:500],
+                    scope="harness_engineer", shift_id=res["shift_id"])
+            except Exception:  # noqa: BLE001 — the learning write itself must never crash
+                pass
+
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
         shipped_tasks = [t for t in store.list_tasks(status="done")
                          if t.get("shift_id") == res["shift_id"]]
@@ -2102,6 +2127,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "plan = the frontier organizer designs a chart (refuses if one "
                          "already exists — use replan); "
                          "replan = supersede the active chart and plan fresh")
+    hrn = sub.add_parser("harness")         # the self-harness loop: weakness mining ->
+                                             # bounded proposal -> gated adoption (design
+                                             # docs/plans/2026-08-05-self-harness-loop-design.md)
+    hrn.add_argument("action", choices=["mine", "plan", "show", "apply", "reject"],
+                     help="mine = print the mined weakness table (no LLM, no store write); "
+                          "plan = the frontier harness engineer proposes a batch (<=5); "
+                          "show = every proposal, newest first; "
+                          "apply <id> = apply ONE proposal (asymmetric per kind — a prompt "
+                          "proposal NEVER auto-writes a file); "
+                          "reject <id> = reject ONE proposal")
+    hrn.add_argument("rest", nargs="?", default=None,
+                     help="the integer proposal id (apply/reject only)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")
@@ -2249,6 +2286,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif a.cmd == "org":
             from .org import cmd_org
             cmd_org(store, a.action)
+        elif a.cmd == "harness":
+            from .harness import cmd_harness
+            cmd_harness(store, a.action, target_id=a.rest)
         elif a.cmd == "daily":
             cmd_daily(store)
         elif a.cmd == "autonomous":

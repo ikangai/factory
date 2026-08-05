@@ -781,3 +781,261 @@ def test_cmd_harness_unknown_action_prints_usage(tmp_path, capsys):
         harness.cmd_harness(s, "bogus")
         out = capsys.readouterr().out
         assert "usage" in out.lower()
+
+
+# =========================================================================================
+# Component E (CLI argparse wiring + shift-end hook + config knob)
+# =========================================================================================
+def test_orchestrator_argparse_harness_mine_through_main(tmp_path, monkeypatch, capsys):
+    """`factory harness mine` end-to-end through main()'s argparse — the hermetic pattern
+    tests/test_factory_memory.py's own `learn` CLI tests use (that file is off-limits to
+    edit, so this file carries its own copy)."""
+    from factory.orchestrator import orchestrator as orch
+    db = str(tmp_path / "f.db")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    with Blackboard(db) as s:
+        s.init_db()
+        _seed_stage_failure(s)
+    assert orch.main(["harness", "mine"]) == 0
+    out = capsys.readouterr().out
+    assert "stage-failure-no-candidate-refusal" in out
+
+
+def test_orchestrator_argparse_harness_apply_through_main(tmp_path, monkeypatch, capsys):
+    from factory.orchestrator import orchestrator as orch
+    db = str(tmp_path / "f.db")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    with Blackboard(db) as s:
+        s.init_db()
+        pid = s.add_harness_proposal(shift_id=None, weakness="w", kind="setting",
+                                     target="super_worker.max_parallel", change={"value": 6})
+    assert orch.main(["harness", "apply", str(pid)]) == 0
+    with Blackboard(db) as s:
+        assert s.get_setting("super_worker.max_parallel") == "6"
+        assert s.get_harness_proposal(pid)["status"] == "applied"
+
+
+def test_orchestrator_argparse_harness_show_through_main_with_no_proposals(tmp_path, monkeypatch,
+                                                                            capsys):
+    from factory.orchestrator import orchestrator as orch
+    db = str(tmp_path / "f.db")
+    monkeypatch.setattr(orch, "Blackboard", lambda *a, **k: Blackboard(db))
+    assert orch.main(["harness", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "no proposals" in out.lower()
+
+
+# -- the shift-end hook in cmd_run ---------------------------------------------------------
+def _hermetic_cmd_run(monkeypatch):
+    """The same hermetic stubs test_run_cli.py's autouse fixture applies (mirrors
+    test_organizer.py's own local copy — that file is off-limits to edit too)."""
+    from factory.orchestrator import orchestrator
+    from factory.orchestrator import shift as shiftmod
+    from factory.roles import research_feed
+    monkeypatch.setattr(shiftmod.killswitch, "is_halted", lambda: False)
+    monkeypatch.setattr(research_feed, "propose_directions", lambda store, **k: [])
+    monkeypatch.setattr(orchestrator, "_read_mission_md", lambda: None)
+    monkeypatch.setattr(orchestrator, "_write_mission_md", lambda statement: None)
+    monkeypatch.setattr(orchestrator, "_seed_staffing", lambda store: [])
+    return orchestrator
+
+
+def _config_with_harness_engineer_on(monkeypatch):
+    import copy
+    from factory.common import config
+    cfg = copy.deepcopy(config.load_config())
+    cfg.setdefault("super_worker", {})["harness_engineer"] = True
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+
+
+def _conductor_and_executor():
+    def conductor(store, *, shift_id, mission, token_budget, wall_clock_s):
+        return {"status": "completed"}
+
+    def executor(store, *, shift_id):
+        return 0
+
+    return conductor, executor
+
+
+def test_cmd_run_calls_maybe_plan_harness_when_the_config_knob_is_on(tmp_path, monkeypatch):
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+    _config_with_harness_engineer_on(monkeypatch)
+    called = {}
+    monkeypatch.setattr(harness, "maybe_plan_harness",
+                        lambda store, **k: called.update(k) or None)
+    conductor, executor = _conductor_and_executor()
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        res = orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                                   token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"
+        assert called.get("shift_id") == res["shift_id"]
+
+
+def test_cmd_run_never_calls_maybe_plan_harness_when_the_knob_is_off_by_default(tmp_path,
+                                                                                 monkeypatch):
+    """The knob ships FALSE (config.yaml) — a default cmd_run must NOT call
+    maybe_plan_harness, the same posture as every other LLM-spending stage."""
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+
+    def boom(store, **k):
+        raise AssertionError("must not call maybe_plan_harness when the knob is off")
+
+    monkeypatch.setattr(harness, "maybe_plan_harness", boom)
+    conductor, executor = _conductor_and_executor()
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        res = orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                                   token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"
+
+
+def test_cmd_run_harness_engineer_blowup_is_non_fatal_and_loud(tmp_path, monkeypatch, capsys):
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+    _config_with_harness_engineer_on(monkeypatch)
+
+    def boom(store, **k):
+        raise RuntimeError("harness engineer blew up")
+
+    monkeypatch.setattr(harness, "maybe_plan_harness", boom)
+    conductor, executor = _conductor_and_executor()
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        res = orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                                   token_budget=100, wall_clock_s=5)
+        assert res["action"] == "completed"       # the harness engineer's own failure
+        out = capsys.readouterr().out              # never sinks the shift
+        assert "[harness]" in out and "harness engineer blew up" in out
+        learn = [r for r in s.learnings_for_role("factory") if r["scope"] == "harness_engineer"]
+        assert learn and "harness engineer blew up" in learn[0]["content"]
+
+
+def test_cmd_run_harness_proposal_prints_a_review_hint(tmp_path, monkeypatch, capsys):
+    orchestrator = _hermetic_cmd_run(monkeypatch)
+    _config_with_harness_engineer_on(monkeypatch)
+    monkeypatch.setattr(harness, "maybe_plan_harness",
+                        lambda store, **k: [{"id": 1, "kind": "setting"}])
+    conductor, executor = _conductor_and_executor()
+    with _store(tmp_path) as s:
+        s.set_mission("ship it")
+        orchestrator.cmd_run(s, conductor=conductor, executor=executor,
+                             token_budget=100, wall_clock_s=5)
+        out = capsys.readouterr().out
+        assert "proposed 1 proposal" in out.lower()
+        assert "factory harness show" in out
+
+
+# -- the config knob itself -----------------------------------------------------------------
+def test_harness_engineer_knob_is_config_only_never_in_settings_spec():
+    """Mirrors test_organizer.py's own test_organizer_knob_is_config_only_never_in_
+    settings_spec: the trigger gate must stay OUT of SETTINGS_SPEC (binding rule 7) and
+    ships false (off by default)."""
+    from factory.common.config import SETTINGS_SPEC, load_config
+    assert "super_worker.harness_engineer" not in SETTINGS_SPEC
+    assert (load_config().get("super_worker") or {}).get("harness_engineer") is False
+
+
+# =========================================================================================
+# Component E (dashboard visibility): reporting/fleet_viz.harness_state /
+# _harness_section_html / derive_queue. Kept in this file (not a fourth test file) since
+# it's part of the harness feature's own surface — mirrors tests/test_org_viz.py's
+# coverage of org_state/_org_section_html for the analogous org-chart feature.
+# =========================================================================================
+def test_harness_state_is_an_explicit_zero_state_never_a_missing_key(tmp_path):
+    from factory.reporting import fleet_viz
+    with _store(tmp_path) as s:
+        state = fleet_viz.harness_state(s)
+        assert state == {"proposed": 0, "approved": 0, "harness_engineer_on": False,
+                         "newest": []}
+
+
+def test_harness_state_counts_proposed_and_approved_and_lists_newest_five(tmp_path):
+    from factory.reporting import fleet_viz
+    with _store(tmp_path) as s:
+        for i in range(7):
+            s.add_harness_proposal(shift_id=None, weakness=f"w{i}", kind="setting",
+                                   target="super_worker.max_parallel", change={"value": i},
+                                   status="proposed" if i % 2 == 0 else "approved")
+        state = fleet_viz.harness_state(s)
+        assert state["proposed"] == 4 and state["approved"] == 3
+        assert len(state["newest"]) == 5
+        assert state["newest"][0]["weakness"] == "w6"   # newest first
+
+
+def test_harness_state_reports_the_harness_engineer_knob(tmp_path, monkeypatch):
+    import copy
+
+    from factory.common import config
+    from factory.reporting import fleet_viz
+    cfg = copy.deepcopy(config.load_config())
+    cfg.setdefault("super_worker", {})["harness_engineer"] = True
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+    with _store(tmp_path) as s:
+        assert fleet_viz.harness_state(s)["harness_engineer_on"] is True
+
+
+def test_harness_state_never_raises_on_a_broken_store():
+    from factory.reporting import fleet_viz
+
+    class Boom:
+        def harness_proposals(self, *a, **k):
+            raise RuntimeError("db is gone")
+
+    state = fleet_viz.harness_state(Boom())
+    assert state == {"proposed": 0, "approved": 0, "harness_engineer_on": False, "newest": []}
+
+
+def test_harness_section_html_renders_the_empty_state():
+    from factory.reporting import fleet_viz
+    html = fleet_viz._harness_section_html(None)
+    assert "Harness proposals" in html
+    assert "no proposals yet" in html
+    assert "harness engineer knob: off" in html
+
+
+def test_harness_section_html_renders_proposals_and_the_knob(tmp_path):
+    from factory.reporting import fleet_viz
+    with _store(tmp_path) as s:
+        s.add_harness_proposal(shift_id=None, weakness="stage-failure-x", kind="setting",
+                               target="super_worker.max_parallel", change={"value": 4},
+                               status="proposed")
+        state = fleet_viz.harness_state(s)
+    state["harness_engineer_on"] = True
+    html = fleet_viz._harness_section_html(state)
+    assert "super_worker.max_parallel" in html
+    assert "stage-failure-x" in html
+    assert "harness engineer knob: on" in html
+
+
+def test_fleet_json_carries_the_harness_key(tmp_path):
+    from factory.reporting import fleet_viz
+    with _store(tmp_path) as s:
+        payload = fleet_viz.fleet_json(s)
+        assert "harness" in payload
+        assert payload["harness"]["proposed"] == 0
+
+
+def test_render_fleet_html_includes_the_harness_section(tmp_path):
+    from factory.reporting import fleet_viz
+    with _store(tmp_path) as s:
+        state = fleet_viz.build_fleet_state(s)
+        harness = fleet_viz.harness_state(s)
+        html = fleet_viz.render_fleet_html(state, harness=harness)
+        assert "Harness proposals" in html
+
+
+def test_derive_queue_surfaces_harness_proposals_on_the_resources_tab():
+    from factory.reporting import fleet_viz
+    payload = {"mission": "ship it", "harness": {"proposed": 2}}
+    q = fleet_viz.derive_queue(payload)
+    item = next(i for i in q if i["id"] == "harness_proposals")
+    assert item["tab"] == "resources"
+    assert "2 harness proposal" in item["title"]
+
+
+def test_derive_queue_silent_when_no_proposals_are_awaiting():
+    from factory.reporting import fleet_viz
+    payload = {"mission": "ship it", "harness": {"proposed": 0}}
+    q = fleet_viz.derive_queue(payload)
+    assert not [i for i in q if i["id"] == "harness_proposals"]
