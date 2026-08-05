@@ -776,6 +776,96 @@ class Blackboard:
                        "blocked": blocked, "top_stage": top_stage, "avg_tokens": avg_tokens})
         return out
 
+    # -- harness proposals: the self-harness loop (design: docs/plans/2026-08-05-self-
+    # harness-loop-design.md) — THIN CRUD only; every policy decision (validate, apply,
+    # the operator-gated status transitions) lives in orchestrator/harness.py.
+    @staticmethod
+    def _with_harness_json(row: Optional[dict]) -> Optional[dict]:
+        if row is not None:
+            try:
+                row["change"] = json.loads(row.get("change_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty change
+                row["change"] = {}
+            try:
+                row["evidence"] = json.loads(row.get("evidence_json") or "[]")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to no evidence
+                row["evidence"] = []
+        return row
+
+    def add_harness_proposal(self, *, shift_id: Optional[int], weakness: str, kind: str,
+                             target: str, change: dict, rationale: str = "",
+                             evidence: Optional[list] = None, status: str = "proposed") -> int:
+        """Insert ONE proposal row (not a batch — a `factory harness plan` run calls this
+        once per proposal in the reply, up to MAX_PROPOSALS). Returns its id."""
+        cur = self._exec(
+            "INSERT INTO harness_proposals(created_at, shift_id, weakness, kind, target, "
+            "change_json, rationale, evidence_json, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (now_iso(), shift_id, weakness, kind, target, json.dumps(change or {}),
+             rationale, json.dumps(evidence or []), status))
+        return cur.lastrowid
+
+    def get_harness_proposal(self, proposal_id: int) -> Optional[dict]:
+        return self._with_harness_json(
+            self._one("SELECT * FROM harness_proposals WHERE id = ?", (proposal_id,)))
+
+    # Marker rows (adversarial-review fix round, evidence-freshness watermark bug): a
+    # batch outcome that spent a frontier call but produced no citable proposal — an
+    # honest empty `[]`, or an unparseable reply — is persisted as ONE row, kind='none',
+    # status in ('empty','error'). They exist ONLY to advance `latest_harness_proposal`'s
+    # watermark; they are never a real proposal, so `harness_proposals` (the board/CLI
+    # read) EXCLUDES them by default. See orchestrator/harness.py's `_persist_marker`.
+    _MARKER_FILTER = "NOT (kind = 'none' AND status IN ('empty', 'error'))"
+
+    def harness_proposals(self, status: Optional[str] = None, limit: int = 100, *,
+                          include_markers: bool = False) -> list[dict]:
+        """Proposals newest-first, optionally filtered to one `status` — the board
+        surface (reporting/fleet_viz.py) and `factory harness show` both read this.
+        Marker rows are excluded unless `include_markers=True` (an operator/audit view
+        that explicitly wants them) — see `_MARKER_FILTER`'s docstring."""
+        conds, params = [], []
+        if status:
+            conds.append("status = ?")
+            params.append(status)
+        if not include_markers:
+            conds.append(self._MARKER_FILTER)
+        where = f"WHERE {' AND '.join(conds)}" if conds else ""
+        rows = self._all(
+            f"SELECT * FROM harness_proposals {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit))
+        return [self._with_harness_json(r) for r in rows]
+
+    def harness_proposal_counts(self) -> dict:
+        """{status: count} over LIVE (non-marker) proposals, via COUNT(*) — the board/
+        CLI's EXACT proposed/approved tallies, not truncated by a `harness_proposals
+        (limit=...)` window (a `limit=50` count would undercount once there are more than
+        50 non-marker rows crowding out an older 'proposed' one)."""
+        rows = self._all(
+            f"SELECT status, COUNT(*) AS n FROM harness_proposals "
+            f"WHERE {self._MARKER_FILTER} GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
+    def latest_harness_proposal(self) -> Optional[dict]:
+        """The single most recent proposal row of ANY status, INCLUDING marker rows — the
+        watermark orchestrator.harness's evidence-freshness gate reads (count new failure
+        rows since this row's created_at; None = no batch has ever run, so count from the
+        beginning). This is the ONE reader that must never filter markers out — a marker
+        row's whole purpose is to be seen here (see `_MARKER_FILTER`'s docstring)."""
+        return self._with_harness_json(
+            self._one("SELECT * FROM harness_proposals ORDER BY id DESC LIMIT 1"))
+
+    def set_harness_proposal_status(self, proposal_id: int, status: str, *,
+                                    decided_by: str = "", result: str = "") -> None:
+        """Transition ONE proposal's status — the operator's apply/reject act (or an
+        apply-time re-check rejection, e.g. a setting whose target was later removed from
+        SETTINGS_SPEC). decided_at is stamped on every call; applied_at is stamped ONLY
+        when `status` is 'applied' (COALESCE preserves whatever it already was on any
+        OTHER transition, so it can never be blanked by a later reject)."""
+        applied_at = now_iso() if status == "applied" else None
+        self._exec(
+            "UPDATE harness_proposals SET status = ?, decided_at = ?, decided_by = ?, "
+            "applied_at = COALESCE(?, applied_at), result = ? WHERE id = ?",
+            (status, now_iso(), decided_by, applied_at, result, proposal_id))
+
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:
         r = self._one("SELECT value FROM settings WHERE key = ?", (key,))
@@ -1028,6 +1118,22 @@ class Blackboard:
         return self._all(
             "SELECT * FROM task_evidence WHERE task_id = ? ORDER BY id DESC", (task_id,))
 
+    def recent_task_evidence(self, limit: int = 200) -> list[dict]:
+        """Every task's failure-evidence rows, newest first, capped — the self-harness
+        loop's weakness miner (reporting/weakness.py) reads this GLOBALLY (unlike
+        `task_evidence`, which is scoped to one task) to cluster by (action, stage)."""
+        return self._all("SELECT * FROM task_evidence ORDER BY id DESC LIMIT ?", (limit,))
+
+    def count_task_evidence_since(self, since: Optional[str] = None) -> int:
+        """How many task_evidence rows exist with created_at > `since` (None = ALL rows) —
+        the self-harness loop's evidence-freshness gate (orchestrator/harness.py's
+        maybe_plan_harness): a free no-op until enough NEW failure rows have landed since
+        the last proposal batch."""
+        if since:
+            return self._one(
+                "SELECT COUNT(*) AS n FROM task_evidence WHERE created_at > ?", (since,))["n"]
+        return self._one("SELECT COUNT(*) AS n FROM task_evidence")["n"]
+
     # -- gate-eval outcomes: per-golden-case results (Task 2.1, P12) --------
     def add_gate_eval_result(self, gate: str, case_id: str, ok: bool,
                              verdict: str = "") -> int:
@@ -1048,6 +1154,25 @@ class Blackboard:
             "SELECT * FROM gate_eval_results WHERE id IN ("
             "SELECT MAX(id) FROM gate_eval_results WHERE gate = ? GROUP BY case_id)",
             (gate,))
+
+    def all_gate_eval_results(self, gate: Optional[str] = None, limit: int = 2000) -> list[dict]:
+        """The NEWEST `limit` gate_eval_results rows (optionally scoped to one `gate`),
+        returned in ASCENDING (run) order — so a per-case flip detector (reporting/
+        weakness.py `_gate_flip_clusters`) can walk each case's RECENT history to find an
+        ok→fail regression between its last two runs.
+
+        Adversarial-review fix round (item 13b): a plain `ORDER BY id ASC LIMIT ?`
+        returns the OLDEST `limit` rows FOREVER once a gate accumulates more than `limit`
+        lifetime rows — flip detection needs the LATEST runs, not ancient history, so a
+        naive ASC-then-LIMIT went permanently blind to any regression past row `limit`.
+        Implemented as an inner DESC-limited subquery (the newest N) re-sorted ASC."""
+        if gate:
+            return self._all(
+                "SELECT * FROM (SELECT * FROM gate_eval_results WHERE gate = ? "
+                "ORDER BY id DESC LIMIT ?) ORDER BY id ASC", (gate, limit))
+        return self._all(
+            "SELECT * FROM (SELECT * FROM gate_eval_results ORDER BY id DESC LIMIT ?) "
+            "ORDER BY id ASC", (limit,))
 
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:

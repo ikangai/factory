@@ -16,7 +16,7 @@ from ..common import config, killswitch
 
 def run_shift(store, *, token_budget: int, conductor: Callable, executor: Optional[Callable] = None,
               refill: Optional[Callable] = None, refill_threshold: int = 2,
-              org_planner: Optional[Callable] = None,
+              org_planner: Optional[Callable] = None, harness_planner: Optional[Callable] = None,
               mission: Optional[str] = None, wall_clock_s: int = 1800) -> dict:
     """Run one bounded conductor shift. The conductor PLANS (orients, claims the tasks to
     work); then the `executor` (deterministic, no LLM-driven Bash) runs each claimed task
@@ -28,7 +28,16 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     `org_planner` (self-organizing factory, Task 2.2): the shift-start trigger
     (`orchestrator.org.maybe_plan_org`) — injected exactly like `executor`/`refill` so
     every EXISTING run_shift test (none of which pass it) stays byte-identical. `None`
-    (the default) is a pure no-op."""
+    (the default) is a pure no-op.
+
+    `harness_planner` (self-harness loop, adversarial-review fix round 2026-08-05 —
+    moved here FROM a post-run_shift hook in orchestrator.cmd_run): the shift-END trigger
+    (`orchestrator.harness.maybe_plan_harness`), injected exactly like `org_planner`.
+    Invoked near the BOTTOM of this function, after outcomes are recorded and BEFORE the
+    tokens_used ledger rollup — see the call site's own comment for why a post-run_shift
+    hook was wrong on three counts (spend visibility to the loop brake, firing after a
+    tripped brake, and no clean injection seam for tests). `None` (the default) is a pure
+    no-op, so every EXISTING run_shift test stays byte-identical."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
     store.reap_orphaned_approvals()                # + push approvals stranded 'executing' by a
                                                    #   crash between claim and resolve (Fix 4d)
@@ -128,6 +137,39 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
         note = (f"budget exhausted: spent {spent} of {token_budget} tokens before dispatch — "
                 f"executor skipped, claimed tasks requeued")
         resume_note = f"{resume_note}\n{note}" if resume_note else note
+
+    # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,
+    # Component E; adversarial-review fix round, 2026-08-05): the shift-END trigger,
+    # placed HERE — AFTER outcomes are recorded (the executor above already wrote this
+    # shift's routing_outcomes/task_evidence) and BEFORE the tokens_used ledger rollup
+    # below, so the harness engineer's own ledgered spend (store.add_budget inside
+    # maybe_plan_harness/plan_harness) is INCLUDED in `ledgered`/`tokens_total` — a
+    # post-run_shift hook (the ORIGINAL placement, in cmd_run) landed its spend too LATE
+    # for the unattended loop's cumulative token brake (cmd_run_loop's loop_token_budget)
+    # to ever see it, and left shifts.tokens_used disagreeing with shift_spend(shift_id).
+    # Skipped entirely when the shift ended budget_exhausted/timed_out/halted — a tripped
+    # brake must not spend MORE frontier tokens trying to improve the very loop that
+    # tripped it ('timed_out'/'error' shifts never reach this point at all: both are
+    # early returns above; 'timed_out'/'halted' are named explicitly anyway for a reader
+    # who doesn't want to trace the early-return paths). Fail-open + loud, mirroring
+    # org_planner's own failure posture.
+    if harness_planner is not None and status not in ("budget_exhausted", "timed_out", "halted"):
+        try:
+            harness_result = harness_planner(store, shift_id=sh)
+            if harness_result:
+                print(f"[harness] proposed {len(harness_result)} proposal(s) this shift — "
+                      f"review with `factory harness show`")
+        except Exception as e:  # noqa: BLE001 — the harness engineer's own failure mustn't
+            print(f"[harness] planner error (non-fatal — the shift continues): {e}",  # sink the shift
+                 flush=True)
+            try:
+                from ..reporting import factory_memory
+                factory_memory.record_learning(
+                    store, "factory", f"the harness engineer blew up mid-shift: {e}"[:500],
+                    scope="harness_engineer", shift_id=sh)
+            except Exception:  # noqa: BLE001 — the learning write itself must never sink the shift
+                pass
+
     # Requeue anything STILL in-flight (the executor closes what it ran; this rescues a task
     # the conductor claimed but the executor didn't reach / a crash left dangling).
     store.requeue_shift_tasks(sh)

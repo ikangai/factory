@@ -201,6 +201,43 @@ def org_state(store) -> dict:
                 "organizer_on": False, "fit": [], "latest": {"version": 0, "status": ""}}
 
 
+def harness_state(store) -> dict:
+    """The self-harness loop's board surface (design: docs/plans/2026-08-05-self-harness-
+    loop-design.md, Component E — "harness key in fleet_json (proposed/approved counts +
+    newest 5) rendered _org_section_html-style"). Mirrors org_state's own shape/crash-
+    proofing exactly: ALWAYS the same keys, whether or not the knob is on or any proposal
+    exists yet — a quiet state is an explicit count of zero, never a missing key.
+
+    `harness_engineer_on` reads the EXACT config-only knob the shift-end hook
+    (orchestrator/orchestrator.py's cmd_run) arms the trigger from
+    (`super_worker.harness_engineer`) — never resolve_setting/the store override path,
+    for the same reason org_state's `organizer_on` doesn't: the knob is deliberately kept
+    OUT of SETTINGS_SPEC so a proposal can never gain control of its own trigger.
+
+    Adversarial-review fix round (2026-08-05): counts now come from
+    `store.harness_proposal_counts()` (an exact COUNT(*)-by-status, item 13a) rather than
+    a `limit=50` window, which could undercount once there were more than 50 non-marker
+    rows; each `newest` entry now carries a `change_summary` (item 6d) — an operator gate
+    must never be asked to approve a proposal it can't see the substance of at a glance.
+    Never raises to the caller."""
+    try:
+        from ..common import config
+        from ..orchestrator.harness import _change_summary   # lazy: avoid an import cycle
+        counts = store.harness_proposal_counts()
+        rows = store.harness_proposals(limit=5)
+        harness_on = bool((config.load_config().get("super_worker") or {})
+                          .get("harness_engineer", False))
+        newest = [{"id": r["id"], "status": r["status"], "kind": r["kind"],
+                   "target": r["target"], "weakness": r["weakness"],
+                   "change_summary": _change_summary(r["kind"], r.get("change") or {}),
+                   "rationale": (r.get("rationale") or "")[:200]}
+                  for r in rows]
+        return {"proposed": counts.get("proposed", 0), "approved": counts.get("approved", 0),
+                "harness_engineer_on": harness_on, "newest": newest}
+    except Exception:  # noqa: BLE001 — never let the board section sink the whole payload
+        return {"proposed": 0, "approved": 0, "harness_engineer_on": False, "newest": []}
+
+
 def _briefs_staged() -> int:
     """How many staged research briefs await conversion (crash-proof filesystem count)."""
     try:
@@ -251,6 +288,12 @@ def derive_queue(payload: dict) -> list[dict]:
     if payload.get("briefs_staged"):
         add("briefs", f"{payload['briefs_staged']} staged research brief(s) await dispatch",
             "Research proposed work the conductor hasn't converted yet.", "blue", "research")
+    harness = payload.get("harness") or {}
+    if harness.get("proposed"):
+        add("harness_proposals",
+            f"{harness['proposed']} harness proposal(s) awaiting decision",
+            "The self-harness loop proposed bounded harness edits — review with "
+            "`factory harness show`.", "blue", "resources")
     if (payload.get("phase") == "idle" and not payload.get("running_shift")
             and not payload.get("halted")):
         add("parked", "Fleet is parked — no shift running",
@@ -385,6 +428,7 @@ def fleet_json(store) -> dict:
         "plan": plan_list(store),           # milestones + progress (Plan tab; Task 2.5)
         "profiles": profiles_compact(store),  # worker bench + outcomes (Resources tab; Task 5.7)
         "org": org_state(store),            # self-organizing org chart + fit table (Task 3.1)
+        "harness": harness_state(store),    # self-harness loop: proposed/approved + newest 5
         "digests": [d["summary"][:140] for d in state["digests"]],
         # PMO redesign: the latest shift's resume note = the Report tab's "next steps".
         "resume_note": (shifts[0].get("resume_note") or "") if shifts else "",
@@ -444,7 +488,8 @@ def generate_fleet_html(store, *, out_path: Optional[str] = None, generated_at: 
     out_path = out_path or os.path.join(paths.LOGS_DIR, "fleet.html")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     html_doc = render_fleet_html(build_fleet_state(store), live=live_workers(),
-                                 generated_at=generated_at, org=org_state(store))
+                                 generated_at=generated_at, org=org_state(store),
+                                 harness=harness_state(store))
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(html_doc)
     return out_path
@@ -539,8 +584,34 @@ def _org_section_html(org: Optional[dict]) -> str:
     return f'<section><h2>Org chart</h2>{body}{fit_line}</section>'
 
 
+def _harness_section_html(harness: Optional[dict]) -> str:
+    """ONE compact <section> for the self-harness loop (design: docs/plans/2026-08-05-
+    self-harness-loop-design.md, Component E), modeled directly on `_org_section_html`:
+    it always renders (never omitted, even with zero proposals and the knob off), and
+    lists the newest 5 proposals with their live status so a rejected/applied one stays
+    visible for audit even after it's no longer awaiting a decision."""
+    h = harness or {}
+    knob = "on" if h.get("harness_engineer_on") else "off"
+    newest = h.get("newest") or []
+    status_color = {"proposed": "#f59e0b", "approved": "#38bdf8", "applied": "#22c55e",
+                    "rejected": "#ef4444", "superseded": "#64748b"}
+    if newest:
+        rows = "".join(
+            f'<div class="task"><b>#{_esc(p["id"])}</b> '
+            f'{_chip(p["status"], status_color.get(p["status"], "#64748b"))} '
+            f'<span class="src">{_esc(p["kind"])}</span> {_esc(p["target"])} '
+            f'<code>{_esc(p.get("change_summary", ""))}</code> '
+            f'<span class="muted">(weakness={_esc(p["weakness"])})</span></div>'
+            for p in newest)
+    else:
+        rows = '<div class="muted">no proposals yet</div>'
+    head = (f'<div class="muted">{h.get("proposed", 0)} proposed · {h.get("approved", 0)} '
+           f'approved · harness engineer knob: {knob}</div>')
+    return f'<section><h2>Harness proposals</h2>{head}{rows}</section>'
+
+
 def render_fleet_html(state: dict, *, live: Optional[list] = None, generated_at: str = "",
-                      org: Optional[dict] = None) -> str:
+                      org: Optional[dict] = None, harness: Optional[dict] = None) -> str:
     live = live or []
     m = state.get("mission")
     mission_txt = _esc(m["statement"]) if m else "— no mission set —"
@@ -579,11 +650,13 @@ def render_fleet_html(state: dict, *, live: Optional[list] = None, generated_at:
                     f'fuels the researchers)</span></h2>{items}</section>')
 
     org_html = _org_section_html(org)
+    harness_html = _harness_section_html(harness)
 
     return _PAGE.format(
         mission=mission_txt, target=target, generated=_esc(generated_at),
         live=live_html, shifts=shifts_html, board=board_html, ms=ms_html, digests=dig_html,
-        org=org_html, task_total=state["task_total"], shift_count=len(state["shifts"]))
+        org=org_html, harness=harness_html, task_total=state["task_total"],
+        shift_count=len(state["shifts"]))
 
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -626,6 +699,7 @@ footer{{color:var(--muted);font-size:12px;margin-top:30px;border-top:1px solid v
 {ms}
 {digests}
 {org}
+{harness}
 <footer>The factory's workers are its records: a shift is a conductor instance; each task it
 claimed→done/blocked is a developer-worker dispatch; research tasks are researcher output.
 Read-only snapshot of the blackboard — regenerate with <code>factory viz</code>.</footer>

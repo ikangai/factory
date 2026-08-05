@@ -749,7 +749,15 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch, task_ref=task_ref, require_test=rt,
-                    acceptance_ref=acceptance_ref)   # Task 3.1: run the spec's named test in the candidate
+                    acceptance_ref=acceptance_ref,   # Task 3.1: run the spec's named test in the candidate
+                    # held-out is REBASELINE scope, not per-merge scope (adversarial-review
+                    # fix round, 2026-08-05): run_code_round's OWN default is now fail-closed
+                    # (True, matching code_gate.auto_merge_eligible), so the per-merge
+                    # opt-out is a VISIBLE call-site decision, not a silent inherited
+                    # default — see code_gate.auto_merge_eligible's docstring for why
+                    # requiring it here would have blocked EVERY merge under grade.mode:
+                    # smoke (which honestly reports held_out_measured=False).
+                    require_held_out=False)
                 res.update(evidence)                  # learnings + reply_head (Task 0.4);
                 res["changed_paths"] = changed        # for the spec-fulfillment check (GSD #6)
                 res.update(spend)                     # developer tokens/cost/seconds (Task 0.2)

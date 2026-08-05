@@ -29,6 +29,31 @@ def _hermetic_killswitch(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(killswitch, "stop_flag_path", lambda: str(stop))
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_grade_mode(monkeypatch):
+    """Isolate every test from the LIVE `grade.mode`.
+
+    Same leak as the kill switch above, with teeth: `grade.build_grade()`
+    under `mode: smoke` EAGERLY measures a champion baseline, which runs real
+    scenarios against real clive through a real model. So an operator who
+    enables the behavioural merge grade for a live shift turns this suite into
+    a slow, network-dependent, billable run — test_develop_glue alone went from
+    seconds to 11 minutes and 44 failures, purely from reading config.yaml.
+
+    Force the config the tests SEE back to `stub`. Tests that exercise the real
+    grade pass `cfg=` explicitly (see test_grade.py) and are unaffected, and
+    the operator's live setting is never touched."""
+    from factory.common import config
+    _real_load = config.load_config
+
+    def _stubbed_grade_mode():
+        cfg = dict(_real_load())
+        cfg["grade"] = {**(cfg.get("grade") or {}), "mode": "stub"}
+        return cfg
+
+    monkeypatch.setattr(config, "load_config", _stubbed_grade_mode)
+
+
 @pytest.fixture
 def store(tmp_path):
     """A suite-wide isolated, schema-initialized blackboard on a temp-dir DB.
