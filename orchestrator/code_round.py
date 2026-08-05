@@ -32,7 +32,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    label: str = "candidate", task_ref: str = "",
                    regression_tol: float = 0.0,
                    require_test: bool = False, acceptance_ref: str = None,
-                   require_held_out: bool = False) -> dict:
+                   require_held_out: bool = True) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -41,7 +41,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     into `main_repo` (the champion), which is then re-baselined. The caller sets up the
     checkout (adapter.fetch_candidate + add_worktree) and records the result to the
     store + diary. Prefer passing `changed_paths` (from adapter.changed_paths(),
-    NUL-delimited and unquoted); `diff_text` is the fallback."""
+    NUL-delimited and unquoted); `diff_text` is the fallback.
+
+    `require_held_out` defaults to `True` (fail-closed, adversarial-review fix round,
+    2026-08-05 — restores this function's OWN default to match `code_gate.
+    auto_merge_eligible`'s fail-closed posture; a caller wanting the `grade.mode: smoke`
+    per-merge scope-out must now say so EXPLICITLY at its own call site, which
+    orchestrator/develop.py's real caller does: `require_held_out=False`)."""
     if killswitch.is_halted():
         return {"action": "halted"}
 
