@@ -1028,6 +1028,22 @@ class Blackboard:
         return self._all(
             "SELECT * FROM task_evidence WHERE task_id = ? ORDER BY id DESC", (task_id,))
 
+    def recent_task_evidence(self, limit: int = 200) -> list[dict]:
+        """Every task's failure-evidence rows, newest first, capped — the self-harness
+        loop's weakness miner (reporting/weakness.py) reads this GLOBALLY (unlike
+        `task_evidence`, which is scoped to one task) to cluster by (action, stage)."""
+        return self._all("SELECT * FROM task_evidence ORDER BY id DESC LIMIT ?", (limit,))
+
+    def count_task_evidence_since(self, since: Optional[str] = None) -> int:
+        """How many task_evidence rows exist with created_at > `since` (None = ALL rows) —
+        the self-harness loop's evidence-freshness gate (orchestrator/harness.py's
+        maybe_plan_harness): a free no-op until enough NEW failure rows have landed since
+        the last proposal batch."""
+        if since:
+            return self._one(
+                "SELECT COUNT(*) AS n FROM task_evidence WHERE created_at > ?", (since,))["n"]
+        return self._one("SELECT COUNT(*) AS n FROM task_evidence")["n"]
+
     # -- gate-eval outcomes: per-golden-case results (Task 2.1, P12) --------
     def add_gate_eval_result(self, gate: str, case_id: str, ok: bool,
                              verdict: str = "") -> int:
@@ -1048,6 +1064,16 @@ class Blackboard:
             "SELECT * FROM gate_eval_results WHERE id IN ("
             "SELECT MAX(id) FROM gate_eval_results WHERE gate = ? GROUP BY case_id)",
             (gate,))
+
+    def all_gate_eval_results(self, gate: Optional[str] = None, limit: int = 2000) -> list[dict]:
+        """Every gate_eval_results row (optionally scoped to one `gate`), OLDEST first
+        (id ASC) so a per-case flip detector can walk each case's history in run order —
+        the self-harness loop's weakness miner (reporting/weakness.py `_gate_flip_clusters`)
+        reads this to find an ok→fail regression between a case's last two runs."""
+        if gate:
+            return self._all("SELECT * FROM gate_eval_results WHERE gate = ? "
+                             "ORDER BY id ASC LIMIT ?", (gate, limit))
+        return self._all("SELECT * FROM gate_eval_results ORDER BY id ASC LIMIT ?", (limit,))
 
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
