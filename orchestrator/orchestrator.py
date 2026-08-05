@@ -1007,7 +1007,7 @@ def _write_mission_md(statement: str) -> None:
 def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: Optional[int] = None,
             wall_clock_s: Optional[int] = None, prod: bool = False, plateau_k: int = 3,
             real: bool = False, conductor=None, executor=None, refill=None,
-            org_planner=None) -> dict:
+            org_planner=None, harness_planner=None) -> dict:
     """The conductor loop entry point (design step 6): run ONE bounded shift, then assess
     the mission and surface the status. State persists in the store, so each `run` resumes
     where the last left off — schedule it (launchd) for the unattended daily cadence."""
@@ -1103,6 +1103,19 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         if org_planner is None and bool(sw.get("organizer", False)):
             from .org import maybe_plan_org
             org_planner = maybe_plan_org
+        # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,
+        # Component E; adversarial-review fix round, 2026-08-05 — moved here from a
+        # post-run_shift hook to mirror org_planner's OWN wiring exactly): the shift-END
+        # trigger — config-gated OFF by default, same posture as every other LLM-spending
+        # stage. Config-ONLY, deliberately NOT in SETTINGS_SPEC (see harness_surface's
+        # FROZEN_KNOB_KEYS/_is_frozen_knob — the trigger can never widen itself). Nested
+        # INSIDE "executor is None" too, exactly like org_planner: a caller supplying
+        # their OWN executor is taking full manual control of dispatch and must opt into
+        # harness_planner explicitly — it must never fire a live frontier claude_p call
+        # just because cmd_run happened to run.
+        if harness_planner is None and bool(sw.get("harness_engineer", False)):
+            from .harness import maybe_plan_harness
+            harness_planner = maybe_plan_harness
     if refill is None:                                 # …and REFILLS the backlog from research when thin
         from ..roles import research_feed
         refill = lambda st: research_feed.propose_directions(st, as_user=as_user, claude_bin=claude_bin)
@@ -1110,34 +1123,9 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
 
     res = run_shift(store, token_budget=token_budget, conductor=conductor, executor=executor,
                     refill=refill, refill_threshold=refill_threshold, org_planner=org_planner,
-                    mission=mission, wall_clock_s=wall_clock_s)
+                    harness_planner=harness_planner, mission=mission, wall_clock_s=wall_clock_s)
     print(f"[run] shift {res.get('shift_id')}: {res['action']} "
           f"(reaped {res.get('reaped', 0)} crashed; shipped {res.get('shipped', 0)})")
-
-    # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,
-    # Component E): the shift-END trigger, AFTER outcomes are recorded — routing_outcomes/
-    # task_evidence are written by the executor INSIDE run_shift, so by the time control
-    # returns here this shift's own evidence already reflects in the store. Config-gated
-    # OFF by default, the same posture as every other LLM-spending stage this rail grew;
-    # try/except + a factory learning on failure, mirroring the org-planner shift-START
-    # hook's own failure posture (orchestrator/shift.py) — the harness engineer's own
-    # blow-up must never look silent or sink a shift that otherwise ran fine.
-    if res.get("shift_id") and bool(sw.get("harness_engineer", False)):
-        try:
-            from .harness import maybe_plan_harness
-            harness_result = maybe_plan_harness(store, shift_id=res["shift_id"])
-            if harness_result:
-                print(f"[harness] proposed {len(harness_result)} proposal(s) this shift — "
-                      f"review with `factory harness show`")
-        except Exception as e:  # noqa: BLE001 — the harness engineer's own failure must
-            print(f"[harness] planner error (non-fatal): {e}", flush=True)  # never sink the shift
-            try:
-                from ..reporting import factory_memory
-                factory_memory.record_learning(
-                    store, "factory", f"the harness engineer blew up mid-shift: {e}"[:500],
-                    scope="harness_engineer", shift_id=res["shift_id"])
-            except Exception:  # noqa: BLE001 — the learning write itself must never crash
-                pass
 
     if res.get("shift_id"):                            # a shift actually ran → assess the mission
         shipped_tasks = [t for t in store.list_tasks(status="done")
@@ -2133,12 +2121,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     hrn.add_argument("action", choices=["mine", "plan", "show", "apply", "reject"],
                      help="mine = print the mined weakness table (no LLM, no store write); "
                           "plan = the frontier harness engineer proposes a batch (<=5); "
-                          "show = every proposal, newest first; "
+                          "show = every proposal, newest first, with an inline change "
+                          "summary; show <id> = the FULL detail of ONE proposal; "
                           "apply <id> = apply ONE proposal (asymmetric per kind — a prompt "
                           "proposal NEVER auto-writes a file); "
                           "reject <id> = reject ONE proposal")
     hrn.add_argument("rest", nargs="?", default=None,
-                     help="the integer proposal id (apply/reject only)")
+                     help="the integer proposal id (show/apply/reject; optional for show)")
     sub.add_parser("daily")             # the 09:00 update: bounded autonomous run + summary
     sci = sub.add_parser("schedule-install")  # install the launchd 09:00 agent
     sci.add_argument("--loop", action="store_true", help="schedule `factory run` (conductor loop), not `daily`")

@@ -36,23 +36,33 @@ too thin to justify a change (propose nothing rather than guess).
 - Propose **at most 5** changes. Fewer, well-grounded proposals beat a full batch of weak
   ones — propose ZERO when the evidence doesn't clearly support a change.
 - Every proposal must cite `"weakness"`: the exact cluster id from the mined-weaknesses
-  table above, and `"evidence"`: a non-empty list of row ids taken VERBATIM from that same
-  table — an invented or off-table id rejects the WHOLE batch.
+  table above, and `"evidence"`: a non-empty list of row ids taken VERBATIM from THAT SAME
+  cluster's own rows — citing a row that belongs to a DIFFERENT cluster does not justify
+  this edit, even if that row appears elsewhere in the table; an invented, off-table, or
+  wrong-cluster id rejects the WHOLE batch.
+  - For `learning_corrective` specifically: the row you cite in `"evidence"` must INCLUDE
+    the exact `learning:<id>` you name in `"target"` — citing some other row from the
+    bad-lore cluster isn't enough, you must cite the row you're correcting.
 - `"kind"` is one of `setting` | `prompt` | `learning_corrective`, and `"target"` must name
   something inside § The editable surface — anything else is rejected wholesale.
   - `setting` → `"change": {"value": <the new value>}`. The value must cast to the
     knob's type and sit inside its stated numeric bounds (booleans: `true`/`false` only).
+    Every GATE/VERIFIER knob (see § Your authority) is frozen — do not propose one.
   - `prompt` → `"change": {"summary": "<one line>", "patch": "<the concrete edit — a
     diff or a clear before/after quote>"}`. This is NEVER auto-applied: a human lands it
     by hand after review, so make the patch text something a person can act on directly.
+    Your OWN prompt and every verifier/gate role's prompt are frozen — do not propose one.
   - `learning_corrective` → `"change": {"op": "archive"|"pin", "corrective": "<a
-    replacement lesson, or '' to just archive/pin with no replacement>"}`.
+    replacement lesson, or '' to just archive/pin with no replacement>"}`. `"pin"` is
+    ONLY legal on a learning that is not already proven counterproductive by its own
+    outcome counters — a proven-bad lesson may only be `"archive"`d, never pinned (pinning
+    it would re-inject proven-false lore into every worker's card).
 - Never propose the same `(kind, target)` twice in one batch — the later duplicate is
   rejected outright.
 - `"rationale"` explains WHY, citing the weakness/evidence; `"expected_effect"` states what
   you expect to change; `"risk"` states plainly what could go wrong if this is applied and
-  turns out to be wrong. All three are free text, kept for audit, and are never structurally
-  enforced beyond being present.
+  turns out to be wrong. All three are REQUIRED, non-empty strings — a proposal missing any
+  one of them rejects the WHOLE batch.
 
 ## Output — EXACTLY a JSON array, ≤5 proposals, nothing else
 Return ONE JSON array, starting with `[` and ending with `]` — **no markdown fences, no

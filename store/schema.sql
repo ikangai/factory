@@ -389,19 +389,27 @@ CREATE INDEX IF NOT EXISTS idx_routing_outcomes_class_tier ON routing_outcomes(o
 -- the malformed input this table exists to record. Mirrors task_evidence.action's own
 -- unconstrained TEXT column for the same reason. The three legal values validate_proposals
 -- enforces before a row can ever reach 'proposed': setting | prompt | learning_corrective.
+-- kind='none' is the WATERMARK MARKER convention (adversarial-review fix round,
+-- 2026-08-05): a batch outcome that spent a frontier call but produced no citable
+-- proposal (an honest empty `[]`, or an unparseable reply) still needs ONE row so
+-- latest_harness_proposal's created_at (the evidence-freshness gate's watermark)
+-- advances — else an honest "nothing to propose" answer left no trace, and the gate
+-- re-fired a frontier call every single shift forever. status 'empty'/'error' (below)
+-- are ONLY ever paired with kind='none'; see orchestrator/harness.py's `_persist_marker`.
 CREATE TABLE IF NOT EXISTS harness_proposals (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at    TEXT NOT NULL,
     shift_id      INTEGER REFERENCES shifts(id),
     weakness      TEXT NOT NULL DEFAULT '',   -- the mined cluster slug (weakness.mine_weaknesses)
                                                 -- that motivated this proposal
-    kind          TEXT NOT NULL DEFAULT '',   -- setting | prompt | learning_corrective (see above)
+    kind          TEXT NOT NULL DEFAULT '',   -- setting | prompt | learning_corrective | none (see above)
     target        TEXT NOT NULL DEFAULT '',   -- SETTINGS_SPEC key | roles/x/prompt.md | learning:<id>
     change_json   TEXT NOT NULL DEFAULT '{}', -- {"value":...} | {"summary","patch"} | {"op","corrective"}
     rationale     TEXT NOT NULL DEFAULT '',
     evidence_json TEXT NOT NULL DEFAULT '[]', -- cited row ids, drawn from the weakness report
     status        TEXT NOT NULL DEFAULT 'proposed'
-                    CHECK (status IN ('proposed', 'approved', 'applied', 'rejected', 'superseded')),
+                    CHECK (status IN ('proposed', 'approved', 'applied', 'rejected',
+                                       'superseded', 'empty', 'error')),
     decided_at    TEXT,                        -- stamped on apply/reject (an operator act)
     decided_by    TEXT NOT NULL DEFAULT '',    -- 'operator-cli' (CLI) today; a future board actor later
     applied_at    TEXT,                        -- stamped only when status becomes 'applied'

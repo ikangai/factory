@@ -120,10 +120,21 @@ def _scope_churn_clusters(store, window: int) -> list[dict]:
 def _bad_lore_clusters(store, window: int) -> list[dict]:
     """learnings proven counterproductive by their own merged/blocked outcome counters
     (reporting.factory_memory.is_counterproductive) — the ACE-playbook corrective path's
-    own evidence source."""
+    own evidence source.
+
+    Excludes ARCHIVED and PINNED rows (adversarial-review fix round, BLOCKER 5a): an
+    archived row is already retired — mining it forever re-proposes the SAME corrective
+    every batch (its counters are frozen; the proposal can never do anything new). A
+    pinned row's only legal corrective (`op='archive'`, since `op='pin'` on an already-
+    counterproductive row is rejected — see orchestrator.harness.validate_proposals) is
+    itself rejected by validate_proposals (a pinned learning is never a valid corrective
+    target) — mining it wastes a proposal slot on something guaranteed to fail. Both
+    exclusions mean bad-lore only ever surfaces a row a corrective proposal can actually
+    act on."""
     from . import factory_memory
     rows = [r for r in store.all_learnings(limit=window)
-           if factory_memory.is_counterproductive(r)]
+           if not r.get("archived") and not r.get("pinned")
+           and factory_memory.is_counterproductive(r)]
     if not rows:
         return []
     return [{

@@ -212,20 +212,27 @@ def harness_state(store) -> dict:
     (orchestrator/orchestrator.py's cmd_run) arms the trigger from
     (`super_worker.harness_engineer`) — never resolve_setting/the store override path,
     for the same reason org_state's `organizer_on` doesn't: the knob is deliberately kept
-    OUT of SETTINGS_SPEC so a proposal can never gain control of its own trigger. Never
-    raises to the caller."""
+    OUT of SETTINGS_SPEC so a proposal can never gain control of its own trigger.
+
+    Adversarial-review fix round (2026-08-05): counts now come from
+    `store.harness_proposal_counts()` (an exact COUNT(*)-by-status, item 13a) rather than
+    a `limit=50` window, which could undercount once there were more than 50 non-marker
+    rows; each `newest` entry now carries a `change_summary` (item 6d) — an operator gate
+    must never be asked to approve a proposal it can't see the substance of at a glance.
+    Never raises to the caller."""
     try:
         from ..common import config
-        rows = store.harness_proposals(limit=50)
-        proposed = sum(1 for r in rows if r["status"] == "proposed")
-        approved = sum(1 for r in rows if r["status"] == "approved")
+        from ..orchestrator.harness import _change_summary   # lazy: avoid an import cycle
+        counts = store.harness_proposal_counts()
+        rows = store.harness_proposals(limit=5)
         harness_on = bool((config.load_config().get("super_worker") or {})
                           .get("harness_engineer", False))
         newest = [{"id": r["id"], "status": r["status"], "kind": r["kind"],
                    "target": r["target"], "weakness": r["weakness"],
+                   "change_summary": _change_summary(r["kind"], r.get("change") or {}),
                    "rationale": (r.get("rationale") or "")[:200]}
-                  for r in rows[:5]]
-        return {"proposed": proposed, "approved": approved,
+                  for r in rows]
+        return {"proposed": counts.get("proposed", 0), "approved": counts.get("approved", 0),
                 "harness_engineer_on": harness_on, "newest": newest}
     except Exception:  # noqa: BLE001 — never let the board section sink the whole payload
         return {"proposed": 0, "approved": 0, "harness_engineer_on": False, "newest": []}
@@ -593,6 +600,7 @@ def _harness_section_html(harness: Optional[dict]) -> str:
             f'<div class="task"><b>#{_esc(p["id"])}</b> '
             f'{_chip(p["status"], status_color.get(p["status"], "#64748b"))} '
             f'<span class="src">{_esc(p["kind"])}</span> {_esc(p["target"])} '
+            f'<code>{_esc(p.get("change_summary", ""))}</code> '
             f'<span class="muted">(weakness={_esc(p["weakness"])})</span></div>'
             for p in newest)
     else:

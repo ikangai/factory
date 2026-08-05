@@ -141,6 +141,47 @@ def test_bad_lore_cluster_silent_for_a_healthy_learning(tmp_path):
         assert not [c for c in clusters if c["kind"] == "bad-lore"]
 
 
+def test_bad_lore_cluster_excludes_an_archived_counterproductive_learning(tmp_path):
+    """Adversarial-review fix round, BLOCKER 5a: an archived row is already retired — its
+    counters are frozen, so mining it forever would re-propose the SAME corrective every
+    single batch, for no new effect."""
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "a proven-bad but already-archived lesson")
+        for _ in range(10):
+            s.bump_learning_outcomes([lid], merged=False)
+        s.archive_learning(lid)
+        clusters = weakness.mine_weaknesses(s)
+        assert not [c for c in clusters if c["kind"] == "bad-lore"]
+
+
+def test_bad_lore_cluster_excludes_a_pinned_counterproductive_learning(tmp_path):
+    """Adversarial-review fix round, BLOCKER 5a: a pinned learning's only legal
+    corrective (op='archive' — 'pin' on an already-counterproductive row is rejected by
+    validate_proposals) is ITSELF rejected by validate_proposals (a pinned learning is
+    never a valid corrective target) — mining it wastes a proposal slot on something
+    guaranteed to fail validation."""
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "a proven-bad but pinned lesson")
+        for _ in range(10):
+            s.bump_learning_outcomes([lid], merged=False)
+        s.pin_learning(lid)
+        clusters = weakness.mine_weaknesses(s)
+        assert not [c for c in clusters if c["kind"] == "bad-lore"]
+
+
+def test_bad_lore_cluster_still_fires_for_a_live_unpinned_counterproductive_learning(
+        tmp_path):
+    """Sanity check alongside the two exclusion tests above: an ordinary (non-archived,
+    non-pinned) counterproductive learning still mines normally."""
+    with _store(tmp_path) as s:
+        lid = s.add_learning("developer", "a proven-bad, still-live lesson")
+        for _ in range(10):
+            s.bump_learning_outcomes([lid], merged=False)
+        clusters = weakness.mine_weaknesses(s)
+        hit = [c for c in clusters if c["kind"] == "bad-lore"]
+        assert len(hit) == 1 and hit[0]["evidence_ids"] == [f"learning:{lid}"]
+
+
 # -- gate-flip -----------------------------------------------------------------------------
 def test_gate_flip_cluster_fires_on_an_ok_to_fail_regression(tmp_path):
     with _store(tmp_path) as s:

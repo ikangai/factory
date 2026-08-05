@@ -808,21 +808,48 @@ class Blackboard:
         return self._with_harness_json(
             self._one("SELECT * FROM harness_proposals WHERE id = ?", (proposal_id,)))
 
-    def harness_proposals(self, status: Optional[str] = None, limit: int = 100) -> list[dict]:
+    # Marker rows (adversarial-review fix round, evidence-freshness watermark bug): a
+    # batch outcome that spent a frontier call but produced no citable proposal — an
+    # honest empty `[]`, or an unparseable reply — is persisted as ONE row, kind='none',
+    # status in ('empty','error'). They exist ONLY to advance `latest_harness_proposal`'s
+    # watermark; they are never a real proposal, so `harness_proposals` (the board/CLI
+    # read) EXCLUDES them by default. See orchestrator/harness.py's `_persist_marker`.
+    _MARKER_FILTER = "NOT (kind = 'none' AND status IN ('empty', 'error'))"
+
+    def harness_proposals(self, status: Optional[str] = None, limit: int = 100, *,
+                          include_markers: bool = False) -> list[dict]:
         """Proposals newest-first, optionally filtered to one `status` — the board
-        surface (reporting/fleet_viz.py) and `factory harness show` both read this."""
+        surface (reporting/fleet_viz.py) and `factory harness show` both read this.
+        Marker rows are excluded unless `include_markers=True` (an operator/audit view
+        that explicitly wants them) — see `_MARKER_FILTER`'s docstring."""
+        conds, params = [], []
         if status:
-            rows = self._all("SELECT * FROM harness_proposals WHERE status = ? "
-                             "ORDER BY id DESC LIMIT ?", (status, limit))
-        else:
-            rows = self._all("SELECT * FROM harness_proposals ORDER BY id DESC LIMIT ?", (limit,))
+            conds.append("status = ?")
+            params.append(status)
+        if not include_markers:
+            conds.append(self._MARKER_FILTER)
+        where = f"WHERE {' AND '.join(conds)}" if conds else ""
+        rows = self._all(
+            f"SELECT * FROM harness_proposals {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit))
         return [self._with_harness_json(r) for r in rows]
 
+    def harness_proposal_counts(self) -> dict:
+        """{status: count} over LIVE (non-marker) proposals, via COUNT(*) — the board/
+        CLI's EXACT proposed/approved tallies, not truncated by a `harness_proposals
+        (limit=...)` window (a `limit=50` count would undercount once there are more than
+        50 non-marker rows crowding out an older 'proposed' one)."""
+        rows = self._all(
+            f"SELECT status, COUNT(*) AS n FROM harness_proposals "
+            f"WHERE {self._MARKER_FILTER} GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
     def latest_harness_proposal(self) -> Optional[dict]:
-        """The single most recent proposal row of ANY status — the watermark
-        orchestrator.harness's evidence-freshness gate reads (count new failure rows
-        since this row's created_at; None = no batch has ever run, so count from the
-        beginning)."""
+        """The single most recent proposal row of ANY status, INCLUDING marker rows — the
+        watermark orchestrator.harness's evidence-freshness gate reads (count new failure
+        rows since this row's created_at; None = no batch has ever run, so count from the
+        beginning). This is the ONE reader that must never filter markers out — a marker
+        row's whole purpose is to be seen here (see `_MARKER_FILTER`'s docstring)."""
         return self._with_harness_json(
             self._one("SELECT * FROM harness_proposals ORDER BY id DESC LIMIT 1"))
 
@@ -1129,14 +1156,23 @@ class Blackboard:
             (gate,))
 
     def all_gate_eval_results(self, gate: Optional[str] = None, limit: int = 2000) -> list[dict]:
-        """Every gate_eval_results row (optionally scoped to one `gate`), OLDEST first
-        (id ASC) so a per-case flip detector can walk each case's history in run order —
-        the self-harness loop's weakness miner (reporting/weakness.py `_gate_flip_clusters`)
-        reads this to find an ok→fail regression between a case's last two runs."""
+        """The NEWEST `limit` gate_eval_results rows (optionally scoped to one `gate`),
+        returned in ASCENDING (run) order — so a per-case flip detector (reporting/
+        weakness.py `_gate_flip_clusters`) can walk each case's RECENT history to find an
+        ok→fail regression between its last two runs.
+
+        Adversarial-review fix round (item 13b): a plain `ORDER BY id ASC LIMIT ?`
+        returns the OLDEST `limit` rows FOREVER once a gate accumulates more than `limit`
+        lifetime rows — flip detection needs the LATEST runs, not ancient history, so a
+        naive ASC-then-LIMIT went permanently blind to any regression past row `limit`.
+        Implemented as an inner DESC-limited subquery (the newest N) re-sorted ASC."""
         if gate:
-            return self._all("SELECT * FROM gate_eval_results WHERE gate = ? "
-                             "ORDER BY id ASC LIMIT ?", (gate, limit))
-        return self._all("SELECT * FROM gate_eval_results ORDER BY id ASC LIMIT ?", (limit,))
+            return self._all(
+                "SELECT * FROM (SELECT * FROM gate_eval_results WHERE gate = ? "
+                "ORDER BY id DESC LIMIT ?) ORDER BY id ASC", (gate, limit))
+        return self._all(
+            "SELECT * FROM (SELECT * FROM gate_eval_results ORDER BY id DESC LIMIT ?) "
+            "ORDER BY id ASC", (limit,))
 
     # -- auto issue-sync: idempotency ledger --------------------------------
     def issue_sync_seen(self, issue_number: int, commit_sha: str) -> bool:
