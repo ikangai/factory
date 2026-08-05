@@ -31,7 +31,8 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    changed_paths=None, diff_text: str = None,
                    label: str = "candidate", task_ref: str = "",
                    regression_tol: float = 0.0,
-                   require_test: bool = False, acceptance_ref: str = None) -> dict:
+                   require_test: bool = False, acceptance_ref: str = None,
+                   require_held_out: bool = False) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -86,14 +87,21 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     cand = grade_fn(cand_repo)
     working_delta = cand["working"] - champion_scores["working"]
     held_out_delta = cand.get("held_out", 0.0) - champion_scores.get("held_out", 0.0)
-    # Pass the safety signals FAIL-CLOSED: if grade_fn omits held_out_measured /
+    # Pass the safety signals FAIL-CLOSED: if grade_fn omits
     # divergence_alarm / safety_flag, the gate blocks rather than silently merges.
+    #
+    # held-out is REBASELINE scope, not merge scope: sampling it on every merge
+    # would select candidates against it and it would stop being held out.
+    # `factory rebaseline` measures it. Whatever a grade DOES report is still
+    # checked — no_held_out_regression stays live — this only stops the gate
+    # demanding a measurement this stage deliberately does not make.
     verdict = code_gate.auto_merge_eligible(
         tests_passed=True, frozen_ok=True, working_delta=working_delta,
         held_out_delta=held_out_delta,
         held_out_measured=cand.get("held_out_measured", False),
         divergence_alarm=cand.get("divergence_alarm", True),
-        safety_flag=cand.get("safety_flag", True), regression_tol=regression_tol)
+        safety_flag=cand.get("safety_flag", True), regression_tol=regression_tol,
+        require_held_out=require_held_out)
     if not verdict["eligible"]:
         return {"action": "discarded", "stage": "gate", "failed": verdict["failed"], **extra}
 

@@ -21,19 +21,37 @@ from __future__ import annotations
 def auto_merge_eligible(*, tests_passed: bool, frozen_ok: bool, working_delta: float,
                         held_out_delta: float = 0.0, held_out_measured: bool = False,
                         divergence_alarm: bool = True, safety_flag: bool = True,
-                        regression_tol: float = 0.0) -> dict:
+                        regression_tol: float = 0.0,
+                        require_held_out: bool = True) -> dict:
     """Return {eligible, failed, checks}. Eligible iff every gate holds.
 
     FAIL-CLOSED (review 2026-06-25): held-out must be MEASURED (a `held_out_measured`
     gate) so the held-out check can't pass vacuously when no held-out was sampled — the
     same class of bug as the earlier promotion-gate vacuous-held-out. And the
     `divergence_alarm`/`safety_flag` signals DEFAULT TO UNSAFE, so a caller that forgets
-    to compute them BLOCKS rather than silently auto-merging."""
+    to compute them BLOCKS rather than silently auto-merging.
+
+    SCOPE (2026-08-05): that rule made the real behavioural grade unusable.
+    `grade.smoke_scores` honestly reports `held_out_measured=False` — it does
+    not sample the held-out set, by design — so under `grade.mode: smoke` a
+    FLAWLESS candidate (every scenario passing, zero safety flags) failed on
+    `held_out_measured` and NO merge could ever land. The gate was satisfiable
+    only by the stub, which asserts `held_out_measured=True` without measuring
+    anything: the rule was enforced by a lie and blocked the truth.
+
+    `require_held_out=False` lets a caller declare held-out out of scope for
+    its stage. Per-merge scope is tests + frozen + working-set do-no-harm +
+    safety; held-out and divergence belong to `factory rebaseline`, which
+    samples them without the per-merge leakage that would stop the held-out
+    set being held out. Note `no_held_out_regression` ALREADY degrades
+    gracefully for an unmeasured caller — this makes its companion check
+    agree with it instead of contradicting it."""
     checks = {
         "tests_passed": bool(tests_passed),
         "frozen_ok": bool(frozen_ok),
         "no_working_regression": working_delta >= -regression_tol,
-        "held_out_measured": bool(held_out_measured),
+        # Default True — every existing caller stays exactly as strict.
+        "held_out_measured": (not require_held_out) or bool(held_out_measured),
         "no_held_out_regression": (not held_out_measured) or (held_out_delta >= -regression_tol),
         "no_divergence_alarm": not divergence_alarm,
         "no_safety_flag": not safety_flag,
