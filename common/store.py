@@ -776,6 +776,69 @@ class Blackboard:
                        "blocked": blocked, "top_stage": top_stage, "avg_tokens": avg_tokens})
         return out
 
+    # -- harness proposals: the self-harness loop (design: docs/plans/2026-08-05-self-
+    # harness-loop-design.md) — THIN CRUD only; every policy decision (validate, apply,
+    # the operator-gated status transitions) lives in orchestrator/harness.py.
+    @staticmethod
+    def _with_harness_json(row: Optional[dict]) -> Optional[dict]:
+        if row is not None:
+            try:
+                row["change"] = json.loads(row.get("change_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty change
+                row["change"] = {}
+            try:
+                row["evidence"] = json.loads(row.get("evidence_json") or "[]")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to no evidence
+                row["evidence"] = []
+        return row
+
+    def add_harness_proposal(self, *, shift_id: Optional[int], weakness: str, kind: str,
+                             target: str, change: dict, rationale: str = "",
+                             evidence: Optional[list] = None, status: str = "proposed") -> int:
+        """Insert ONE proposal row (not a batch — a `factory harness plan` run calls this
+        once per proposal in the reply, up to MAX_PROPOSALS). Returns its id."""
+        cur = self._exec(
+            "INSERT INTO harness_proposals(created_at, shift_id, weakness, kind, target, "
+            "change_json, rationale, evidence_json, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (now_iso(), shift_id, weakness, kind, target, json.dumps(change or {}),
+             rationale, json.dumps(evidence or []), status))
+        return cur.lastrowid
+
+    def get_harness_proposal(self, proposal_id: int) -> Optional[dict]:
+        return self._with_harness_json(
+            self._one("SELECT * FROM harness_proposals WHERE id = ?", (proposal_id,)))
+
+    def harness_proposals(self, status: Optional[str] = None, limit: int = 100) -> list[dict]:
+        """Proposals newest-first, optionally filtered to one `status` — the board
+        surface (reporting/fleet_viz.py) and `factory harness show` both read this."""
+        if status:
+            rows = self._all("SELECT * FROM harness_proposals WHERE status = ? "
+                             "ORDER BY id DESC LIMIT ?", (status, limit))
+        else:
+            rows = self._all("SELECT * FROM harness_proposals ORDER BY id DESC LIMIT ?", (limit,))
+        return [self._with_harness_json(r) for r in rows]
+
+    def latest_harness_proposal(self) -> Optional[dict]:
+        """The single most recent proposal row of ANY status — the watermark
+        orchestrator.harness's evidence-freshness gate reads (count new failure rows
+        since this row's created_at; None = no batch has ever run, so count from the
+        beginning)."""
+        return self._with_harness_json(
+            self._one("SELECT * FROM harness_proposals ORDER BY id DESC LIMIT 1"))
+
+    def set_harness_proposal_status(self, proposal_id: int, status: str, *,
+                                    decided_by: str = "", result: str = "") -> None:
+        """Transition ONE proposal's status — the operator's apply/reject act (or an
+        apply-time re-check rejection, e.g. a setting whose target was later removed from
+        SETTINGS_SPEC). decided_at is stamped on every call; applied_at is stamped ONLY
+        when `status` is 'applied' (COALESCE preserves whatever it already was on any
+        OTHER transition, so it can never be blanked by a later reject)."""
+        applied_at = now_iso() if status == "applied" else None
+        self._exec(
+            "UPDATE harness_proposals SET status = ?, decided_at = ?, decided_by = ?, "
+            "applied_at = COALESCE(?, applied_at), result = ? WHERE id = ?",
+            (status, now_iso(), decided_by, applied_at, result, proposal_id))
+
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:
         r = self._one("SELECT value FROM settings WHERE key = ?", (key,))

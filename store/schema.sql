@@ -375,6 +375,40 @@ CREATE TABLE IF NOT EXISTS routing_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_routing_outcomes_class_tier ON routing_outcomes(org_class, tier);
 
+-- ===========================================================================
+-- The self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md):
+-- weakness mining (reporting/weakness.py, read-only) -> a bounded PROPOSAL to a
+-- declared editable surface (orchestrator/harness.py, validated in CODE per
+-- common/harness_surface.py) -> operator-gated adoption. One row per PROPOSAL (not per
+-- batch, unlike org_charts) — a `factory harness plan` run persists up to 5 rows.
+-- ===========================================================================
+
+-- kind is NOT CHECK-constrained (unlike status below): a proposal's kind is LLM-supplied
+-- and a WHOLESALE-rejected batch is still persisted for audit (status='rejected') even
+-- when the reply named a bogus kind — a CHECK here would raise IntegrityError on exactly
+-- the malformed input this table exists to record. Mirrors task_evidence.action's own
+-- unconstrained TEXT column for the same reason. The three legal values validate_proposals
+-- enforces before a row can ever reach 'proposed': setting | prompt | learning_corrective.
+CREATE TABLE IF NOT EXISTS harness_proposals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    shift_id      INTEGER REFERENCES shifts(id),
+    weakness      TEXT NOT NULL DEFAULT '',   -- the mined cluster slug (weakness.mine_weaknesses)
+                                                -- that motivated this proposal
+    kind          TEXT NOT NULL DEFAULT '',   -- setting | prompt | learning_corrective (see above)
+    target        TEXT NOT NULL DEFAULT '',   -- SETTINGS_SPEC key | roles/x/prompt.md | learning:<id>
+    change_json   TEXT NOT NULL DEFAULT '{}', -- {"value":...} | {"summary","patch"} | {"op","corrective"}
+    rationale     TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]', -- cited row ids, drawn from the weakness report
+    status        TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK (status IN ('proposed', 'approved', 'applied', 'rejected', 'superseded')),
+    decided_at    TEXT,                        -- stamped on apply/reject (an operator act)
+    decided_by    TEXT NOT NULL DEFAULT '',    -- 'operator-cli' (CLI) today; a future board actor later
+    applied_at    TEXT,                        -- stamped only when status becomes 'applied'
+    result        TEXT NOT NULL DEFAULT ''     -- what apply/reject actually did, for audit
+);
+CREATE INDEX IF NOT EXISTS idx_harness_proposals_status ON harness_proposals(status);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume
