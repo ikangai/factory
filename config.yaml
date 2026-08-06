@@ -235,6 +235,14 @@ super_worker:
   # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
   # it (it's the fail-open default and can't be retired).
   max_profiles: 12
+  # Claim leases (Component F, docs/plans/2026-08-06-publication-broker-design.md): a task
+  # orphaned OUTSIDE a shift (or by a shift that never restarts) otherwise stays 'claimed'/
+  # 'in_progress' forever — the dead-worker-holds-the-task-forever state. Every shift start
+  # (and `factory task reap` on demand) reclaims any in-flight task whose claim is older than
+  # this many minutes AND does not belong to the currently running shift. An EDITABLE capacity
+  # knob (in SETTINGS_SPEC, board-toggleable, SANE_BOUNDS 10-1440) — NOT frozen: tuning lease
+  # length is legitimate; it cannot disable the sweep itself (shift.py calls it unconditionally).
+  claim_lease_minutes: 240
   # Phase 8 (config-gated OFF): a cheap pre-merge REVIEW gate. When true, an isolated blind
   # claude_p (frontier tier — review is judgment) reads git diff base..branch + the task and
   # returns {approve, reason}; a reject discards the candidate (blocked-task lesson). Fail-open

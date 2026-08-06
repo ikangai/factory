@@ -71,6 +71,19 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
 
     sh = store.start_shift(token_budget=token_budget, mission_id=m["id"])
 
+    # Claim leases (Component F, docs/plans/2026-08-06-publication-broker-design.md): a
+    # task orphaned OUTSIDE a shift (no shift_id) — or by a shift that crashed and never
+    # restarted — stays 'claimed'/'in_progress' forever; reap_orphaned_shifts only rescues
+    # a shift's own in-flight tasks while that shift row is still 'running'. keep_shift_id
+    # = THIS shift (just started above) so its own fresh claims are never mistaken for a
+    # stale lease. super_worker.claim_lease_minutes is a board-editable capacity knob
+    # (SETTINGS_SPEC, NOT frozen — see harness_surface.py's own comment on why).
+    lease_minutes, _ = config.resolve_setting(store, "super_worker.claim_lease_minutes", 240)
+    reclaimed_leases = store.reap_expired_task_leases(int(lease_minutes), keep_shift_id=sh)
+    if reclaimed_leases:
+        print(f"[leases] reclaimed {len(reclaimed_leases)} expired claim(s): "
+              f"{', '.join(reclaimed_leases)}", flush=True)
+
     # Self-organizing factory (design: docs/plans/2026-07-09-self-organizing-factory-
     # design.md §3; impl Task 2.2): the shift-start / mission-change trigger. Placed HERE —
     # main thread, right after the STOP check + shift start, before anything below reads a
@@ -154,6 +167,9 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     if budget_hit:
         note = (f"budget exhausted: spent {spent} of {token_budget} tokens before dispatch — "
                 f"executor skipped, claimed tasks requeued")
+        resume_note = f"{resume_note}\n{note}" if resume_note else note
+    if reclaimed_leases:                                # close-out visibility (Component F)
+        note = f"reclaimed {len(reclaimed_leases)} expired claim(s)"
         resume_note = f"{resume_note}\n{note}" if resume_note else note
 
     # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,

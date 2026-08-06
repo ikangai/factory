@@ -762,6 +762,19 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         store.set_task_status(rest, "open", result="")   # result is NOT NULL — clear via ''
         print(f"[task] reopened {rest} (reopen {len(prior) + 1} of {_MAX_REOPENS}) — "
               "detail narrowed, status open (1 row)")
+    elif action == "reap":
+        # Manual claim-lease sweep (Component F, docs/plans/2026-08-06-publication-broker-
+        # design.md) — the automatic one runs every shift start (orchestrator/shift.py);
+        # this is the operator's on-demand handle. keep_shift_id=the CURRENT running shift
+        # (if any), same as the automatic sweep — never reclaims work this process itself
+        # just claimed.
+        lease_minutes, _ = config.resolve_setting(store, "super_worker.claim_lease_minutes", 240)
+        reclaimed = store.reap_expired_task_leases(
+            int(lease_minutes), keep_shift_id=store.current_shift_id())
+        for tid in reclaimed:
+            print(f"[task] reclaimed {tid} (expired claim lease)")
+        print(f"[task] reclaimed {len(reclaimed)} expired claim(s) "
+              f"(lease {int(lease_minutes)}m)")
 
 
 def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int = 200) -> None:
@@ -2136,7 +2149,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="deterministic dashboard gate: node --check the inline JS + "
                           "placeholder/section scans; exit 1 on failure (no browser/server)")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
-    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen"])
+    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen", "reap"])
     tsk.add_argument("rest", nargs="?", help='title (add) or FULL task id (claim/done/block/reopen)')
     tsk.add_argument("--detail", default="",
                      help="bounded brief/spec for `task add` (target surface + acceptance); "
