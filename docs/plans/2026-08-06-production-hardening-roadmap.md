@@ -93,6 +93,11 @@ does not yet split interior authority.
 
 ### Phase 1 — Approval integrity + the publication broker
 
+**SHIPPED** (feat/publication-broker, per `docs/plans/2026-08-06-publication-broker-
+design.md`): envelope + spool + broker core, factory-side broker mode + issue-preview
+consent-compare, red-proof tests, claim leases, and the deploy kit + runbook —
+`docs/runbooks/publication-broker.md`.
+
 The reviewer's P0-3 finished, plus the two cheap high-value items.
 
 - **Operator-side broker.** The factory user loses its push credential. Graduation/publish
