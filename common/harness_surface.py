@@ -46,6 +46,12 @@ FROZEN_SURFACES: tuple[str, ...] = (
     "reporting/human_queue.py",
     "dashboard/",
     "tests/",
+    # Publication broker (docs/plans/2026-08-06-publication-broker-design.md, "Freezing"):
+    # all new publication machinery — the broker itself, the envelope it verifies, and the
+    # whole deployment/publication-credential surface under deploy/.
+    "orchestrator/broker.py",
+    "reporting/envelope.py",
+    "deploy/",
 )
 
 # Config-key prefixes that are NEVER a legal `setting` proposal target, independent of

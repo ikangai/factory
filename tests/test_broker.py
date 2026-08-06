@@ -10,6 +10,8 @@ replayed-nonce reject, expiry reject, happy path.
 from datetime import datetime, timedelta, timezone
 import subprocess
 
+from factory.common import harness_surface as hs
+from factory.common.frozen_source import _is_frozen
 from factory.orchestrator import broker
 from factory.reporting import envelope
 
@@ -377,6 +379,13 @@ def test_watch_bounded_iterations_calls_run_once_each_time(tmp_path):
                      sleep_fn=lambda s: slept.append(s), poll_s=0.01)
     assert n == 3
     assert slept == [0.01, 0.01]              # sleeps BETWEEN iterations, not after the last
+
+
+# -- FROZEN_SURFACES ("Freezing", the design's own binding rule) ---------------------------
+def test_broker_and_envelope_and_deploy_join_frozen_surfaces():
+    assert _is_frozen("orchestrator/broker.py", hs.FROZEN_SURFACES)      # exact path
+    assert _is_frozen("reporting/envelope.py", hs.FROZEN_SURFACES)       # exact path
+    assert _is_frozen("deploy/user-factory/04-install-broker-agent.sh", hs.FROZEN_SURFACES)
 
 
 # -- status -----------------------------------------------------------------------------------
