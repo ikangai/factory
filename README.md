@@ -103,13 +103,16 @@ curl -fsSL https://raw.githubusercontent.com/ikangai/factory/main/install.sh | \
 irm https://raw.githubusercontent.com/ikangai/factory/main/install.ps1 | iex
 ```
 
-Choose guest-house mode over the plain installer above whenever the factory will run
+Choose guest-house mode over the plain installer above whenever the *deployment* will run
 somewhat unattended, or you'd rather it not share your account's files/keychain/SSH keys at
-all — the OS enforces that boundary, not a config flag. It's more setup than the one-liner
-above (it provisions a whole separate user/distro), so skip it for a quick attended trial on
-your own account. Full details — what the boundary gives, what it does NOT give yet, the
-step-by-step wizard walkthrough, and the deterministic doctor
-(`scripts/guesthouse_check.py`) that audits it — are in
+all — the OS enforces that boundary, not a config flag. Note the install ITSELF still needs a
+real terminal on macOS (an admin password, the new account's own password, and a GitHub token
+are unavoidable interactive secrets — `--guest-house --yes` only skips the wizard's own
+confirmation prompts, never those); it's the resulting deployment that runs isolated, not the
+setup step. It's also more setup than the one-liner above (it provisions a whole separate
+user/distro), so skip it for a quick attended trial on your own account. Full details — what
+the boundary gives, what it does NOT give yet, the step-by-step wizard walkthrough, and the
+deterministic doctor (`scripts/guesthouse_check.py`) that audits it — are in
 docs/runbooks/guest-house.md.
 
 Prefer to wire the factory into an already-cloned target yourself:
