@@ -9,16 +9,37 @@ Standalone: `python3 scripts/guesthouse_check.py [--json]`. Also invoked by
 
 Design: ten small, PURE probe functions (`rule_*`), each taking one `Ctx` (every external
 dependency — platform, subprocess runner, environment, filesystem paths — injected with a
-real-world default) and returning one `Rule(id, status, detail)`. `main()` runs the fixed
-rule list, renders a table (or `--json`), and exits 1 iff any rule FAILed (0 if every rule
-PASSed or SKIPped). Every rule SKIPs with a reason instead of erroring when its precondition
-doesn't hold on this platform/layout — a fresh, non-deployed checkout must never look like a
-failure.
+real-world default) and returning one `Rule(id, status, detail)`. `audit()` runs the fixed
+rule list under a CONTEXT GATE (see below) and returns an `AuditResult(rules, deployed)`;
+`main()` renders it as a table (or `--json`) and picks the exit code.
+
+Context gate (fix round, finding B5/I9): seven of the ten rules are ACCOUNT-scoped — they
+ask "is THIS ACCOUNT a safely isolated guest-house user" (standard-user, no-passwordless-
+sudo, home-dir-perms, no-ssh-access, no-docker-socket, runtime-read-only, credentials-
+hygiene). Run on an ordinary operator/developer account (not the deployed 'factory' user,
+no ~/fab/factory or WSL install root present), every one of those questions is simply the
+wrong question — of COURSE the operator has admin rights, SSH keys, and Docker access; that
+is not a guest-house violation, it is a different account entirely being asked about the
+wrong thing. `is_guest_house_context()` detects whether the account being audited actually
+IS a deployed guest-house layout; if not, those seven rules are not even invoked (no
+subprocess calls, no filesystem probing beyond the detection itself) and are reported as an
+explicit SKIP, and the overall exit code is always 0 — auditing a non-guest-house account is
+not a failure of anything. The three checkout-scoped rules (brakes-engaged, dashboard-
+localhost, wsl-hardening) still run and still affect the exit code in DEPLOYED context; in
+non-deployed context they still run (their own file-presence SKIPs already handle "not
+applicable" honestly) but never flip the exit code, per the same "exit 0 outside guest-house
+context" contract.
 
 This doctor NEVER mutates anything: every probe only reads (stat/listdir/env/a read-only
-subprocess like `sudo -n -v` or `dseditgroup -o checkmember`). Tests inject `Ctx` fields
-directly (e.g. `Ctx(euid=0)`, a fake `run`, tmp-dir paths) — no test needs to actually run as
-root, another user, or touch the real system.
+subprocess like `sudo -n -v`, `dseditgroup -o checkmember`, or `ssh-add -l`). NOTE (B2): a
+`sudo -n -v` probe against a REAL host, if a sudo timestamp is already cached, can EXTEND
+that cached timestamp's expiry as an inherent side effect of how `sudo -v` works — there is
+no side-effect-free way to test cached-credential state. Tests must never invoke this rule
+against the real host (inject `ctx.run`); the doctor's own CLI naturally does invoke it for
+real, which is the intended use.
+
+Tests inject `Ctx` fields directly (e.g. `Ctx(euid=0)`, a fake `run`, tmp-dir paths) — no
+test needs to actually run as root, another user, or touch the real system.
 """
 from __future__ import annotations
 
@@ -27,12 +48,13 @@ import configparser
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
 from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -41,9 +63,31 @@ FAIL = "FAIL"
 SKIP = "SKIP"
 
 Rule = namedtuple("Rule", "id status detail")
+AuditResult = namedtuple("AuditResult", "rules deployed")
 
-_NON_KEY_SSH_FILES = {"known_hosts", "known_hosts.old", "config", "authorized_keys",
-                       "environment"}
+# Positive identification of private-key MATERIAL (B4/M6) — not a deny-list of "everything
+# that isn't a known-benign filename". A file counts as key material if its basename looks
+# like an OpenSSH identity file (id_*) OR its first line is a PEM/OpenSSH private-key header.
+_PRIVATE_KEY_BASENAME_RE = re.compile(r"^id_[A-Za-z0-9_-]+$")
+_PRIVATE_KEY_HEADER_RE = re.compile(r"^-----BEGIN .*PRIVATE KEY-----")
+
+# Rules that ask a question about the CURRENT ACCOUNT's own identity/permissions rather than
+# about a specific checkout's files — see the context-gate note in the module docstring.
+ACCOUNT_SCOPED_RULE_IDS = {
+    "standard-user", "no-passwordless-sudo", "home-dir-perms", "no-ssh-access",
+    "no-docker-socket", "runtime-read-only", "credentials-hygiene",
+}
+
+NON_GUEST_HOUSE_BANNER = (
+    "NOTE: this account does not look like a deployed guest-house user (not named "
+    "'factory', no ~/fab/factory, no WSL install root found) — the seven account-scoped "
+    "rules below SKIP rather than report on the wrong account, and the exit code is always "
+    "0 in this context. Run this on the deployed account for strict PASS/FAIL semantics."
+)
+_CONTEXT_GATED_DETAIL = (
+    "auditing a non-guest-house account — account-scoped rule skipped (not the deployed "
+    "'factory' user, no ~/fab/factory or WSL install root found)"
+)
 
 
 def _default_username() -> str:
@@ -78,6 +122,7 @@ class Ctx:
         default_factory=lambda: (os.getuid if hasattr(os, "getuid") else (lambda: None)))
     stat_uid_fn: Optional[Callable[[str], int]] = None
     docker_socket_access_fn: Optional[Callable[[str], bool]] = None
+    access_w_fn: Optional[Callable[[str], bool]] = None
     ssh_dir: Optional[str] = None
     docker_socket: str = "/var/run/docker.sock"
     bare_repo_path: str = "/Users/Shared/factory.git"
@@ -85,6 +130,8 @@ class Ctx:
     env_file_path: Optional[str] = None
     config_path: Optional[str] = None
     wsl_conf_path: str = "/etc/wsl.conf"
+    proc_version_path: str = "/proc/version"
+    wsl_install_root: Optional[str] = None
 
     def __post_init__(self):
         if self.ssh_dir is None:
@@ -97,10 +144,45 @@ class Ctx:
             self.stat_uid_fn = lambda p: os.stat(p).st_uid
         if self.docker_socket_access_fn is None:
             self.docker_socket_access_fn = lambda p: os.access(p, os.R_OK)
+        if self.access_w_fn is None:
+            self.access_w_fn = lambda p: os.access(p, os.W_OK)
+        if self.wsl_install_root is None:
+            # the unified WSL guest-house layout install.sh --guest-house --wsl defaults to
+            self.wsl_install_root = os.path.join(self.home, "factories", "guest-house", "factory")
+
+
+def is_guest_house_context(ctx: Ctx) -> bool:
+    """True iff the account being audited looks like an actually-deployed guest-house user —
+    either literally named 'factory', or a deploy layout (~/fab/factory on macOS, or the
+    unified WSL install root) is present. See the module docstring's context-gate note."""
+    if ctx.username == "factory":
+        return True
+    if os.path.isdir(os.path.join(ctx.home, "fab", "factory")):
+        return True
+    if ctx.wsl_install_root and os.path.isdir(ctx.wsl_install_root):
+        return True
+    return False
+
+
+def _detect_wsl(ctx: Ctx) -> bool:
+    """Env-var-independent WSL detection (B6): WSL_DISTRO_NAME/WSL_INTEROP are stripped by
+    `sudo` (no -E) and WSL_INTEROP specifically disappears once interop is hardened OFF —
+    exactly the post-hardening, via-sudo scenario this doctor most needs to detect correctly.
+    /proc/version containing 'microsoft' is set by the WSL kernel itself, independent of any
+    environment the caller was invoked with."""
+    try:
+        with open(ctx.proc_version_path, "r", encoding="utf-8", errors="ignore") as fh:
+            content = fh.read()
+    except OSError:
+        return False
+    return "microsoft" in content.lower()
 
 
 # --- rule 1: standard (non-admin, non-root) user -------------------------------------------
 def rule_standard_user(ctx: Ctx) -> Rule:
+    """Fails CLOSED (B1): an unresolvable/ambiguous membership check is a FAIL, not a PASS —
+    an audit that silently passes when it can't actually determine the answer is worse than
+    useless."""
     rid = "standard-user"
     if ctx.platform_name not in ("Darwin", "Linux"):
         return Rule(rid, SKIP, f"not macOS/Linux (platform={ctx.platform_name})")
@@ -113,11 +195,19 @@ def rule_standard_user(ctx: Ctx) -> Rule:
             r = ctx.run(["dseditgroup", "-o", "checkmember", "-m", ctx.username, "admin"],
                         capture_output=True, text=True, timeout=10)
             out = (r.stdout or "").strip().lower()
-            if out.startswith("yes"):
+            if r.returncode == 0 and out.startswith("yes"):
                 return Rule(rid, FAIL, f"'{ctx.username}' is a member of the admin group")
-            return Rule(rid, PASS, f"'{ctx.username}' is a standard (non-admin) user")
+            if out.startswith("no"):
+                return Rule(rid, PASS, f"'{ctx.username}' is a standard (non-admin) user")
+            return Rule(rid, FAIL,
+                         f"could not determine admin-group membership for '{ctx.username}' "
+                         f"(dseditgroup rc={r.returncode}, output={out!r}) — failing closed")
         else:  # Linux
             r = ctx.run(["id", "-nG", ctx.username], capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return Rule(rid, FAIL,
+                             f"could not determine group membership for '{ctx.username}' "
+                             f"(id exited {r.returncode}) — failing closed")
             groups = (r.stdout or "").split()
             admin_groups = sorted(set(groups) & {"sudo", "wheel", "admin"})
             if admin_groups:
@@ -125,12 +215,18 @@ def rule_standard_user(ctx: Ctx) -> Rule:
                              f"'{ctx.username}' is in admin group(s): {', '.join(admin_groups)}")
             return Rule(rid, PASS, f"'{ctx.username}' is not in sudo/wheel/admin")
     except (OSError, subprocess.SubprocessError) as e:
-        return Rule(rid, SKIP, f"could not determine group membership: {e}")
+        return Rule(rid, FAIL, f"could not determine group membership (failing closed): {e}")
 
 
-# --- rule 2: no sudo grant ------------------------------------------------------------------
+# --- rule 2: no passwordless/cached sudo grant -----------------------------------------------
 def rule_no_sudo_grant(ctx: Ctx) -> Rule:
-    rid = "no-sudo-grant"
+    """Renamed from 'no-sudo-grant' (B2): `sudo -n -v` only ever detects a PASSWORDLESS or
+    already-CACHED sudo credential — it says nothing about whether the account could sudo
+    given a password (that's rule 1's job, the actual admin/sudo-group membership check). Do
+    NOT run this against the real host in a test — `sudo -n -v`, when a valid ticket already
+    exists, can itself EXTEND that ticket's expiry as a side effect of how sudo's timestamp
+    cache works; inject `ctx.run` instead."""
+    rid = "no-passwordless-sudo"
     if ctx.platform_name not in ("Darwin", "Linux"):
         return Rule(rid, SKIP, f"not macOS/Linux (platform={ctx.platform_name})")
     try:
@@ -138,8 +234,9 @@ def rule_no_sudo_grant(ctx: Ctx) -> Rule:
     except (OSError, subprocess.SubprocessError) as e:
         return Rule(rid, SKIP, f"sudo unavailable: {e}")
     if r.returncode == 0:
-        return Rule(rid, FAIL, "'sudo -n -v' succeeded — a passwordless/cached sudo grant is active")
-    return Rule(rid, PASS, "'sudo -n -v' failed — no active sudo grant")
+        return Rule(rid, FAIL,
+                     "'sudo -n -v' succeeded — a passwordless or currently-cached sudo credential is active")
+    return Rule(rid, PASS, "'sudo -n -v' failed — no passwordless/cached sudo credential right now")
 
 
 # --- rule 3: home directory not world/group readable ----------------------------------------
@@ -158,28 +255,53 @@ def rule_home_dir_perms(ctx: Ctx) -> Rule:
     return Rule(rid, PASS, f"{ctx.home} mode {oct(mode)}")
 
 
-# --- rule 4: no SSH private keys / no agent socket -------------------------------------------
+# --- rule 4: no SSH private keys / no loaded agent identities --------------------------------
 def rule_no_ssh_access(ctx: Ctx) -> Rule:
+    """B4 fix: `SSH_AUTH_SOCK` being SET is not itself a problem — macOS's launchd sets it in
+    every session regardless of whether any key is actually loaded. The agent check now asks
+    `ssh-add -l` (rc0 + output = identities ARE loaded -> FAIL; rc1 "no identities" or rc2 "no
+    agent reachable" -> PASS, nothing to leak). Key-file detection is now POSITIVE
+    identification (id_* basenames, or a PEM/OpenSSH private-key header line), not a
+    deny-list of "everything that isn't a known-benign filename" (M6)."""
     rid = "no-ssh-access"
-    auth_sock = ctx.environ.get("SSH_AUTH_SOCK")
-    if auth_sock:
-        return Rule(rid, FAIL, f"SSH_AUTH_SOCK is set ({auth_sock}) — an agent socket is reachable")
-    if not os.path.isdir(ctx.ssh_dir):
-        return Rule(rid, PASS, f"no {ctx.ssh_dir} directory and SSH_AUTH_SOCK unset")
-    found: List[str] = []
-    try:
-        for name in sorted(os.listdir(ctx.ssh_dir)):
-            path = os.path.join(ctx.ssh_dir, name)
-            if not os.path.isfile(path):
-                continue
-            if name.endswith(".pub") or name in _NON_KEY_SSH_FILES:
-                continue
-            found.append(name)
-    except OSError as e:
-        return Rule(rid, SKIP, f"cannot list {ctx.ssh_dir}: {e}")
-    if found:
-        return Rule(rid, FAIL, f"private key material in {ctx.ssh_dir}: {', '.join(found)}")
-    return Rule(rid, PASS, f"{ctx.ssh_dir} has no private key material, SSH_AUTH_SOCK unset")
+    problems: List[str] = []
+
+    if ctx.environ.get("SSH_AUTH_SOCK"):
+        try:
+            r = ctx.run(["ssh-add", "-l"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and (r.stdout or "").strip():
+                first = (r.stdout or "").strip().splitlines()[0]
+                problems.append(f"ssh-agent has loaded identities: {first}")
+            # rc 1 = agent reachable, no identities loaded; rc 2 = no agent reachable at all —
+            # neither is a problem in itself.
+        except (OSError, subprocess.SubprocessError):
+            pass  # ssh-add unavailable — nothing positively confirmed, don't fail on it
+
+    if os.path.isdir(ctx.ssh_dir):
+        found: List[str] = []
+        try:
+            for name in sorted(os.listdir(ctx.ssh_dir)):
+                path = os.path.join(ctx.ssh_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                is_key = bool(_PRIVATE_KEY_BASENAME_RE.match(name))
+                if not is_key:
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                            first_line = fh.readline().strip()
+                        is_key = bool(_PRIVATE_KEY_HEADER_RE.match(first_line))
+                    except OSError:
+                        pass
+                if is_key:
+                    found.append(name)
+        except OSError as e:
+            return Rule(rid, SKIP, f"cannot list {ctx.ssh_dir}: {e}")
+        if found:
+            problems.append(f"private key material in {ctx.ssh_dir}: {', '.join(found)}")
+
+    if problems:
+        return Rule(rid, FAIL, "; ".join(problems))
+    return Rule(rid, PASS, "no loaded ssh-agent identities and no private key material found")
 
 
 # --- rule 5: no Docker socket access ----------------------------------------------------------
@@ -194,6 +316,10 @@ def rule_no_docker_socket(ctx: Ctx) -> Rule:
 
 # --- rule 6: factory runtime read-only (bare-repo ownership split) ---------------------------
 def rule_runtime_readonly(ctx: Ctx) -> Rule:
+    """B7: proves READ-ONLY, not just "not owned by me" — ownership alone doesn't establish
+    that group/other permission bits actually deny writes. Checks BOTH ownership and effective
+    writability (`os.access(path, os.W_OK)`); either one being true is a FAIL, and the detail
+    text says exactly what was proven."""
     rid = "runtime-read-only"
     if not os.path.exists(ctx.bare_repo_path):
         return Rule(rid, SKIP, f"{ctx.bare_repo_path} not present — not a deployed guest-house layout")
@@ -206,10 +332,20 @@ def rule_runtime_readonly(ctx: Ctx) -> Rule:
     my_uid = ctx.current_uid_fn()
     if my_uid is None:
         return Rule(rid, SKIP, "cannot determine current uid")
-    if owner_uid == my_uid:
+    owned_by_self = owner_uid == my_uid
+    writable = ctx.access_w_fn(ctx.bare_repo_path)
+    if owned_by_self or writable:
+        reasons = []
+        if owned_by_self:
+            reasons.append("owned by the current user")
+        if writable:
+            reasons.append("writable by the current user (os.access W_OK=True)")
         return Rule(rid, FAIL,
-                     f"{ctx.bare_repo_path} is owned by the current user — not read-only via the bare-repo split")
-    return Rule(rid, PASS, f"{ctx.bare_repo_path} owned by uid {owner_uid} (not this user) — read via group only")
+                     f"{ctx.bare_repo_path}: " + " and ".join(reasons) +
+                     " — not read-only via the bare-repo split")
+    return Rule(rid, PASS,
+                 f"{ctx.bare_repo_path} owned by uid {owner_uid} (not this user) and "
+                 f"os.access W_OK=False — proven not writable by this account")
 
 
 # --- rule 7: credentials hygiene (the with-env.sh env file) -----------------------------------
@@ -286,8 +422,7 @@ def rule_dashboard_localhost(ctx: Ctx) -> Rule:
 # --- rule 10: WSL-only — automount/interop hardening -------------------------------------------
 def rule_wsl_hardening(ctx: Ctx) -> Rule:
     rid = "wsl-hardening"
-    is_wsl = bool(ctx.environ.get("WSL_DISTRO_NAME") or ctx.environ.get("WSL_INTEROP"))
-    if not is_wsl:
+    if not _detect_wsl(ctx):
         return Rule(rid, SKIP, "not running inside WSL")
     if not os.path.exists(ctx.wsl_conf_path):
         return Rule(rid, FAIL, f"{ctx.wsl_conf_path} not present — automount/interop hardening not applied")
@@ -315,23 +450,38 @@ def rule_wsl_hardening(ctx: Ctx) -> Rule:
     return Rule(rid, FAIL, f"{ctx.wsl_conf_path} missing: {', '.join(missing)}")
 
 
-RULES: List[Callable[[Ctx], Rule]] = [
-    rule_standard_user,
-    rule_no_sudo_grant,
-    rule_home_dir_perms,
-    rule_no_ssh_access,
-    rule_no_docker_socket,
-    rule_runtime_readonly,
-    rule_credentials_hygiene,
-    rule_brakes_engaged,
-    rule_dashboard_localhost,
-    rule_wsl_hardening,
+RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
+    ("standard-user", rule_standard_user),
+    ("no-passwordless-sudo", rule_no_sudo_grant),
+    ("home-dir-perms", rule_home_dir_perms),
+    ("no-ssh-access", rule_no_ssh_access),
+    ("no-docker-socket", rule_no_docker_socket),
+    ("runtime-read-only", rule_runtime_readonly),
+    ("credentials-hygiene", rule_credentials_hygiene),
+    ("brakes-engaged", rule_brakes_engaged),
+    ("dashboard-localhost", rule_dashboard_localhost),
+    ("wsl-hardening", rule_wsl_hardening),
 ]
 
 
-def run_all(ctx: Optional[Ctx] = None) -> List[Rule]:
+def audit(ctx: Optional[Ctx] = None) -> AuditResult:
+    """Runs every rule under the context gate (module docstring) and returns both the rule
+    results and whether this account was recognized as a deployed guest-house layout."""
     ctx = ctx or Ctx()
-    return [rule(ctx) for rule in RULES]
+    deployed = is_guest_house_context(ctx)
+    rules: List[Rule] = []
+    for rule_id, fn in RULES:
+        if not deployed and rule_id in ACCOUNT_SCOPED_RULE_IDS:
+            rules.append(Rule(rule_id, SKIP, _CONTEXT_GATED_DETAIL))
+        else:
+            rules.append(fn(ctx))
+    return AuditResult(rules=rules, deployed=deployed)
+
+
+def run_all(ctx: Optional[Ctx] = None) -> List[Rule]:
+    """Back-compat convenience for callers/tests that only want the rule list, without the
+    context-gate flag `audit()` also returns."""
+    return audit(ctx).rules
 
 
 def render_table(rules: List[Rule]) -> str:
@@ -355,12 +505,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of a table")
     args = parser.parse_args(argv)
 
-    rules = run_all()
+    result = audit()
     if args.json:
-        print(json.dumps([r._asdict() for r in rules], indent=2))
+        print(json.dumps({"deployed": result.deployed,
+                           "rules": [r._asdict() for r in result.rules]}, indent=2))
     else:
-        print(render_table(rules))
-    return 1 if any(r.status == FAIL for r in rules) else 0
+        if not result.deployed:
+            print(NON_GUEST_HOUSE_BANNER)
+            print()
+        print(render_table(result.rules))
+    if not result.deployed:
+        return 0
+    return 1 if any(r.status == FAIL for r in result.rules) else 0
 
 
 if __name__ == "__main__":
