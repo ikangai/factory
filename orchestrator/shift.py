@@ -39,8 +39,26 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     tripped brake, and no clean injection seam for tests). `None` (the default) is a pure
     no-op, so every EXISTING run_shift test stays byte-identical."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
-    store.reap_orphaned_approvals()                # + push approvals stranded 'executing' by a
-                                                   #   crash between claim and resolve (Fix 4d)
+    # Publication broker (Component D): a broker-armed approval legitimately SITS
+    # 'executing' for up to autonomy.envelope_ttl_hours while the operator's broker is
+    # offline/asleep — the default 1h orphan floor would mislabel that in-flight envelope
+    # "crashed". Widen the floor past the envelope's own expiry (+1h grace) ONLY when the
+    # broker is armed; OFF (the default) calls reap_orphaned_approvals exactly as before —
+    # byte-identical to the pre-broker behavior.
+    auton = config.load_config().get("autonomy", {}) or {}
+    if auton.get("publication_broker", False):
+        ttl_h = float(auton.get("envelope_ttl_hours", 24) or 24)
+        store.reap_orphaned_approvals(max_age_hours=ttl_h + 1.0)
+        try:                                        # receipt ingestion: never sinks the shift
+            from ..reporting import approvals
+            ingested = approvals.ingest_broker_receipts(store)
+            if ingested:
+                print(f"[broker] ingested {len(ingested)} receipt(s) at shift start", flush=True)
+        except Exception as e:  # noqa: BLE001 — a spool/store hiccup must not block the shift
+            print(f"[broker] receipt ingestion error (non-fatal): {e}", flush=True)
+    else:
+        store.reap_orphaned_approvals()             # + push approvals stranded 'executing' by a
+                                                     #   crash between claim and resolve (Fix 4d)
 
     if killswitch.is_halted():                     # the brake: don't even start
         return {"action": "halted", "shift_id": None, "reaped": len(reaped), "shipped": 0}

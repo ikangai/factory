@@ -23,6 +23,15 @@ STOP semantics, deliberate: an operator's Approve click (like `factory graduate`
 intentionally bypasses the STOP killswitch — STOP brakes AUTONOMOUS work, not explicit
 human actions taken from the queue.
 
+Publication broker (docs/plans/2026-08-06-publication-broker-design.md, Component D):
+when `autonomy.publication_broker` is true, `execute_approval` never pushes origin or
+calls `gh` itself — it runs the SAME local ff-merge + retest, pushes the tip to a LOCAL
+bare spool repo, and writes a publication envelope for an operator-run broker to verify
+and push for real (see `reporting.issue_sync.graduate_and_prepare_envelope` /
+`promote_and_prepare_envelope`). The row stays 'executing' (not resolved) until a receipt
+arrives; `ingest_broker_receipts` (this module) resolves it. OFF (the default) is today's
+behavior, byte-for-byte.
+
 Layering note: `orchestrator.py` imports `reporting` (e.g. `from ..reporting import
 issue_sync`), never the reverse — importing `orchestrator` here to reuse
 `_graduation_test_fn` would be circular. Its 3-line closure is replicated below instead,
@@ -96,7 +105,7 @@ def _fail_attempt(store, approval_id: int, note: str) -> None:
 
 
 def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
-                     lag_fn=None) -> dict:
+                     lag_fn=None, prepare_graduate_fn=None, prepare_promote_fn=None) -> dict:
     """Operator clicked Approve on a pending_approvals row: claim it atomically, verify
     reality still matches the pinned card (see module docstring), and run the REAL push
     for the row's kind under the cross-process push lock.
@@ -104,6 +113,12 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
     Outcomes:
     - success ('synced'/'promoted') → row resolves executing→'approved' with a short
       note + an 'approve' audit row; returns {"ok": True, "result": ...}.
+    - broker-armed ('prepared' — `autonomy.publication_broker: true`) → NO push at all
+      here: the local ff + retest already ran, the tip is pushed to the LOCAL bare spool
+      repo, and an envelope is written for the operator's broker to verify + push for
+      real. The row stays 'executing' (NOT resolved) — its payload gains `broker_nonce`
+      so `ingest_broker_receipts` can find it once a receipt lands; returns
+      {"ok": True, "result": ..., "broker": True}. See module docstring's authority line.
     - lag cleared (fresh n_commits/ahead <= 0 — everything landed by other means) → NO
       push; row resolves executing→'stale' with an 'approve-stale-cleared' audit row
       (Fix A / Fix 4c); returns {"ok": False, "error": "lag-cleared"} rather than
@@ -132,6 +147,11 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
     ref = f"approval-{approval_id}"
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
+    # publication_broker (config.yaml-only, frozen via the autonomy. prefix, default OFF):
+    # OFF reproduces today's push behavior byte-for-byte; ON diverts the real push into a
+    # local-only prepare step (see the module docstring's 'broker-armed' outcome above).
+    broker_on = bool((config.load_config().get("autonomy") or {}).get(
+        "publication_broker", False))
 
     try:
         # Preview re-derivation AND the push share one lock hold: no other pusher can
@@ -172,10 +192,18 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                 # Consent match: count + BOTH endpoint SHAs (Fix 2 — the range alone is a
                 # constant literal). The range comparison is kept as a config-drift guard
                 # (branch-name change), but a same-count amend/force-push now trips the SHAs.
+                # synced_preview joins the compare (mapped gap #6, publication-broker
+                # design): the endpoints can stay IDENTICAL while the issue-sync PLAN they
+                # imply still drifts — e.g. another process already recorded some (issue,
+                # sha) pairs as synced between proposal and this re-derivation, shrinking
+                # what would actually close/comment. A closure keyword appearing/vanishing
+                # from the plan without moving a single sha must trip 'preview-stale'
+                # exactly like a moved sha does.
                 if (fresh.get("range") != payload.get("range")
                         or fresh.get("n_commits") != payload.get("n_commits")
                         or fresh.get("base_sha", "") != payload.get("base_sha", "")
-                        or fresh.get("tip_sha", "") != payload.get("tip_sha", "")):
+                        or fresh.get("tip_sha", "") != payload.get("tip_sha", "")
+                        or fresh.get("synced", []) != payload.get("synced_preview", [])):
                     store.update_approval_payload(approval_id, _graduation_payload(fresh))
                     store.unclaim_approval(approval_id)
                     store.record_operator_action(
@@ -185,8 +213,13 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                         f"reality is {fresh.get('n_commits')} ({fresh.get('range', '')}, "
                         f"tip {(fresh.get('tip_sha') or '')[:9]})")
                     return {"ok": False, "error": "preview-stale", "fresh": fresh}
-                result = graduate_fn(root=root, base=base, repo=repo, store=store,
-                                     test_fn=test_fn)
+                if broker_on:
+                    prepare_fn = prepare_graduate_fn or issue_sync.graduate_and_prepare_envelope
+                    result = prepare_fn(root=root, base=base, repo=repo, store=store,
+                                        test_fn=test_fn, approval_id=approval_id)
+                else:
+                    result = graduate_fn(root=root, base=base, repo=repo, store=store,
+                                         test_fn=test_fn)
             else:  # kind == "publication"
                 release = config.target_config().get("release_branch") or "main"
                 # The publication card pins the lag COUNT the alarm measured
@@ -219,11 +252,26 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                         f"card showed {payload.get('ahead')} commit(s) behind "
                         f"origin/{release}; reality is {ahead}")
                     return {"ok": False, "error": "preview-stale", "fresh": fresh_payload}
-                promote_fn = promote_fn or issue_sync.promote_to_release
-                result = promote_fn(root=root, base=base, release=release)
+                if broker_on:
+                    prepare_fn = prepare_promote_fn or issue_sync.promote_and_prepare_envelope
+                    result = prepare_fn(root=root, base=base, release=release,
+                                        repo=config.target_repo_slug(), approval_id=approval_id)
+                else:
+                    promote_fn = promote_fn or issue_sync.promote_to_release
+                    result = promote_fn(root=root, base=base, release=release)
     except filelock.LockBusyError:
         _fail_attempt(store, approval_id, "lock-busy: another pusher holds the repo lock")
         return {"ok": False, "error": "lock-busy"}
+
+    if result.get("action") == "prepared":
+        # Broker-armed: the row stays 'executing' — NOT resolved here. Only annotate the
+        # pinned payload with the envelope's nonce (needed so a later receipt can find
+        # this row back) and audit the hand-off; `ingest_broker_receipts` resolves it to
+        # 'approved'/'rejected' once the operator's broker actually acts.
+        store.update_approval_payload(approval_id, {**payload, "broker_nonce": result.get("nonce")})
+        note = f"prepared envelope {(result.get('nonce') or '')[:8]} for the broker"
+        store.record_operator_action("approve-broker-prepared", ref, note)
+        return {"ok": True, "result": result, "broker": True}
 
     note = _result_note(result)
     if result.get("action") in ("synced", "promoted"):
@@ -243,3 +291,43 @@ def reject_approval(store, approval_id, note: str = "") -> dict:
     ok = store.resolve_approval(approval_id, "rejected", note)
     store.record_operator_action("reject", f"approval-{approval_id}", note)
     return {"ok": ok}
+
+
+def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = None) -> list[dict]:
+    """Factory-side receipt ingestion (Component D): resolve every 'executing' approval
+    whose payload pins a `broker_nonce` matching a receipt the operator's broker wrote.
+    A 'pushed' receipt resolves executing→'approved' (note carries the receipt sha); a
+    'rejected'/'expired' receipt resolves executing→'rejected' (note carries the
+    broker's own reason — never fabricated here). Every receipt found is archived to
+    `receipts/done/` whether or not a matching row was found (an orphan receipt — a
+    duplicate envelope, a stale nonce from a prior factory instance — must not be
+    reprocessed forever). Called at shift start (`orchestrator.shift.run_shift`, next to
+    `reap_orphaned_approvals`) and via `factory broker-receipts` for a manual sweep.
+    Returns one `{'nonce', 'approval_id' (or None), 'status'}` per receipt consumed."""
+    from ..common import paths
+    from . import envelope as envelope_mod
+    receipts_dir = receipts_dir or paths.broker_receipts_dir()
+    done_dir = done_dir or paths.broker_receipts_done_dir()
+    results = []
+    executing = store.pending_approvals(status="executing")
+    for nonce in envelope_mod.list_receipts(receipts_dir):
+        receipt = envelope_mod.read_receipt(receipts_dir, nonce)
+        if receipt is None:
+            continue
+        match = next((r for r in executing
+                     if (r.get("payload") or {}).get("broker_nonce") == nonce), None)
+        rstatus = receipt.get("status", "")
+        if match is not None:
+            ref = f"approval-{match['id']}"
+            if rstatus == "pushed":
+                note = f"broker pushed -> {(receipt.get('receipt_sha') or '')[:9]}"
+                store.resolve_approval(match["id"], "approved", note=note)
+                store.record_operator_action("broker-pushed", ref, note)
+            else:
+                note = f"broker {rstatus}: {receipt.get('detail', '')}"
+                store.resolve_approval(match["id"], "rejected", note=note)
+                store.record_operator_action("broker-rejected", ref, note)
+        results.append({"nonce": nonce, "approval_id": match["id"] if match else None,
+                        "status": rstatus})
+        envelope_mod.archive_receipt(receipts_dir, nonce, done_dir)
+    return results

@@ -319,6 +319,22 @@ autonomy:
   # to @human — the rail cannot fix factory infrastructure) + a factory learning, instead
   # of vanishing into a log print. New autonomous behavior → defaults OFF.
   failure_tasks: false
+  # Publication broker (docs/plans/2026-08-06-publication-broker-design.md): when true,
+  # an APPROVED graduation/promotion never pushes origin or calls `gh` from the factory
+  # side at all — it pushes the tip to a LOCAL bare spool repo and writes a publication
+  # envelope for an operator-run broker (`factory broker run-once|watch|status`, a
+  # LaunchAgent under the operator's OWN account) to re-verify against live git state and
+  # push for real with the operator's own credential. The factory holds no GitHub
+  # credential in this mode. A BRAKE-shaped structural knob, config.yaml-only like every
+  # other autonomy.* key: turning it on is a deliberate operator file edit (after removing
+  # GH_TOKEN from the factory user's secrets per the runbook), never a board click.
+  # Default OFF — false reproduces the pre-broker push path byte-for-byte.
+  publication_broker: false
+  # How long a prepared envelope stays valid before the broker refuses it outright
+  # (expired, never retried silently) — the operator's broker may be offline/asleep for a
+  # while; this bounds how stale an unexecuted approval is allowed to get. Config-only,
+  # frozen via the autonomy. prefix, like every other key in this block.
+  envelope_ttl_hours: 24
 
 # --- grade: the merge-quality gate (real behavioral grade vs the _smoke_grade stub) --------
 grade:

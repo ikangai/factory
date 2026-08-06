@@ -1355,6 +1355,58 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     return res
 
 
+def cmd_broker(action: str) -> Optional[dict]:
+    """`factory broker run-once | watch | status` — the OPERATOR-side half of the
+    publication broker (docs/plans/2026-08-06-publication-broker-design.md, Component C).
+    Deliberately does NOT open a Blackboard connection (see `main`'s early-return for this
+    command): the broker runs from the operator's own factory checkout, reads only its
+    own allowlist (`~/.factory-broker.yaml`) and the envelope spool — never the guest-
+    house's DB, which in production it cannot even reach (700 home)."""
+    from . import broker
+    from ..common import paths
+    outbox_dir = paths.broker_outbox_dir()
+    receipts_dir = paths.broker_receipts_dir()
+    allowlist_path = paths.broker_allowlist_path()
+    if action == "run-once":
+        results = broker.run_once(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                                  allowlist_path=allowlist_path)
+        for r in results:
+            print(f"[broker] {r['nonce'][:8]}: {r['status']}")
+        print(f"[broker] processed {len(results)} envelope(s)")
+        return {"processed": results}
+    if action == "watch":
+        print(f"[broker] watching {outbox_dir} (Ctrl-C to stop)")
+        broker.watch(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                    allowlist_path=allowlist_path)
+        return None
+    if action == "status":
+        st = broker.status(outbox_dir=outbox_dir, receipts_dir=receipts_dir)
+        print(f"[broker] {len(st['pending'])} pending envelope(s) in {outbox_dir}, "
+              f"{len(st['receipts'])} receipt(s) unarchived in {receipts_dir}")
+        for n in st["pending"]:
+            print(f"  outbox: {n}")
+        for n in st["receipts"]:
+            print(f"  receipt: {n}")
+        return st
+    print("[broker] usage: factory broker run-once | watch | status")
+    return None
+
+
+def cmd_broker_receipts(store: Blackboard) -> list[dict]:
+    """`factory broker-receipts` — the FACTORY-side sweep: ingest any receipts the
+    operator's broker has written, resolving their matching approvals (Component D).
+    Also runs automatically at shift start (orchestrator/shift.py, next to
+    reap_orphaned_approvals) — this CLI is the manual/on-demand handle."""
+    from ..reporting import approvals
+    results = approvals.ingest_broker_receipts(store)
+    for r in results:
+        print(f"[broker-receipts] {r['nonce'][:8]}: approval "
+              f"{('#' + str(r['approval_id'])) if r['approval_id'] else '(none matched)'} "
+              f"-> {r['status']}")
+    print(f"[broker-receipts] ingested {len(results)} receipt(s)")
+    return results
+
+
 def _factory_auto_head(root: str) -> Optional[str]:
     """The champion's current HEAD sha (the last accumulated merge on factory/auto)."""
     import subprocess
@@ -2043,6 +2095,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd = sub.add_parser("graduate")        # ff base->factory/auto + push + sync the target's issues
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
+    brk = sub.add_parser("broker")          # OPERATOR-side: verify + push prepared envelopes
+    brk.add_argument("action", choices=["run-once", "watch", "status"])
+    sub.add_parser("broker-receipts")       # FACTORY-side: ingest broker receipts, resolve approvals
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
                      help="measure + report but store nothing and never auto-revert")
@@ -2170,6 +2225,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if a.cmd == "schedule-uninstall":
         cmd_schedule_uninstall(loop=a.loop)
         return 0
+    # broker runs as the OPERATOR and never touches the blackboard (see cmd_broker) —
+    # handle before connecting, exactly like schedule-(un)install above.
+    if a.cmd == "broker":
+        cmd_broker(a.action)
+        return 0
 
     with Blackboard() as store:
         # Auto-apply the schema on open. It's all CREATE ... IF NOT EXISTS, so it's
@@ -2240,6 +2300,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_autopilot(a.action)
         elif a.cmd == "graduate":
             cmd_graduate(store, dry_run=a.dry_run)
+        elif a.cmd == "broker-receipts":
+            cmd_broker_receipts(store)
         elif a.cmd == "rebaseline":
             cmd_rebaseline(store, dry_run=a.dry_run)
         elif a.cmd == "learn":

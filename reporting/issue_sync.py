@@ -14,10 +14,15 @@ Design: docs/plans/2026-06-27-factory-auto-issue-sync-design.md
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+from typing import Optional
+
+from ..common import paths
+from . import envelope as envelope_mod
 
 # A close keyword immediately followed by an (optionally gh-prefixed) issue ref.
 # \b anchors the keyword to a word start so 'prefix #9' does not read as 'fix #9'.
@@ -324,5 +329,191 @@ def promote_to_release(*, root: str, base: str, release: str = "main", remote: s
         # a faked test runner, whose git calls never touch disk (the real mkdtemp dir
         # would otherwise leak in every test).
         git("worktree", "remove", "--force", wt)          # best-effort: return code not checked
+        shutil.rmtree(wt, ignore_errors=True)
+        git("worktree", "prune")
+
+
+# -- publication broker (Component D, docs/plans/2026-08-06-publication-broker-design.md) --
+# BROKER-ARMED variants of graduate_and_push / promote_to_release: they never call
+# `git push <origin>` and NEVER call `gh` (binding rule 2 — the factory holds no GitHub
+# credential in armed mode). Duplicated rather than refactored INTO graduate_and_push /
+# promote_to_release: those two functions are load-bearing and heavily tested already —
+# a new sibling function is the lower-risk way to add broker behavior without touching a
+# single line either existing test file exercises.
+
+def _ensure_bare_repo(bare_path: str, *, runner=subprocess.run) -> None:
+    """Idempotent: `git init --bare` the LOCAL spool repo the factory pushes candidate
+    tips to (a file-path target — no credential, no network) if it doesn't exist yet."""
+    if os.path.isdir(bare_path):
+        return
+    parent = os.path.dirname(bare_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    runner(["git", "init", "--bare", "-q", bare_path], capture_output=True, text=True, timeout=30)
+
+
+def _issue_actions_from_sync(repo: str, commits: list[dict], store, runner) -> list[dict]:
+    """The issue-sync PLAN, rendered into the envelope's `issue_actions` shape: one entry
+    per issue with fresh (not-yet-synced) commits, its comment BODY rendered now (by
+    `_format_comment`, the exact text `sync_issues` would post) — the broker executes
+    precisely this text, it never re-derives anything from the commits itself. No `gh`
+    call, no store write (this is a PREVIEW; `store.record_issue_sync` only happens once
+    the broker's receipt says it actually posted — see `reporting.approvals.
+    ingest_broker_receipts`, which is where that TODO is picked up)."""
+    plan = plan_sync(commits)
+    actions = []
+    for issue in sorted(plan):
+        entry = plan[issue]
+        fresh = [c for c in entry["commits"] if not store.issue_sync_seen(issue, c["sha"])]
+        if not fresh:
+            continue
+        body = _format_comment(issue, fresh, entry["action"])
+        actions.append({"op": entry["action"], "number": issue,
+                        "shas": [c["sha"] for c in fresh], "body": body})
+    return actions
+
+
+def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
+                                  auto_branch: str = "factory/auto",
+                                  runner=subprocess.run, stop_check=None, test_fn=None,
+                                  spool_root: Optional[str] = None,
+                                  approval_id: Optional[int] = None,
+                                  ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
+    """BROKER-ARMED graduation: ff base<-auto_branch, retest, push the tip to the LOCAL
+    bare spool repo (a file-path remote — no credential, ever), then build + write a
+    publication envelope (action='graduate') the operator's broker will verify and push
+    for real. Deliberately does NOT `git fetch origin` (fetching against a private repo
+    needs the very credential this mode has none of): `base_sha` is read from the LOCAL
+    `origin/<base>` remote-tracking ref — whatever the last fetch (by any actor, or none)
+    left behind. A stale belief is harmless: the broker re-verifies `base_sha` against a
+    LIVE `git ls-remote` immediately before pushing (the authority line's real gate, not
+    this function). Returns the same skip/reason shapes as `graduate_and_push` on failure
+    (stop/not-on-base/not-fast-forward/no-op/tests-failed/bare-push-failed), or
+    `{'action': 'prepared', 'nonce', 'envelope', 'base_sha', 'tip_sha', 'range',
+    'n_commits'}` on success."""
+    if stop_check and stop_check():
+        return {"action": "skip", "reason": "stop"}
+
+    def git(*args):
+        return runner(["git", "-C", root, *args], capture_output=True, text=True, timeout=60)
+
+    def rev(ref):
+        r = git("rev-parse", ref)
+        return (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
+
+    remote = "origin"
+    cur = git("rev-parse", "--abbrev-ref", "HEAD")
+    if getattr(cur, "returncode", 1) != 0 or (cur.stdout or "").strip() != base:
+        return {"action": "skip", "reason": "not-on-base"}
+
+    ff = git("merge", "--ff-only", auto_branch)          # ff-only: a divergence fails, never forces
+    if getattr(ff, "returncode", 1) != 0:
+        return {"action": "skip", "reason": "not-fast-forward"}
+
+    old_sha = rev(f"{remote}/{base}")                     # LOCAL belief only — no fetch, no credential
+    if not old_sha:
+        return {"action": "skip", "reason": "no-remote-ref"}
+
+    noop = git("diff", "-w", "--quiet", old_sha, "HEAD")
+    if getattr(noop, "returncode", 1) == 0:
+        return {"action": "skip", "reason": "no-op"}
+
+    if test_fn is not None:
+        passed, report = test_fn(root)
+        if not passed:
+            return {"action": "skip", "reason": "tests-failed", "report": report}
+
+    new_sha = (git("rev-parse", "HEAD").stdout or "").strip()
+    rng = f"{old_sha}..{new_sha}"
+    commits = commits_in_range(root, rng, runner=runner)
+
+    spool = paths.broker_spool_root(spool_root)
+    bare_path = paths.broker_bare_repo(spool)
+    _ensure_bare_repo(bare_path, runner=runner)
+    pushed = git("push", bare_path, f"HEAD:refs/heads/{base}")
+    if getattr(pushed, "returncode", 1) != 0:
+        return {"action": "skip", "reason": "bare-push-failed",
+               "detail": (getattr(pushed, "stderr", "") or getattr(pushed, "stdout", "")
+                         or "").strip()[:300]}
+
+    issue_actions = _issue_actions_from_sync(repo, commits, store, runner)
+    env = envelope_mod.build_envelope(
+        action="graduate", repo_slug=repo, base_branch=base, base_sha=old_sha,
+        tip_sha=new_sha, range_=rng, n_commits=len(commits), issue_actions=issue_actions,
+        approval_id=approval_id or 0, policy_hash=policy_hash or envelope_mod.policy_hash(),
+        ttl_hours=ttl_hours)
+    envelope_mod.write_envelope(env, paths.broker_outbox_dir(spool))
+    return {"action": "prepared", "nonce": env["nonce"], "envelope": env,
+           "base_sha": old_sha, "tip_sha": new_sha, "range": rng, "n_commits": len(commits)}
+
+
+def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
+                                 repo: str = "", runner=subprocess.run,
+                                 spool_root: Optional[str] = None,
+                                 approval_id: Optional[int] = None,
+                                 ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
+    """BROKER-ARMED promotion: mirrors `graduate_and_prepare_envelope` for the
+    base->release hop. NEVER fetches (no credential) and NEVER pushes origin — merges the
+    LOCAL `origin/<base>` ref into a detached worktree at the LOCAL `origin/<release>`
+    ref, pushes the resulting merge commit to the LOCAL bare spool repo, and writes an
+    envelope (action='promote', base_branch=<release> — the branch identity the broker's
+    allowlist/ls-remote check keys on). Same fail-closed skip shapes as
+    `promote_to_release` (nothing-to-promote/worktree-failed/merge-conflict/push-failed,
+    the last renamed 'bare-push-failed' to distinguish it in logs from a real-origin
+    failure) plus `{'action': 'prepared', 'nonce', 'envelope', 'sha', 'n_commits'}`."""
+    def git(*args, cwd=None):
+        return runner(["git", "-C", cwd or root, *args], capture_output=True, text=True, timeout=60)
+
+    def rev(ref, cwd=None):
+        r = git("rev-parse", ref, cwd=cwd)
+        return (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
+
+    remote = "origin"
+    base_ref, release_ref = f"{remote}/{base}", f"{remote}/{release}"
+
+    old_release_sha = rev(release_ref)
+    if not old_release_sha:
+        return {"action": "skip", "reason": "no-remote-ref"}
+
+    count = git("rev-list", "--count", f"{release_ref}..{base_ref}")
+    try:
+        n_commits = int((count.stdout or "").strip())
+    except ValueError:
+        n_commits = 0
+    if getattr(count, "returncode", 1) != 0 or n_commits <= 0:
+        return {"action": "skip", "reason": "nothing-to-promote"}
+
+    wt = tempfile.mkdtemp(prefix="factory-promote-envelope-")
+    try:
+        added = git("worktree", "add", "--detach", wt, release_ref)
+        if getattr(added, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "worktree-failed"}
+
+        msg = f"Merge {base} into {release}: factory promotion (approved via human queue)"
+        merged = git("merge", "--no-ff", base_ref, "-m", msg, cwd=wt)
+        if getattr(merged, "returncode", 1) != 0:
+            git("merge", "--abort", cwd=wt)
+            return {"action": "skip", "reason": "merge-conflict"}
+        new_sha = (git("rev-parse", "HEAD", cwd=wt).stdout or "").strip()
+
+        spool = paths.broker_spool_root(spool_root)
+        bare_path = paths.broker_bare_repo(spool)
+        _ensure_bare_repo(bare_path, runner=runner)
+        pushed = git("push", bare_path, f"HEAD:refs/heads/{release}", cwd=wt)
+        if getattr(pushed, "returncode", 1) != 0:
+            return {"action": "skip", "reason": "bare-push-failed",
+                   "detail": (getattr(pushed, "stderr", "") or getattr(pushed, "stdout", "")
+                             or "").strip()[:300]}
+
+        env = envelope_mod.build_envelope(
+            action="promote", repo_slug=repo, base_branch=release, base_sha=old_release_sha,
+            tip_sha=new_sha, range_=f"{release_ref}..{base_ref}", n_commits=n_commits,
+            issue_actions=[], approval_id=approval_id or 0,
+            policy_hash=policy_hash or envelope_mod.policy_hash(), ttl_hours=ttl_hours)
+        envelope_mod.write_envelope(env, paths.broker_outbox_dir(spool))
+        return {"action": "prepared", "nonce": env["nonce"], "envelope": env,
+               "sha": new_sha, "n_commits": n_commits}
+    finally:
+        git("worktree", "remove", "--force", wt)
         shutil.rmtree(wt, ignore_errors=True)
         git("worktree", "prune")
