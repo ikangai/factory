@@ -1,0 +1,5 @@
+# install.ps1's here-strings (@'...'@) require the closing terminator at column 0 with no
+# trailing characters. A Windows checkout with core.autocrlf converting LF -> CRLF would
+# corrupt that terminator (PowerShell requires LF-only here-string delimiters) and silently
+# break the /etc/wsl.conf payload it embeds. Pin it LF regardless of the checkout platform.
+install.ps1 text eol=lf
