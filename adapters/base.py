@@ -190,6 +190,15 @@ class TargetAdapter(abc.ABC):
         subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", dest],
                        check=True, capture_output=True, text=True)
 
+    def add_worktree_detached(self, repo: str, dest: str, sha: str) -> str:
+        """Check out `sha` into an isolated DETACHED worktree at `dest` — the red-proof
+        gate's pristine-base checkout (code_round.run_code_round, Component E of
+        docs/plans/2026-08-06-publication-broker-design.md). `--detach` (not `add_worktree`'s
+        branch checkout): a red-proof runs against a RECORDED sha, never a movable ref."""
+        subprocess.run(["git", "-C", repo, "worktree", "add", "--quiet", "--detach",
+                        dest, sha], check=True, capture_output=True, text=True)
+        return dest
+
     def default_branch(self, repo: str) -> str:
         """The repo's current branch name (captured before a developer worker branches
         off it, to diff the candidate against)."""

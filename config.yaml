@@ -141,6 +141,14 @@ super_worker:
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
   # Test-only / docs-only / empty diffs pass. Enabled 2026-06-30 (operator).
   require_test: true
+  # Red-proof (Component E, docs/plans/2026-08-06-publication-broker-design.md): require_test
+  # only proves a test FILE exists — it is gameable by a test that trivially passes either way.
+  # When true (and require_test is also true — nothing to red-proof otherwise), each changed
+  # test file must FAIL against a fresh detached worktree at the pristine base (before the
+  # worker touched it) or the candidate discards (stage 'no_test', "test passes on the
+  # pristine base"). A gate/verifier knob — FROZEN in harness_surface.FROZEN_KNOB_KEYS, board-
+  # toggleable elsewhere (in SETTINGS_SPEC). Default false for bake-in.
+  red_proof: false
   # Task 3.1 (Phase 3): spec-named acceptance EXECUTION gate (objective done-condition, P2). When
   # true, the spec's OWN named acceptance test — a tests/<path>.py[::name] ref extracted from
   # spec.acceptance — is RUN in the candidate AFTER the suite gate: a RED run discards the

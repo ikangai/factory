@@ -20,7 +20,9 @@ after the merge — the champion).
 """
 from __future__ import annotations
 
-from typing import Callable
+import shutil
+import tempfile
+from typing import Callable, Optional
 
 from ..common import code_gate, frozen_source, killswitch
 from ..common.textutil import clean_line
@@ -32,7 +34,8 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    label: str = "candidate", task_ref: str = "",
                    regression_tol: float = 0.0,
                    require_test: bool = False, acceptance_ref: str = None,
-                   require_held_out: bool = True) -> dict:
+                   require_held_out: bool = True, red_proof: bool = False,
+                   base_repo: Optional[str] = None, base_sha: Optional[str] = None) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -47,7 +50,18 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     2026-08-05 — restores this function's OWN default to match `code_gate.
     auto_merge_eligible`'s fail-closed posture; a caller wanting the `grade.mode: smoke`
     per-merge scope-out must now say so EXPLICITLY at its own call site, which
-    orchestrator/develop.py's real caller does: `require_held_out=False`)."""
+    orchestrator/develop.py's real caller does: `require_held_out=False`).
+
+    `red_proof` (super_worker.red_proof, docs/plans/2026-08-06-publication-broker-design.md
+    Component E): a shipped test must DISCRIMINATE — fail on the pristine base, not just
+    pass on the candidate. When true (AND `require_test` is also true — there's nothing to
+    red-proof if no test is even required) each changed TEST file runs against a fresh
+    detached worktree at `base_sha` (inside `base_repo`, e.g. the developer's own clone,
+    recorded BEFORE it made any change); a file that already passes there doesn't prove
+    anything and discards the candidate (stage 'no_test'). `base_repo`/`base_sha` are the
+    caller's seam (develop.py threads the pristine clone + its pre-dispatch HEAD) — when
+    either is missing, red-proofing is silently skipped (nothing to check against), never
+    a crash and never a false discard."""
     if killswitch.is_halted():
         return {"action": "halted"}
 
@@ -66,6 +80,30 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         ok, why = acceptance.acceptance_ok(changed)
         if not ok:
             return {"action": "discarded", "stage": "no_test", "why": why}
+
+        # 1.6 red-proof (Component E): "ships a test" is gameable — a test that already
+        #     passes on the pristine base proves nothing. One changed test file at a time,
+        #     fail fast, BEFORE the (expensive) full suite. Silently skipped when the
+        #     caller didn't thread base_repo/base_sha (nothing to red-proof against) or no
+        #     changed path is itself a test file.
+        if red_proof and base_repo and base_sha:
+            test_files = [p for p in changed if acceptance._is_test(p)]
+            if test_files:
+                base_wt = tempfile.mkdtemp(prefix="cf-redproof-")
+                try:
+                    adapter.add_worktree_detached(base_repo, base_wt, base_sha)
+                    for ref in test_files:
+                        status, report = adapter.run_named_test(base_wt, ref)
+                        if status == "passed":
+                            return {"action": "discarded", "stage": "no_test",
+                                   "why": f"test passes on the pristine base: {ref}",
+                                   "tests_report": report}
+                finally:
+                    try:
+                        adapter.remove_worktree(base_repo, base_wt)
+                    except Exception:  # noqa: BLE001 — cleanup must never crash the round
+                        pass
+                    shutil.rmtree(base_wt, ignore_errors=True)
 
     # 2. the target's own tests — the hard correctness gate. Skip the (expensive)
     #    scenario eval if they're red.

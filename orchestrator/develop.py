@@ -661,7 +661,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                       profile_overlay: str = "", model: str = "",
                       require_test: Optional[bool] = None, reviewer: bool = False,
                       reviewer_model: Optional[str] = None,
-                      acceptance_ref: Optional[str] = None, task_ref: str = "") -> dict:
+                      acceptance_ref: Optional[str] = None, task_ref: str = "",
+                      red_proof: Optional[bool] = None) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -669,7 +670,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
     mode don't race on the one factory/auto worktree — the slow clone+develop runs unlocked.
     `task_ref` rides into the merge commit as a Factory-Task trailer so provenance survives
     without the blackboard. `reviewer_model` (Fix 1c): threaded straight to
-    `_review_candidate` — None preserves today's config-derived reviewer_tier read."""
+    `_review_candidate` — None preserves today's config-derived reviewer_tier read.
+    `red_proof` (Component E, docs/plans/2026-08-06-publication-broker-design.md):
+    None falls back to config.yaml's super_worker.red_proof (default False) — same
+    resolution pattern as `require_test`."""
     from ..roles.common import develop_candidate
 
     if killswitch.is_halted():
@@ -681,6 +685,18 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
     try:
         adapter.clone(dev_clone)                       # the developer's own clone of the target
         base = adapter.default_branch(dev_clone)
+        # Recorded BEFORE the developer worker touches this clone — the red-proof gate's
+        # "pristine base" (Component E). The clone stays alive (not rmtree'd) until this
+        # function's own `finally` below, so a detached worktree at this sha is cheap to
+        # produce later, in run_code_round, with no second clone. Best-effort: an adapter
+        # test-double that doesn't implement current_commit (or a real one that errors on
+        # a fresh clone) must not break develop_and_merge for callers who never asked for
+        # red-proofing — run_code_round already treats a missing base_sha as "skip the
+        # check", never a crash.
+        try:
+            base_sha = adapter.current_commit(dev_clone)
+        except Exception:  # noqa: BLE001
+            base_sha = None
         if as_user:                                    # Guest House: the worker user must own the clone
             try:
                 subprocess.run(["sudo", "chown", "-R", as_user, dev_clone],
@@ -745,10 +761,14 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 # store override can retune it; None = fall back to config.yaml (unchanged default).
                 rt = require_test if require_test is not None else bool(
                     (config.load_config().get("super_worker", {}) or {}).get("require_test", False))
+                # Component E: same None-falls-back-to-config resolution as require_test.
+                rp = red_proof if red_proof is not None else bool(
+                    (config.load_config().get("super_worker", {}) or {}).get("red_proof", False))
                 res = code_round.run_code_round(
                     adapter=adapter, main_repo=main_repo, cand_repo=cand_wt, branch=branch,
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch, task_ref=task_ref, require_test=rt,
+                    red_proof=rp, base_repo=dev_clone, base_sha=base_sha,
                     acceptance_ref=acceptance_ref,   # Task 3.1: run the spec's named test in the candidate
                     # held-out is REBASELINE scope, not per-merge scope (adversarial-review
                     # fix round, 2026-08-05): run_code_round's OWN default is now fail-closed

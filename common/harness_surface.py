@@ -67,6 +67,10 @@ FROZEN_KNOB_KEYS: frozenset[str] = frozenset({
     "super_worker.scope_check",        # pre-dispatch scope-judge gate
     "super_worker.reviewer",           # pre-merge review gate
     "super_worker.milestone_verify",   # milestone-delivery grader
+    "super_worker.red_proof",          # red-proof discriminating-test gate (Component E,
+                                        # docs/plans/2026-08-06-publication-broker-design.md) —
+                                        # born frozen: disabling it must never look like a
+                                        # benign retune, exactly like require_test above
 })
 
 # Per-knob numeric ranges for `setting` proposals whose SETTINGS_SPEC type is `int` —
@@ -81,6 +85,11 @@ SANE_BOUNDS: dict[str, tuple[int, int]] = {
     "super_worker.refill_threshold": (0, 20),
     "super_worker.max_profiles": (1, 40),
     "super_worker.dispatch_waves": (1, 4),
+    # Component F (docs/plans/2026-08-06-publication-broker-design.md): a claim-lease TTL
+    # in minutes — an EDITABLE capacity knob (not a gate/verifier), deliberately NOT in
+    # FROZEN_KNOB_KEYS: the harness engineer tuning lease length is legitimate; it cannot
+    # disable the sweep itself (that's shift.py's own unconditional call, not this knob).
+    "super_worker.claim_lease_minutes": (10, 1440),
 }
 
 # A `prompt` target must be a SINGLE path segment under roles/ named exactly

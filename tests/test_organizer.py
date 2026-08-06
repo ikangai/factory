@@ -142,10 +142,16 @@ def test_bounds_text_states_scope_check_and_auto_decompose_are_narrow_only():
     assert "callable" in text.lower()   # the "won't exist" mechanism, named honestly
 
 
-def test_bounds_text_states_the_other_six_work_both_ways():
+def test_bounds_text_states_the_other_keys_work_both_ways_or_are_named_global_only():
+    # Grown by one (2026-08-06, publication-broker design Component E): red_proof is a
+    # new unwired SETTINGS_SPEC bool (like milestone_verify/investigate_blocked before
+    # it) — it lands in ORG_BOOL_KEYS but not ORG_WIRED_KEYS, so it's named in the
+    # GLOBAL-ONLY line, not the "both ways" one; either way its name appears in the text,
+    # which is all this test actually asserts per-key (the real "both ways" set is
+    # ORG_WIRED_KEYS - narrow-only, checked by name below).
     text = org._bounds_text(6)
     both_ways = org.ORG_BOOL_KEYS - {"scope_check", "auto_decompose"}
-    assert len(both_ways) == 6
+    assert len(both_ways) == 7
     for key in both_ways:
         assert key in text
     assert "both ways" in text.lower()
