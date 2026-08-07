@@ -200,18 +200,26 @@ step 2 immediately):
    #   edit ~/.factory-secrets/env — comment out/remove the GH_TOKEN export line
    sudo -u factory -i gh auth logout       # drops gh's git credential helper too
    ```
-   Verify: `sudo -u factory -i git -C ~/fab/clive push origin HEAD:some-throwaway-branch`
-   must now FAIL (no credential) — that failure is the proof the boundary is real, not
-   a bug to fix.
-   **Known gap, tracked for a follow-up fix (do not work around it yourself):** the armed
-   prepare path (`graduate_and_prepare_envelope`) reads `base_sha` from the factory's
-   LOCAL `origin/<base>` ref rather than fetching fresh — deliberately, so it needs no
-   credential at all right now, but it also means that ref can go stale across repeated
-   publications with no credential left to refresh it, and a subsequent envelope may pin
-   a `base_sha` the broker then rejects as "base moved" even though nothing hostile
-   happened. If you see repeated "base moved" rejections with no explanation, this is the
-   likely cause — check the design doc for the current status of that fix before
-   re-provisioning any credential as a workaround.
+   **Verify BOTH halves — this is the whole credential model, and only one half is about
+   what must fail:**
+   ```bash
+   # PUSH must now FAIL — that failure is the proof the boundary is real, not a bug:
+   sudo -u factory -i git -C ~/fab/clive push origin HEAD:some-throwaway-branch
+   # FETCH must still SUCCEED — the armed prepare path refuses to prepare without it:
+   sudo -u factory -i git -C ~/fab/clive fetch origin <base-branch>
+   ```
+   The factory keeps a **read-only fetch** capability and loses push + `gh`. That is
+   deliberate: `graduate_and_prepare_envelope` fetches `origin/<base>` and **fails closed**
+   (`reason: fetch-failed`, nothing prepared) before pinning `base_sha`. Without the fetch
+   the local ref goes stale the moment the broker's first push lands, and every subsequent
+   envelope would pin a `base_sha` the broker correctly rejects as "base moved" — a
+   self-inflicted deadlock that looks exactly like an attack.
+
+   For a **public** target, unauthenticated HTTPS fetch is enough — removing `GH_TOKEN`
+   costs you nothing. For a **private** target, leave the factory a fetch-only credential
+   (a fine-grained PAT with read-only Contents on that one repo, or a read-only deploy
+   key); it can pull, it cannot publish. If you see repeated "base moved" rejections, check
+   the fetch half above first — a broken fetch is the usual cause, not a hostile factory.
 4. Set `autonomy.publication_broker: true` in the factory's `config.yaml` (on the branch
    the factory actually runs — see `apply-config-overlay.py`/the deploy branch convention
    if you run the guest-house deployment). Also confirm `autonomy.push_approval: true` —
@@ -239,6 +247,15 @@ step 2 immediately):
 - [ ] The factory user's `GH_TOKEN` is gone from `~factory/.factory-secrets/env` and
       `gh auth status` (as factory) reports logged out; a test push (see step 3 above)
       fails for lack of credential.
+- [ ] …and a test **fetch** (step 3 above) still SUCCEEDS as the factory user. Push must
+      fail; fetch must work. A factory that cannot fetch prepares nothing (fail-closed)
+      and every publication after the first would deadlock on "base moved".
+- [ ] Both sides resolve the SAME spool: `bin/factory broker status` as the operator and
+      as the factory user print identical outbox/receipts paths. (The factory reads
+      `autonomy.broker_spool_root` from its config.yaml; the broker reads
+      `FACTORY_BROKER_SPOOL` from its LaunchAgent plist. If they disagree, envelopes are
+      written where nothing reads them and receipts are read where nothing writes them —
+      a silent, permanent no-op in both directions.)
 - [ ] `autonomy.publication_broker: true` AND `autonomy.push_approval: true` are BOTH set
       on the branch the factory actually runs — verified by hand (see step 4's note: the
       code does not yet refuse the contradictory combination for you).
