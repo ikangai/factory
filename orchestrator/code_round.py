@@ -20,12 +20,83 @@ after the merge — the champion).
 """
 from __future__ import annotations
 
+import ast
+import os
 import shutil
 import tempfile
 from typing import Callable, Optional
 
 from ..common import code_gate, frozen_source, killswitch
 from ..common.textutil import clean_line
+
+# F6 (round-2 integration fix, Component E): a hard ceiling on individual pytest
+# invocations the red-proof stage will run per candidate — each is cheap (one node, not a
+# whole file) but still a real subprocess with its own timeout; an unbounded count from a
+# candidate touching many test files must not turn one merge decision into an
+# open-ended pytest marathon.
+MAX_RED_PROOF_NODES = 20
+
+
+def _collect_test_bodies(file_path: str) -> dict[str, str]:
+    """AST-parse `file_path` (no subprocess — a static read) into
+    {pytest_node_suffix: source_text} for every function pytest's OWN default discovery
+    would collect: module-level `test_*` functions, and `test_*` methods inside `Test*`
+    classes (node suffix `TestClass::test_method`, matching pytest's own node-id shape
+    after the `path.py::` prefix). Async defs count too (pytest-asyncio et al). A missing
+    file / syntax error / anything unreadable returns {} — fail-open: the caller treats
+    an empty/unresolvable result as 'nothing here to red-proof', never a crash and never
+    a false discard."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return {}
+    bodies: dict[str, str] = {}
+
+    def _is_test_def(node) -> bool:
+        return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name.startswith("test_"))
+
+    for node in ast.iter_child_nodes(tree):
+        if _is_test_def(node):
+            bodies[node.name] = ast.get_source_segment(src, node) or ""
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            for inner in ast.iter_child_nodes(node):
+                if _is_test_def(inner):
+                    bodies[f"{node.name}::{inner.name}"] = ast.get_source_segment(src, inner) or ""
+    return bodies
+
+
+def _changed_test_nodes(base_wt: str, cand_repo: str, rel_path: str) -> tuple[list[str], str]:
+    """Node-level red-proof targeting (F6): the OLD file-level check ran an entire
+    changed test FILE against the base — for a file that already existed (the NORMAL way
+    to ship a discriminating test: add a case to an existing tests/test_x.py, or fix an
+    existing one in place), pytest happily ran every OTHER, unrelated, already-passing
+    test in that file and reported a trivial file-level 'passed', discarding the
+    candidate for a reason that had nothing to do with what actually changed. This
+    compares AST-parsed test bodies between the candidate's version of `rel_path` and the
+    base's: a node id ABSENT from the base (new name, or the whole file is new) or present
+    with DIFFERENT source text is a genuine change worth red-proofing; a node id present
+    with IDENTICAL text is untouched and is never run — nothing new to prove, and running
+    it would risk the exact false-discard this fix exists to close.
+
+    Returns (`['<rel_path>::<node>', ...]`, `skip_reason`) — `skip_reason` is '' on
+    success; non-empty means the file was skipped ENTIRELY (deleted from the candidate,
+    or unresolvable via AST), and the caller must NOT discard on this file, only note it."""
+    cand_path = os.path.join(cand_repo, rel_path)
+    if not os.path.isfile(cand_path):
+        # Deleted from the candidate (a legitimate maintenance action, not something that
+        # needs to "discriminate") — never red-proofed. Also covers a rename-away.
+        return [], "deleted from the candidate — never red-proofed"
+    cand_bodies = _collect_test_bodies(cand_path)
+    if not cand_bodies:
+        return [], "no pytest-discoverable test function found via AST parse — skipped"
+    base_path = os.path.join(base_wt, rel_path)
+    base_bodies = _collect_test_bodies(base_path) if os.path.isfile(base_path) else {}
+    changed = [f"{rel_path}::{name}" for name, body in cand_bodies.items()
+              if base_bodies.get(name) != body]
+    return changed, ""
 
 
 def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
@@ -73,6 +144,8 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     if not frozen_ok:
         return {"action": "discarded", "stage": "frozen", "violations": violations}
 
+    extra: dict = {}
+
     # 1.5 spec-bound acceptance (GSD): a code change must SHIP A TEST — the gate measures
     #     fulfillment, not just non-regression. Config-gated; cheap (diff-level), before tests.
     if require_test:
@@ -82,22 +155,57 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
             return {"action": "discarded", "stage": "no_test", "why": why}
 
         # 1.6 red-proof (Component E): "ships a test" is gameable — a test that already
-        #     passes on the pristine base proves nothing. One changed test file at a time,
-        #     fail fast, BEFORE the (expensive) full suite. Silently skipped when the
-        #     caller didn't thread base_repo/base_sha (nothing to red-proof against) or no
-        #     changed path is itself a test file.
+        #     passes on the pristine base proves nothing. NODE-level targeting (F6, round-2
+        #     integration fix): the original file-level check ran an ENTIRE changed test
+        #     file against the base, so adding/fixing ONE case in an existing file (the
+        #     normal way to ship a discriminating test) dragged every OTHER, unrelated,
+        #     already-passing test in that file along — pytest reported a trivial
+        #     file-level 'passed' and the candidate was discarded for a reason that had
+        #     nothing to do with what actually changed; deleting an obsolete test file was
+        #     discarded outright (there is nothing to "discriminate" about a deletion).
+        #     `_changed_test_nodes` AST-diffs each changed test file's node bodies against
+        #     the base and red-proofs ONLY the added/changed nodes, one at a time, fail
+        #     fast, BEFORE the (expensive) full suite, capped at MAX_RED_PROOF_NODES.
+        #     Silently skipped when the caller didn't thread base_repo/base_sha (nothing
+        #     to red-proof against) or no changed path is itself a test file.
         if red_proof and base_repo and base_sha:
             test_files = [p for p in changed if acceptance._is_test(p)]
             if test_files:
                 base_wt = tempfile.mkdtemp(prefix="cf-redproof-")
                 try:
                     adapter.add_worktree_detached(base_repo, base_wt, base_sha)
-                    for ref in test_files:
+                    to_check: list[str] = []
+                    skipped: list[str] = []
+                    for rel in test_files:
+                        nodes, reason = _changed_test_nodes(base_wt, cand_repo, rel)
+                        if reason:
+                            skipped.append(f"{rel}: {reason}")
+                        else:
+                            to_check.extend(nodes)
+                    capped = len(to_check) > MAX_RED_PROOF_NODES
+                    if capped:
+                        skipped.append(f"capped at {MAX_RED_PROOF_NODES} of "
+                                       f"{len(to_check)} changed test node(s)")
+                        to_check = to_check[:MAX_RED_PROOF_NODES]
+                    missing = 0
+                    for ref in to_check:
                         status, report = adapter.run_named_test(base_wt, ref)
                         if status == "passed":
                             return {"action": "discarded", "stage": "no_test",
                                    "why": f"test passes on the pristine base: {ref}",
                                    "tests_report": report}
+                        if status == "missing":
+                            missing += 1
+                    # Fail-open honesty (F6): 'missing' satisfies red-proof (a file/node
+                    # absent from the base IS discriminating), but if EVERY single check
+                    # resolved 'missing' the gate may simply be vacuous — a misconfigured
+                    # test_command, or a target whose test IDs don't resolve the way this
+                    # heuristic expects — never silently. Rides out as telemetry, never a
+                    # discard (an honest gate that can't verify still isn't a false one).
+                    if to_check and missing == len(to_check):
+                        extra["red_proof_all_missing"] = True
+                    if skipped:
+                        extra["red_proof_skipped"] = skipped
                 finally:
                     try:
                         adapter.remove_worktree(base_repo, base_wt)
@@ -110,7 +218,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     tests_passed, report = adapter.run_tests(cand_repo)
     if not tests_passed:
         return {"action": "discarded", "stage": "tests", "failed": ["tests_passed"],
-                "tests_report": report}
+                "tests_report": report, **extra}
 
     # 2.5 spec-named acceptance test (Task 3.1, P2): the spec's OWN named acceptance test, run in
     #     the candidate AFTER the suite gate. A RED run discards (stage 'acceptance') — the change
@@ -118,14 +226,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     #     contracted ref) is a telemetry-first SKIP (correction b): acceptance_skipped rides out so
     #     the rail counts it — we do NOT discard-on-missing yet (that flip waits until the prompt
     #     contract is live and the skip rate is known). Gated: only runs when acceptance_ref is set.
-    extra = {}
     if acceptance_ref:
         status, acc_report = adapter.run_named_test(cand_repo, acceptance_ref)
         if status == "failed":
             return {"action": "discarded", "stage": "acceptance",
-                    "tests_report": acc_report, "acceptance_ref": acceptance_ref}
+                    "tests_report": acc_report, "acceptance_ref": acceptance_ref, **extra}
         if status == "missing":
-            extra = {"acceptance_skipped": acceptance_ref}
+            extra["acceptance_skipped"] = acceptance_ref
 
     # 3. scenario eval → deltas vs the champion → the auto-merge gate.
     cand = grade_fn(cand_repo)
