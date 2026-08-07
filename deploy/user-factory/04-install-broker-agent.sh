@@ -125,6 +125,7 @@ if [ -f "$ALLOWLIST" ]; then
 else
     REPO_SLUG=""
     BASE_BRANCH="chore/extract-factory"
+    RELEASE_BRANCH="main"
     if command -v python3 >/dev/null 2>&1; then
         READ_CFG="$(python3 - "$FACTORY_CHECKOUT/config.yaml" <<'PYEOF' 2>/dev/null || true
 import sys
@@ -143,11 +144,14 @@ legacy = dict(cfg.get("clive") or {})
 merged = dict(legacy); merged.update(target)
 print(merged.get("repo", ""))
 print(merged.get("base_branch", "chore/extract-factory"))
+print(merged.get("release_branch", "main"))
 PYEOF
 )"
         REPO_SLUG="$(echo "$READ_CFG" | sed -n '1p')"
         BASE_BRANCH="$(echo "$READ_CFG" | sed -n '2p')"
+        RELEASE_BRANCH="$(echo "$READ_CFG" | sed -n '3p')"
         [ -n "$BASE_BRANCH" ] || BASE_BRANCH="chore/extract-factory"
+        [ -n "$RELEASE_BRANCH" ] || RELEASE_BRANCH="main"
     fi
     ALLOWLIST_BODY="$(cat <<YAMLEOF
 # ~/.factory-broker.yaml — authorizes the DESTINATION only (repo_slug/base_branch ->
@@ -171,12 +175,20 @@ publications:
     require_pin: true    # CONTENT authorization — false disables it for this entry only;
                           # see "what this does not defend against" in the runbook before
                           # ever setting this false.
-#  - repo_slug: "CHANGE-ME/repo"                     # a second entry for target.release_branch
-#    remote_url: "CHANGE-ME"                         # (promotion envelopes, action=promote)
-#    base_branch: "main"
-#    bare_path: "${BARE_REPO}"
-#    allow_issue_ops: false
-#    require_pin: true
+  # F16 (round-2 integration fix): a SECOND entry for target.release_branch (promotion
+  # envelopes, action=promote) — a commented-out template here was too easy to forget
+  # entirely, leaving every armed promotion permanently rejecting "no allowlist entry"
+  # with no visible cause. Uncommented by default; delete this entry if you never
+  # approve publications (base->release promotion) from the queue.
+  - repo_slug: "${REPO_SLUG:-CHANGE-ME/repo}"
+    remote_url: "CHANGE-ME"           # usually the SAME remote as the entry above —
+                                       # promotion pushes a DIFFERENT branch, not a
+                                       # different repo, for most deployments
+    base_branch: "${RELEASE_BRANCH}"
+    bare_path: "${BARE_REPO}"
+    allow_issue_ops: false            # promotion never carries issue actions — closures
+                                       # already happened at graduation time
+    require_pin: true
 YAMLEOF
 )"
     if [ "$DRY_RUN" = true ]; then

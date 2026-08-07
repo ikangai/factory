@@ -24,3 +24,12 @@ STOP
 .factory-mode
 .autopilot.pid*
 logs/fleet.html
+# F9 (round-2 integration fix, publication-broker security review): the dev/single-user
+# broker spool default (common/paths.py: FACTORY_BROKER_SPOOL unset -> <factory>/state/
+# broker) lives INSIDE this checkout. In armed dev/single-user mode the factory writes
+# publication envelopes, receipts, and a full bare git repo there — without this line,
+# `git add -A` commits them into the PUBLIC factory repo and `git clean -fdx` deletes
+# unprocessed envelopes out from under an in-flight publication. Production deployments
+# point FACTORY_BROKER_SPOOL/autonomy.broker_spool_root at /Users/Shared/factory-broker
+# instead (outside any checkout), but the default must be safe too.
+state/

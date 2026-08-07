@@ -118,7 +118,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                  memory: str = "", profile_overlay: str = "", model: str = "",
                  require_test: Optional[bool] = None, reviewer: bool = False,
                  reviewer_model: Optional[str] = None,
-                 acceptance_ref: Optional[str] = None, task_ref: str = "") -> dict:
+                 acceptance_ref: Optional[str] = None, task_ref: str = "",
+                 red_proof: Optional[bool] = None) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -139,7 +140,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  claude_bin=claude_bin, merge_lock=merge_lock, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
-                                 reviewer_model=reviewer_model,
+                                 reviewer_model=reviewer_model, red_proof=red_proof,
                                  acceptance_ref=acceptance_ref, task_ref=task_ref)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
@@ -150,7 +151,7 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  as_user=as_user, claude_bin=claude_bin, memory=memory,
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
-                                 reviewer_model=reviewer_model,
+                                 reviewer_model=reviewer_model, red_proof=red_proof,
                                  acceptance_ref=acceptance_ref, task_ref=task_ref)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
@@ -167,6 +168,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                           reviewer: bool = False,
                           acceptance_exec: bool = False,
                           investigate_blocked: bool = False,
+                          red_proof: Optional[bool] = None,
                           shift_started: Optional[float] = None,
                           loop_deadline_s: Optional[float] = None) -> int:
     """Run the tasks the conductor claimed this shift through the gated pipeline and CLOSE
@@ -375,7 +377,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                            reviewer=reviewer_by_id[task["id"]],
                            reviewer_model=reviewer_model_by_id[task["id"]],
                            acceptance_ref=acc_ref, grade_fn=grade_fn,
-                           champion_scores=champion_scores,
+                           champion_scores=champion_scores, red_proof=red_proof,
                            task_ref=f"{task['id']}: {task['title'][:100]}")
             except Exception as e:                    # noqa: BLE001 — contain a dispatch blow-up
                 return {"action": "error", "error": str(e)}

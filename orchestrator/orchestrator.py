@@ -1083,6 +1083,13 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         reviewer = _k("reviewer", False)                 # Phase 8: config-gated pre-merge review gate
         acceptance_exec = _k("acceptance_exec", False)   # Task 3.1: run the spec's named acceptance test
         investigate = _k("investigate_blocked", False)   # Task 4.1: post-shift investigator (P6 2-3)
+        # F10 (round-2 integration fix, Component E): red_proof was NEVER threaded through
+        # this resolution block, so develop.py's own None-fallback (a raw config.yaml
+        # read) was the ONLY path that ever ran — a store override (the dashboard's
+        # "applied at next shift" promise) was silently dead. resolve_setting via _k()
+        # here is the SAME store-override -> config.yaml -> default chain every other
+        # SETTINGS_SPEC knob already gets.
+        red_proof = _k("red_proof", False)
         scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
@@ -1102,7 +1109,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
             require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
-            investigate_blocked=investigate)
+            investigate_blocked=investigate, red_proof=red_proof)
         # Self-organizing factory (Task 2.2): the real production wiring for the shift-
         # start trigger — config-gated OFF by default, like every LLM-spending stage this
         # rail grew (scope_check/reviewer/investigate_blocked): the maybe_plan_org
