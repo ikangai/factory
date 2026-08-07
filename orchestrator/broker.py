@@ -573,7 +573,26 @@ def watch(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_path
     return n
 
 
-def status(*, outbox_dir: str, receipts_dir: str) -> dict:
-    """A cheap snapshot for `factory broker status` — no allowlist load, no git/gh calls."""
-    return {"pending": envelope_mod.list_outbox(outbox_dir),
-           "receipts": envelope_mod.list_receipts(receipts_dir)}
+def status(*, outbox_dir: str, receipts_dir: str, allowlist_path: str = "") -> dict:
+    """A cheap snapshot for `factory broker status` — no git/gh calls (allowlist entries,
+    if any, are only `os.path.isdir`-checked, never executed against).
+
+    F1 (round-2 integration fix): the factory writes envelopes wherever ITS OWN config
+    resolves the spool to; the broker polls wherever ITS OWN env/config resolves it to.
+    Nothing before this enforced they agree — a mismatch was a silent, permanent no-op
+    (the broker forever sees an empty, real outbox dir; the factory forever writes into a
+    directory nothing ever reads). `status` now reports the RESOLVED paths and whether
+    they actually exist, plus every allowlist bare_path that's missing, so a mismatch is
+    visible on the FIRST status check rather than discovered by a publication silently
+    never landing. `ok=False` when the outbox doesn't exist yet or any bare_path is
+    missing — never a hard raise (status is a read-only diagnostic; it must still print
+    what it found)."""
+    outbox_exists = os.path.isdir(outbox_dir)
+    allowlist = load_allowlist(allowlist_path) if allowlist_path else []
+    bare_missing = sorted({entry.get("bare_path") for entry in allowlist
+                          if entry.get("bare_path") and not os.path.isdir(entry["bare_path"])})
+    return {"outbox_dir": outbox_dir, "receipts_dir": receipts_dir,
+           "outbox_exists": outbox_exists, "bare_missing": bare_missing,
+           "pending": envelope_mod.list_outbox(outbox_dir) if outbox_exists else [],
+           "receipts": envelope_mod.list_receipts(receipts_dir),
+           "ok": outbox_exists and not bare_missing}

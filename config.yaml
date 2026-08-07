@@ -351,6 +351,15 @@ autonomy:
   # while; this bounds how stale an unexecuted approval is allowed to get. Config-only,
   # frozen via the autonomy. prefix, like every other key in this block.
   envelope_ttl_hours: 24
+  # The factory-side half of connecting the two broker components (round-2 integration
+  # fix — a fresh install otherwise wakes the operator's broker on the shared outbox
+  # while the factory writes envelopes into its OWN checkout's default spool, so the
+  # broker polls a directory the factory never touches). MUST match the SPOOL_ROOT
+  # 04-install-broker-agent.sh provisioned on the operator's side (it prints the exact
+  # value to paste here as its final step) — e.g. "/Users/Shared/factory-broker".
+  # Empty (default) preserves the pre-existing default resolution (dev/single-user mode,
+  # tests: <factory>/state/broker, or the FACTORY_BROKER_SPOOL env var).
+  broker_spool_root: ""
 
 # --- grade: the merge-quality gate (real behavioral grade vs the _smoke_grade stub) --------
 grade:

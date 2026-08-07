@@ -45,10 +45,17 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     # "crashed". Widen the floor past the envelope's own expiry (+1h grace) ONLY when the
     # broker is armed; OFF (the default) calls reap_orphaned_approvals exactly as before —
     # byte-identical to the pre-broker behavior.
+    #
+    # F4 (round-2 integration fix): INGEST BEFORE REAP, not after. A receipt can land
+    # (the broker pushed successfully) at any time relative to shift boundaries; ingesting
+    # AFTER the reaper ran meant a row whose receipt said 'pushed <sha>' could already have
+    # been aged out and permanently marked 'stale — verify with git ls-remote' by the SAME
+    # call that would otherwise have resolved it 'approved' — a real, successful
+    # publication misrecorded as an unverifiable crash. Ingesting first means any row with
+    # a receipt already waiting is resolved and OUT of 'executing' before the reaper ever
+    # looks at it.
     auton = config.load_config().get("autonomy", {}) or {}
     if auton.get("publication_broker", False):
-        ttl_h = float(auton.get("envelope_ttl_hours", 24) or 24)
-        store.reap_orphaned_approvals(max_age_hours=ttl_h + 1.0)
         try:                                        # receipt ingestion: never sinks the shift
             from ..reporting import approvals
             ingested = approvals.ingest_broker_receipts(store)
@@ -56,6 +63,8 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
                 print(f"[broker] ingested {len(ingested)} receipt(s) at shift start", flush=True)
         except Exception as e:  # noqa: BLE001 — a spool/store hiccup must not block the shift
             print(f"[broker] receipt ingestion error (non-fatal): {e}", flush=True)
+        ttl_h = float(auton.get("envelope_ttl_hours", 24) or 24)
+        store.reap_orphaned_approvals(max_age_hours=ttl_h + 1.0)
     else:
         store.reap_orphaned_approvals()             # + push approvals stranded 'executing' by a
                                                      #   crash between claim and resolve (Fix 4d)

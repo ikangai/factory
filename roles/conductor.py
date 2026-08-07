@@ -63,7 +63,14 @@ def _append_rejection_feedback(store, resume: str) -> str:
     carrying the operator's note (an empty note still states the rejection). A newer
     approval/supersede of that kind makes it no longer the latest resolved → the line drops,
     so it stops nagging once the operator has moved on. Never raises — the bus/store may be
-    momentarily unavailable, and a planning seam must not take down prompt assembly."""
+    momentarily unavailable, and a planning seam must not take down prompt assembly.
+
+    F5 (round-2 integration fix, publication broker): a rejection the operator's BROKER
+    made on its own (a moved branch, an unpinned tip — `payload['broker_rejected']`, set
+    by `reporting.approvals.ingest_broker_receipts`) must NOT be attributed to "operator
+    rejected" — that is false and would train the planning LLM to treat a transient,
+    often self-clearing technical rejection as a deliberate human decision to abandon the
+    proposal."""
     lines = []
     for kind in ("graduation", "publication"):
         try:
@@ -72,7 +79,13 @@ def _append_rejection_feedback(store, resume: str) -> str:
             row = None
         if row and row.get("status") == "rejected":
             note = (row.get("note") or "").strip()
-            lines.append(f'operator rejected the last {kind} proposal: "{note}"')
+            if (row.get("payload") or {}).get("broker_rejected"):
+                lines.append(f'the operator-side broker rejected the last {kind} publication '
+                             f'attempt: "{note}" — often self-clearing (a moved branch, an '
+                             f'unpinned tip); it will be re-proposed automatically once the '
+                             f'underlying state changes')
+            else:
+                lines.append(f'operator rejected the last {kind} proposal: "{note}"')
     return resume + "\n" + "\n".join(lines) if lines else resume
 
 

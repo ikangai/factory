@@ -379,16 +379,29 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
                                   spool_root: Optional[str] = None,
                                   approval_id: Optional[int] = None,
                                   ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
-    """BROKER-ARMED graduation: ff base<-auto_branch, retest, push the tip to the LOCAL
-    bare spool repo (a file-path remote — no credential, ever), then build + write a
-    publication envelope (action='graduate') the operator's broker will verify and push
-    for real. Deliberately does NOT `git fetch origin` (fetching against a private repo
-    needs the very credential this mode has none of): `base_sha` is read from the LOCAL
-    `origin/<base>` remote-tracking ref — whatever the last fetch (by any actor, or none)
-    left behind. A stale belief is harmless: the broker re-verifies `base_sha` against a
-    LIVE `git ls-remote` immediately before pushing (the authority line's real gate, not
-    this function). Returns the same skip/reason shapes as `graduate_and_push` on failure
-    (stop/not-on-base/not-fast-forward/no-op/tests-failed/bare-push-failed), or
+    """BROKER-ARMED graduation: fetch (read-only — see the "credential model" note below),
+    ff base<-auto_branch, retest, push the tip to the LOCAL bare spool repo (a file-path
+    remote — no PUSH credential, ever), then build + write a publication envelope
+    (action='graduate') the operator's broker will verify and push for real.
+
+    Round-2 integration fix (F2): the FIRST cut of this function deliberately skipped
+    `git fetch origin` and read `base_sha` from whatever the LOCAL `origin/<base>` ref
+    already held — reasoning that the broker's own live `ls-remote` re-verification was
+    the real gate, so a stale local belief was "harmless". It is NOT harmless in
+    practice: with no fetch, that local ref never advances, so the SECOND publication in
+    a row pins the SAME (now stale) `base_sha` the broker already consumed, re-plans
+    issue actions the first publication already closed, and the broker correctly (and
+    permanently, with no way to self-correct) rejects it as "base moved" — a single-shot
+    system, not a repeatable one. Fetching first, failing closed exactly like the real
+    (`graduate_and_push`) path does, fixes it — at the cost of a REAL credential
+    requirement: **the factory keeps a READ-ONLY fetch credential** even when armed (push
+    and `gh` capability are what actually leaves; see docs/runbooks/publication-broker.md
+    "Credential model"). The broker's live `ls-remote` re-verification stays the actual
+    authority regardless — a stale-but-non-fetch-failing local ref would still be caught
+    there; this fix is about not walking into an entirely avoidable, permanent rejection.
+
+    Returns the same skip/reason shapes as `graduate_and_push` on failure (stop/fetch-
+    failed/not-on-base/not-fast-forward/no-op/tests-failed/bare-push-failed), or
     `{'action': 'prepared', 'nonce', 'envelope', 'base_sha', 'tip_sha', 'range',
     'n_commits'}` on success."""
     if stop_check and stop_check():
@@ -402,6 +415,10 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
         return (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
 
     remote = "origin"
+    fetched = git("fetch", remote, base)
+    if getattr(fetched, "returncode", 1) != 0:            # fail CLOSED — never prepare off a
+        return {"action": "skip", "reason": "fetch-failed"}   # ref we couldn't refresh
+
     cur = git("rev-parse", "--abbrev-ref", "HEAD")
     if getattr(cur, "returncode", 1) != 0 or (cur.stdout or "").strip() != base:
         return {"action": "skip", "reason": "not-on-base"}
@@ -410,7 +427,7 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
     if getattr(ff, "returncode", 1) != 0:
         return {"action": "skip", "reason": "not-fast-forward"}
 
-    old_sha = rev(f"{remote}/{base}")                     # LOCAL belief only — no fetch, no credential
+    old_sha = rev(f"{remote}/{base}")                     # now FRESH — the fetch above just ran
     if not old_sha:
         return {"action": "skip", "reason": "no-remote-ref"}
 
@@ -453,14 +470,17 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
                                  approval_id: Optional[int] = None,
                                  ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
     """BROKER-ARMED promotion: mirrors `graduate_and_prepare_envelope` for the
-    base->release hop. NEVER fetches (no credential) and NEVER pushes origin — merges the
-    LOCAL `origin/<base>` ref into a detached worktree at the LOCAL `origin/<release>`
-    ref, pushes the resulting merge commit to the LOCAL bare spool repo, and writes an
+    base->release hop, including its F2 fetch fix (round-2 integration review): fetches
+    origin/<base> AND origin/<release> read-only (fail closed, mirroring
+    `promote_to_release`'s own real-path fetch), NEVER pushes origin — merges the FRESH
+    `origin/<base>` ref into a detached worktree at the FRESH `origin/<release>` ref,
+    pushes the resulting merge commit to the LOCAL bare spool repo, and writes an
     envelope (action='promote', base_branch=<release> — the branch identity the broker's
     allowlist/ls-remote check keys on). Same fail-closed skip shapes as
-    `promote_to_release` (nothing-to-promote/worktree-failed/merge-conflict/push-failed,
-    the last renamed 'bare-push-failed' to distinguish it in logs from a real-origin
-    failure) plus `{'action': 'prepared', 'nonce', 'envelope', 'sha', 'n_commits'}`."""
+    `promote_to_release` (fetch-failed/nothing-to-promote/worktree-failed/merge-conflict/
+    push-failed, the last renamed 'bare-push-failed' to distinguish it in logs from a
+    real-origin failure) plus `{'action': 'prepared', 'nonce', 'envelope', 'sha',
+    'n_commits'}`."""
     def git(*args, cwd=None):
         return runner(["git", "-C", cwd or root, *args], capture_output=True, text=True, timeout=60)
 
@@ -470,6 +490,12 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
 
     remote = "origin"
     base_ref, release_ref = f"{remote}/{base}", f"{remote}/{release}"
+
+    fetched_base = git("fetch", remote, base)
+    fetched_release = git("fetch", remote, release)
+    if (getattr(fetched_base, "returncode", 1) != 0
+            or getattr(fetched_release, "returncode", 1) != 0):
+        return {"action": "skip", "reason": "fetch-failed"}
 
     old_release_sha = rev(release_ref)
     if not old_release_sha:

@@ -847,4 +847,41 @@ def test_status_reports_pending_and_receipts(tmp_path):
     envelope.write_envelope(env, str(outbox))
     envelope.write_receipt(nonce="other", status="pushed", receipts_dir=str(receipts))
     st = broker.status(outbox_dir=str(outbox), receipts_dir=str(receipts))
-    assert st == {"pending": [env["nonce"]], "receipts": ["other"]}
+    assert st["pending"] == [env["nonce"]]
+    assert st["receipts"] == ["other"]
+    assert st["outbox_dir"] == str(outbox) and st["receipts_dir"] == str(receipts)
+    assert st["outbox_exists"] is True and st["ok"] is True and st["bare_missing"] == []
+
+
+# -- status: F1 (round-2 integration fix) — resolved-path visibility + missing-spool -------
+def test_status_reports_not_ok_when_outbox_does_not_exist(tmp_path):
+    st = broker.status(outbox_dir=str(tmp_path / "nope"), receipts_dir=str(tmp_path / "r"))
+    assert st["outbox_exists"] is False and st["ok"] is False
+    assert st["pending"] == []             # never crashes on a missing dir
+
+
+def test_status_reports_missing_allowlist_bare_paths(tmp_path):
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    allow_path = tmp_path / "allow.yaml"
+    allow_path.write_text(
+        "publications:\n"
+        "  - repo_slug: o/r\n"
+        "    remote_url: x\n"
+        "    base_branch: base\n"
+        f"    bare_path: {tmp_path / 'does-not-exist.git'}\n", encoding="utf-8")
+    st = broker.status(outbox_dir=str(outbox), receipts_dir=str(tmp_path / "r"),
+                       allowlist_path=str(allow_path))
+    assert st["ok"] is False
+    assert st["bare_missing"] == [str(tmp_path / "does-not-exist.git")]
+
+
+def test_status_ok_when_outbox_and_every_bare_path_exist(tmp_path):
+    rig = _rig(tmp_path)
+    _, bare_path, _, _, _, entry = rig
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    allow_path = _allow_yaml(tmp_path, entry)
+    st = broker.status(outbox_dir=str(outbox), receipts_dir=str(tmp_path / "r"),
+                       allowlist_path=allow_path)
+    assert st["ok"] is True and st["bare_missing"] == []

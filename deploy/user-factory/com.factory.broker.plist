@@ -23,6 +23,15 @@
      principle be missed if the agent wasn't loaded at write time — envelopes are cheap to
      re-poll for, never harmful to check twice).
 
+     FACTORY_BROKER_SPOOL/FACTORY_BROKER_BARE (round-2 integration fix): this is HALF of
+     connecting the spool — the OTHER half is the factory's own config.yaml
+     (autonomy.broker_spool_root), which 04-install-broker-agent.sh prints as a manual
+     follow-up (it cannot touch the factory account). Both MUST point at the same
+     SPOOL_ROOT or the broker polls a directory the factory never writes to and the
+     factory pushes into a bare repo the broker never reads — a silent no-op, not an
+     error, so verify with `factory broker status` (prints its resolved paths) on BOTH
+     sides after installing.
+
      The unattended flag below is REQUIRED: a background LaunchAgent has no terminal to
      prompt on. `require_pin` (default true, per allowlist entry) stays fully in force
      either way: an unpinned tip is left 'pending' here, NEVER auto-approved. Content
@@ -45,6 +54,10 @@
   <dict>
     <key>PATH</key>
     <string>__OPERATOR_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FACTORY_BROKER_SPOOL</key>
+    <string>__SPOOL_ROOT__</string>
+    <key>FACTORY_BROKER_BARE</key>
+    <string>__BARE_REPO__</string>
   </dict>
   <key>WatchPaths</key>
   <array>

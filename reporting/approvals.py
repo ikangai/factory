@@ -42,6 +42,19 @@ from __future__ import annotations
 from ..common import config, filelock
 
 
+def _broker_spool_root() -> str | None:
+    """The factory-side half of connecting the spool to the operator's broker
+    (round-2 integration fix, F1): `autonomy.broker_spool_root` (config.yaml, empty/unset
+    by default) is the SAME root the operator's `04-install-broker-agent.sh` prints as a
+    manual follow-up for the factory side once it provisions the shared spool — without
+    this, `graduate_and_prepare_envelope`/`promote_and_prepare_envelope` fall back to
+    `paths.broker_spool_root()`'s OWN default (`<factory>/state/broker`), which is NOT
+    where a real deployment's spool lives (`/Users/Shared/factory-broker`), so the broker
+    would poll a spool the factory never writes to. Empty/absent -> None (preserves the
+    existing default-resolution behavior byte-for-byte — dev/single-user mode, tests)."""
+    return (config.load_config().get("autonomy") or {}).get("broker_spool_root") or None
+
+
 def _graduation_test_fn():
     """Replica of orchestrator._graduation_test_fn (see module docstring — reporting
     cannot import orchestrator). Re-run the target's suite on the integrated tip before an
@@ -216,7 +229,8 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                 if broker_on:
                     prepare_fn = prepare_graduate_fn or issue_sync.graduate_and_prepare_envelope
                     result = prepare_fn(root=root, base=base, repo=repo, store=store,
-                                        test_fn=test_fn, approval_id=approval_id)
+                                        test_fn=test_fn, approval_id=approval_id,
+                                        spool_root=_broker_spool_root())
                 else:
                     result = graduate_fn(root=root, base=base, repo=repo, store=store,
                                          test_fn=test_fn)
@@ -255,7 +269,8 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                 if broker_on:
                     prepare_fn = prepare_promote_fn or issue_sync.promote_and_prepare_envelope
                     result = prepare_fn(root=root, base=base, release=release,
-                                        repo=config.target_repo_slug(), approval_id=approval_id)
+                                        repo=config.target_repo_slug(), approval_id=approval_id,
+                                        spool_root=_broker_spool_root())
                 else:
                     promote_fn = promote_fn or issue_sync.promote_to_release
                     result = promote_fn(root=root, base=base, release=release)
@@ -325,6 +340,19 @@ def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = N
                 store.record_operator_action("broker-pushed", ref, note)
             else:
                 note = f"broker {rstatus}: {receipt.get('detail', '')}"
+                # F5 (round-2 integration fix): mark the payload BEFORE resolving (payload
+                # updates are only legal while the row is still 'pending'/'executing') so
+                # this rejection is DISTINGUISHABLE from an operator's own Reject click —
+                # both land in the DB as status='rejected' (no schema/CHECK-constraint
+                # change; see the module docstring), but a broker rejection must never (a)
+                # suppress re-proposal of an unchanged-looking graduation/publication (the
+                # underlying cause — a moved branch, an unpinned tip — is often transient
+                # and self-clearing) or (b) be reported to the conductor as "the operator
+                # rejected this" (false attribution). See orchestrator.py's
+                # `_same_graduation` call sites and roles/conductor.py's
+                # `_append_rejection_feedback`, both of which check this marker.
+                match_payload = match.get("payload") or {}
+                store.update_approval_payload(match["id"], {**match_payload, "broker_rejected": True})
                 store.resolve_approval(match["id"], "rejected", note=note)
                 store.record_operator_action("broker-rejected", ref, note)
         results.append({"nonce": nonce, "approval_id": match["id"] if match else None,

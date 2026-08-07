@@ -19,7 +19,7 @@ def _store(tmp_path):
 
 
 def _fake_config(monkeypatch, *, repo="o/r", root="/troot", base="basebr", release="main",
-                 graduation_retest=True, publication_broker=False):
+                 graduation_retest=True, publication_broker=False, broker_spool_root=""):
     monkeypatch.setattr(approvals.config, "target_repo_slug", lambda: repo)
     monkeypatch.setattr(approvals.config, "get_adapter",
                         lambda: types.SimpleNamespace(entry=lambda: (root, root + "/x"),
@@ -28,7 +28,8 @@ def _fake_config(monkeypatch, *, repo="o/r", root="/troot", base="basebr", relea
                         lambda: {"base_branch": base, "release_branch": release})
     monkeypatch.setattr(approvals.config, "load_config",
                         lambda: {"autonomy": {"graduation_retest": graduation_retest,
-                                              "publication_broker": publication_broker}})
+                                              "publication_broker": publication_broker,
+                                              "broker_spool_root": broker_spool_root}})
 
 
 def _grad_fn(calls, *, preview, real=None):
@@ -80,6 +81,41 @@ def test_execute_approval_graduation_broker_mode_prepares_and_stays_executing(tm
         actions = s.recent_operator_actions()
         assert actions[0]["action"] == "approve-broker-prepared"
         assert "nonce-abc"[:8] in actions[0]["detail"]
+
+
+# F1 (round-2 integration fix): autonomy.broker_spool_root, when set, must flow into the
+# prepare_fn call — without this the factory writes envelopes wherever paths.py's OWN
+# default resolves to, which is NOT where a real deployment's shared spool lives.
+def test_execute_approval_graduation_broker_mode_threads_configured_spool_root(tmp_path, monkeypatch):
+    _fake_config(monkeypatch, publication_broker=True,
+                broker_spool_root="/Users/Shared/factory-broker")
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("graduation", {"range": "a..b", "n_commits": 2,
+                                                    "base_sha": "b0", "tip_sha": "t0",
+                                                    "synced_preview": []})
+        fn = _grad_fn([], preview={"action": "dry_run", "range": "a..b", "n_commits": 2,
+                                   "base_sha": "b0", "tip_sha": "t0", "synced": []})
+        prep_calls = []
+        prepare_fn = _prepare_fn(prep_calls, result={"action": "prepared", "nonce": "n1"})
+        approvals.execute_approval(s, aid, graduate_fn=fn, prepare_graduate_fn=prepare_fn)
+        assert prep_calls[0]["spool_root"] == "/Users/Shared/factory-broker"
+
+
+def test_execute_approval_graduation_broker_mode_empty_spool_root_config_is_none(tmp_path, monkeypatch):
+    """Empty/absent config preserves the pre-existing default-resolution behavior
+    byte-for-byte — spool_root=None, not an empty string (which paths.py would treat as
+    falsy-but-present differently in some callers)."""
+    _fake_config(monkeypatch, publication_broker=True, broker_spool_root="")
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("graduation", {"range": "a..b", "n_commits": 2,
+                                                    "base_sha": "b0", "tip_sha": "t0",
+                                                    "synced_preview": []})
+        fn = _grad_fn([], preview={"action": "dry_run", "range": "a..b", "n_commits": 2,
+                                   "base_sha": "b0", "tip_sha": "t0", "synced": []})
+        prep_calls = []
+        prepare_fn = _prepare_fn(prep_calls, result={"action": "prepared", "nonce": "n1"})
+        approvals.execute_approval(s, aid, graduate_fn=fn, prepare_graduate_fn=prepare_fn)
+        assert prep_calls[0]["spool_root"] is None
 
 
 def test_execute_approval_graduation_broker_off_never_calls_prepare_fn(tmp_path, monkeypatch):

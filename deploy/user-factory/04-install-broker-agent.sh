@@ -208,11 +208,15 @@ if [ "$DRY_RUN" = true ]; then
     echo "  [dry-run]   __FACTORY_CHECKOUT__ -> $FACTORY_CHECKOUT"
     echo "  [dry-run]   __OPERATOR_HOME__    -> $OPERATOR_HOME"
     echo "  [dry-run]   __OUTBOX_DIR__       -> $OUTBOX_DIR"
+    echo "  [dry-run]   __SPOOL_ROOT__       -> $SPOOL_ROOT"
+    echo "  [dry-run]   __BARE_REPO__        -> $BARE_REPO"
     echo "  [dry-run] would: launchctl bootstrap gui/$UID_N $PLIST_DEST"
 else
     sed -e "s#__FACTORY_CHECKOUT__#$FACTORY_CHECKOUT#g" \
         -e "s#__OPERATOR_HOME__#$OPERATOR_HOME#g" \
         -e "s#__OUTBOX_DIR__#$OUTBOX_DIR#g" \
+        -e "s#__SPOOL_ROOT__#$SPOOL_ROOT#g" \
+        -e "s#__BARE_REPO__#$BARE_REPO#g" \
         "$HERE/com.factory.broker.plist" > "$PLIST_DEST"
     chmod 644 "$PLIST_DEST"
     launchctl bootstrap "gui/$UID_N" "$PLIST_DEST"
@@ -225,6 +229,16 @@ cat <<EOF
 
 ============================================================
  Broker spool + operator authority dir + LaunchAgent installed (or previewed, --dry-run).
+
+ STEP ZERO, NOT OPTIONAL — connect the factory side to THIS spool (round-2 integration
+ fix: without this the broker polls a directory the factory never writes to, a silent
+ no-op forever). On the FACTORY side (its own config.yaml, the branch it actually runs),
+ set:
+   autonomy:
+     broker_spool_root: "$SPOOL_ROOT"
+ Then verify BOTH sides resolve the SAME paths: run 'bin/factory broker status' here
+ (operator) and 'bin/factory broker status' there (factory) and compare the printed
+ outbox/receipts paths — they must match exactly.
 
  BEFORE arming (autonomy.publication_broker: true in the factory's config.yaml):
    1. Edit $ALLOWLIST — set the REAL remote_url(s) (still CHANGE-ME by default).

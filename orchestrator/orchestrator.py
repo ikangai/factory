@@ -1316,8 +1316,21 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         return None
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
-    gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+    auton = config.load_config().get("autonomy") or {}
+    gate_on = bool(auton.get("push_approval", True))
     propose = gate_on and not dry_run       # gate ON + not an explicit preview → file, don't push
+    # F3 (round-2 integration fix): about to push for REAL (not proposing, not an explicit
+    # --dry-run preview) with the broker armed but push_approval off — the SAME forbidden
+    # combination _graduate_after_shift refuses, reachable here too (this CLI is Bash-
+    # invokable by the autonomous conductor). An explicit --dry-run still previews (it
+    # mutates nothing) so the operator can diagnose the misconfiguration itself.
+    if not propose and not dry_run and _broker_armed_without_approval_gate(auton):
+        msg = ("publication_broker is armed but push_approval is OFF — refusing to push "
+              "directly (this would bypass the broker's content-approval gate entirely). "
+              "Fix the config: push_approval must stay true while the broker is armed.")
+        print(f"[graduate] {msg}")
+        _maybe_file_graduation_failure(store, msg)
+        return {"action": "skip", "reason": "broker-armed-push-approval-off"}
     try:
         # Same cross-process push lock as execute_approval / the gate-off shift-end path:
         # every actor that pushes this repo outward (or previews it under the gate) serializes.
@@ -1346,7 +1359,7 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         # card the operator just declined. Reuse `_same_graduation` (module-level, this
         # file) rather than re-deriving the compare — one source of truth for "unchanged".
         rej = store.latest_rejected_approval("graduation")
-        if rej is not None and _same_graduation(rej.get("payload") or {}, res):
+        if _is_human_rejection(rej) and _same_graduation(rej.get("payload") or {}, res):
             print("[graduate] unchanged since operator rejection — not re-proposing")
             return {"action": "skip", "reason": "rejected-unchanged"}
         approval_id = approvals.propose_graduation(store, preview=res)
@@ -1391,6 +1404,18 @@ def cmd_broker(action: str, *, tip_sha: Optional[str] = None, note: str = "",
     spent_path = paths.broker_spent_path()
     pins_path = paths.broker_pins_path()
     processed_dir = paths.broker_processed_dir()
+    # F1 (round-2 integration fix): print the RESOLVED paths on every action, not just
+    # status — a factory-side/operator-side spool mismatch is a silent, permanent no-op
+    # otherwise (the broker polls a real, empty directory forever). Compare this line
+    # against the factory's own `factory broker status` output (or the FACTORY_BROKER_*
+    # env vars / autonomy.broker_spool_root it resolves from) by hand.
+    print(f"[broker] resolved paths: outbox={outbox_dir} receipts={receipts_dir} "
+          f"allowlist={allowlist_path}")
+    if not os.path.isdir(outbox_dir):
+        print(f"[broker] WARNING: outbox does not exist yet at {outbox_dir} — either "
+              f"04-install-broker-agent.sh hasn't run, or this resolves to the WRONG "
+              f"path (check FACTORY_BROKER_SPOOL / autonomy.broker_spool_root on both "
+              f"sides)")
     if action == "run-once":
         results = broker.run_once(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
                                   allowlist_path=allowlist_path, spent_path=spent_path,
@@ -1416,9 +1441,15 @@ def cmd_broker(action: str, *, tip_sha: Optional[str] = None, note: str = "",
                     pins_path=pins_path, processed_dir=processed_dir, unattended=True)
         return None
     if action == "status":
-        st = broker.status(outbox_dir=outbox_dir, receipts_dir=receipts_dir)
+        st = broker.status(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                           allowlist_path=allowlist_path)
+        if not st["ok"]:
+            print("[broker] STATUS: NOT OK — see warnings above/below before trusting "
+                  "this deployment")
         print(f"[broker] {len(st['pending'])} pending envelope(s) in {outbox_dir}, "
               f"{len(st['receipts'])} receipt(s) unarchived in {receipts_dir}")
+        for bp in st["bare_missing"]:
+            print(f"[broker] WARNING: allowlist bare_path does not exist: {bp}")
         for n in st["pending"]:
             print(f"  outbox: {n}")
         for n in st["receipts"]:
@@ -1541,6 +1572,31 @@ def _same_graduation(payload: dict, preview: dict) -> bool:
             and payload.get("tip_sha", "") == preview.get("tip_sha", ""))
 
 
+def _is_human_rejection(row: Optional[dict]) -> bool:
+    """F5 (round-2 integration fix): True iff `row` is a resolved 'rejected' approval the
+    OPERATOR actually declined — never one the broker rejected on its own (a moved
+    branch, an unpinned tip, a stale nonce: `reporting.approvals.ingest_broker_receipts`
+    marks these `payload['broker_rejected'] = True`, distinguishable in the SAME
+    'rejected' status without a schema change). Every re-proposal-suppression check must
+    use this, not a bare `is not None`, or a transient broker rejection permanently
+    blocks re-proposing the identical-looking graduation/publication once its cause
+    clears."""
+    return row is not None and not (row.get("payload") or {}).get("broker_rejected")
+
+
+def _broker_armed_without_approval_gate(auton: dict) -> bool:
+    """F3 (round-2 integration fix): the FORBIDDEN combination — the broker's whole
+    envelope/pin mechanism only runs from `reporting.approvals.execute_approval`, which
+    only exists because `push_approval` filed a `pending_approvals` row in the first
+    place. With `push_approval: false`, graduation never goes near an approval row at
+    all — it pushes for real, right here, regardless of `publication_broker`. Callers
+    that reach their gate-OFF real-push branch must check this FIRST and refuse rather
+    than push directly while the operator believes the broker is the thing standing
+    between the factory and the real remote."""
+    return bool(auton.get("publication_broker", False)) and not bool(
+        auton.get("push_approval", True))
+
+
 def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                           graduate_fn=None, repo: Optional[str] = None,
                           root: Optional[str] = None, base: Optional[str] = None,
@@ -1573,7 +1629,8 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         sc = stop_check or killswitch.is_halted
         test_fn = _graduation_test_fn()
 
-        gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+        auton = config.load_config().get("autonomy") or {}
+        gate_on = bool(auton.get("push_approval", True))
         if gate_on:
             # Fix 4a (final whole-branch review): the gate-ON preview FETCHES, and
             # execute_approval holds this SAME lock across its re-derivation + push — so the
@@ -1597,7 +1654,7 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                 # + SHAs, Fix 2) against the most recent rejected row; identical → skip
                 # filing. Any difference (new commit, moved tip) proposes normally.
                 rej = store.latest_rejected_approval("graduation")
-                if rej is not None and _same_graduation(rej.get("payload") or {}, preview):
+                if _is_human_rejection(rej) and _same_graduation(rej.get("payload") or {}, preview):
                     print("[run] graduation unchanged since operator rejection — not re-proposing")
                     return {"action": "skip", "reason": "rejected-unchanged"}
                 approval_id = approvals.propose_graduation(store, preview=preview)
@@ -1608,6 +1665,22 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             # injected graduate_fn that doesn't honor dry_run) — fall through to the SAME
             # abnormal-skip escalation a real push's skip would get, below.
             res = preview
+        elif _broker_armed_without_approval_gate(auton):
+            # F3 (round-2 integration fix): push_approval OFF means this branch pushes for
+            # REAL, unconditionally — the broker's whole envelope/pin mechanism only ever
+            # runs from execute_approval, which only exists because push_approval filed an
+            # approval row in the first place. publication_broker: true + push_approval:
+            # false is therefore not "belt and suspenders", it's a straight bypass: the
+            # broker is armed but never consulted, and the factory keeps pushing directly
+            # with whatever real credential it still holds. Refuse loudly rather than
+            # silently doing the (armed-but-unenforced) wrong thing.
+            msg = ("publication_broker is armed but push_approval is OFF — refusing to "
+                  "push directly (this would bypass the broker's content-approval gate "
+                  "entirely). Fix the config: push_approval must stay true while the "
+                  "broker is armed.")
+            print(f"[run] {msg}")
+            _maybe_file_graduation_failure(store, msg)
+            res = {"action": "skip", "reason": "broker-armed-push-approval-off"}
         else:
             # Gate OFF pushes for real → serialize with every other push-side actor
             # (an operator's Approve executing in the dashboard process, a manual
@@ -1622,8 +1695,11 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
         # broken" through the same deduped failure seam as a raised graduate error;
         # benign: stop = operator brake, no-op = nothing worth pushing, lock-busy =
-        # another pusher holds the repo lock (the push IS happening — just elsewhere).
-        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op", "lock-busy"):
+        # another pusher holds the repo lock (the push IS happening — just elsewhere);
+        # broker-armed-push-approval-off is already escalated above (avoid double-filing).
+        if (res.get("action") == "skip"
+                and res.get("reason") not in ("stop", "no-op", "lock-busy",
+                                              "broker-armed-push-approval-off")):
             _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
         return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
@@ -1700,7 +1776,8 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                     # every shift. A changed lag / different release proposes normally.
                     rej = store.latest_rejected_approval("publication")
                     rp = (rej.get("payload") or {}) if rej is not None else {}
-                    if rej is not None and rp.get("ahead") == p and rp.get("release") == release:
+                    if (_is_human_rejection(rej) and rp.get("ahead") == p
+                            and rp.get("release") == release):
                         print("[run] publication unchanged since operator rejection — not re-proposing")
                     else:
                         store.add_pending_approval("publication", {"ahead": p, "release": release})
