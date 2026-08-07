@@ -367,15 +367,25 @@ def _execute_issue_action(repo: str, action: dict, *, runner: Callable) -> dict:
     factory at prepare time (`reporting.issue_sync._issue_actions_from_sync`); the broker
     never re-derives it. `number`/`op` are validated BEFORE ever touching argv — an
     invalid action is dropped and reported, never coerced/reinterpreted (IMPORTANT-4). One
-    action's `gh` failure must not abort the others."""
+    action's `gh` failure must not abort the others.
+
+    F8 (round-2 integration fix): `shas` (the commits this action covers) rides through
+    from the envelope's own action dict into the result, and a successful comment's `gh`
+    output URL is captured — both are what `reporting.approvals.ingest_broker_receipts`
+    needs to call `store.record_issue_sync` back on the factory side once the receipt
+    lands (the receipt is the ONLY thing that survives the broker's own action; the
+    original envelope is archived to the operator-owned processed_dir, unreadable from
+    the factory side in production)."""
     op = action.get("op")
     number = _valid_issue_number(action.get("number"))
+    shas = action.get("shas") or []
     if op not in _VALID_ISSUE_OPS or number is None:
         return {"number": action.get("number"), "op": action.get("op"), "ok": False,
+               "shas": shas,
                "detail": "invalid issue action (bad op/number) — dropped, never sent to gh"}
     body = action.get("body", "")
     if not isinstance(body, str):
-        return {"number": number, "op": op, "ok": False,
+        return {"number": number, "op": op, "ok": False, "shas": shas,
                "detail": "invalid issue action (non-string body) — dropped"}
     try:
         # `--` ends flag parsing for the trailing positional: even if `str(number)`
@@ -385,14 +395,15 @@ def _execute_issue_action(repo: str, action: dict, *, runner: Callable) -> dict:
                     capture_output=True, text=True, timeout=30)
         if getattr(out, "returncode", 1) != 0:
             raise RuntimeError((out.stderr or "gh issue comment failed").strip())
+        url = (getattr(out, "stdout", "") or "").strip()
         if op == "close":
             cl = runner(["gh", "issue", "close", "-R", repo, "--", str(number)],
                        capture_output=True, text=True, timeout=30)
             if getattr(cl, "returncode", 1) != 0:
                 raise RuntimeError((cl.stderr or "gh issue close failed").strip())
-        return {"number": number, "op": op, "ok": True}
+        return {"number": number, "op": op, "ok": True, "shas": shas, "url": url}
     except Exception as e:  # noqa: BLE001 — one issue's gh failure must not abort the rest
-        return {"number": number, "op": op, "ok": False, "detail": str(e)[:200]}
+        return {"number": number, "op": op, "ok": False, "shas": shas, "detail": str(e)[:200]}
 
 
 def execute_envelope(env: dict, entry: dict, *, runner: Callable = subprocess.run) -> dict:
@@ -422,6 +433,7 @@ def execute_envelope(env: dict, entry: dict, *, runner: Callable = subprocess.ru
         issue_results = [_execute_issue_action(repo, act, runner=runner) for act in actions]
     elif actions:
         issue_results = [{"number": a.get("number"), "op": a.get("op"), "ok": False,
+                          "shas": a.get("shas") or [],
                           "detail": "issue ops not allowed for this allowlist entry"}
                          for a in actions]
     if dropped_excess:
@@ -452,14 +464,22 @@ def _archive_processed(json_path: str, hash_path: str, processed_dir: str) -> No
 
 def _finalize(nonce: str, status: str, *, detail: str, receipt_sha: str, policy: str,
              receipts_dir: str, spent_path: str, json_path: str, hash_path: str,
-             processed_dir: str) -> None:
+             processed_dir: str, issue_results: Optional[list] = None) -> None:
     """Common tail for every TERMINAL outcome (pushed/rejected/expired/declined): mark the
     ledger (the real authority), write the informational spool-receipt copy (factory
     reads this), archive the envelope out of factory-writable space. NEVER called for the
-    'pending' (unattended + unpinned) outcome — that one is deliberately left retryable."""
+    'pending' (unattended + unpinned) outcome — that one is deliberately left retryable.
+
+    `issue_results` (F8) rides into the receipt because the receipt is the ONLY artifact
+    that survives back to the factory side: the envelope itself is archived into the
+    operator-owned `processed_dir`, which the factory cannot read. Without it
+    `reporting.approvals.ingest_broker_receipts` has no way to call
+    `store.record_issue_sync`, and the dedup ledger diverges from reality permanently
+    (the same issue is re-planned in every subsequent envelope)."""
     mark_spent(spent_path, nonce, status=status)
     envelope_mod.write_receipt(nonce=nonce, status=status, receipts_dir=receipts_dir,
-                               receipt_sha=receipt_sha, detail=detail, policy_hash=policy)
+                               receipt_sha=receipt_sha, detail=detail, policy_hash=policy,
+                               issue_results=issue_results)
     _archive_processed(json_path, hash_path, processed_dir)
 
 
@@ -497,10 +517,12 @@ def run_once(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_p
         env = envelope_mod.read_envelope(json_path)
         policy = (env or {}).get("policy_hash", "")
 
-        def _finalize_here(status: str, detail: str, receipt_sha: str = "") -> None:
+        def _finalize_here(status: str, detail: str, receipt_sha: str = "",
+                          issue_results: Optional[list] = None) -> None:
             _finalize(nonce, status, detail=detail, receipt_sha=receipt_sha, policy=policy,
                      receipts_dir=receipts_dir, spent_path=spent_path,
-                     json_path=json_path, hash_path=hash_path, processed_dir=processed_dir)
+                     json_path=json_path, hash_path=hash_path, processed_dir=processed_dir,
+                     issue_results=issue_results)
 
         verdict = verify_envelope(env, filename_nonce=nonce, hash_path=hash_path,
                                   allowlist=allowlist, spent_path=spent_path,
@@ -508,7 +530,8 @@ def run_once(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_p
         if verdict["ok"]:
             outcome = execute_envelope(env, verdict["entry"], runner=runner)
             status = "pushed" if outcome["ok"] else "rejected"
-            _finalize_here(status, outcome.get("detail", ""), outcome.get("sha", ""))
+            _finalize_here(status, outcome.get("detail", ""), outcome.get("sha", ""),
+                          outcome.get("issue_results"))
             results.append({"nonce": nonce, "status": status})
             continue
 
@@ -530,7 +553,8 @@ def run_once(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_p
                 if verdict2["ok"]:
                     outcome = execute_envelope(env, verdict2["entry"], runner=runner)
                     status = "pushed" if outcome["ok"] else "rejected"
-                    _finalize_here(status, outcome.get("detail", ""), outcome.get("sha", ""))
+                    _finalize_here(status, outcome.get("detail", ""), outcome.get("sha", ""),
+                                  outcome.get("issue_results"))
                 else:
                     status = verdict2.get("status", "rejected")
                     _finalize_here(status, verdict2.get("reason", ""))

@@ -583,7 +583,12 @@ def test_execute_pushes_and_runs_issue_actions(tmp_path):
     live = _git(["ls-remote", str(remote_bare), "refs/heads/base"], tmp_path)
     assert live.split()[0] == tip_sha                 # the real remote now has the new tip
     assert r.gh_subcmds() == ["comment", "close"]      # close op = comment then close
-    assert out["issue_results"] == [{"number": 12, "op": "close", "ok": True}]
+    # `shas`/`url` joined the result shape with F8: the receipt is the only artifact that
+    # survives back to the factory, so it must carry what `record_issue_sync` needs.
+    assert len(out["issue_results"]) == 1
+    res = out["issue_results"][0]
+    assert (res["number"], res["op"], res["ok"]) == (12, "close", True)
+    assert "shas" in res
 
 
 def test_execute_respects_allow_issue_ops_false(tmp_path):

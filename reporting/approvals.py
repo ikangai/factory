@@ -356,6 +356,31 @@ def reject_approval(store, approval_id, note: str = "") -> dict:
     return {"ok": ok}
 
 
+def _record_synced_issues(store, receipt: dict) -> int:
+    """F8: close the dedup ledger's loop for the ARMED path. In unarmed mode
+    `issue_sync.sync_issues` calls `store.record_issue_sync` itself, right after each `gh`
+    call succeeds. In armed mode the `gh` call happens inside the operator's broker, so the
+    factory only learns what actually posted from the receipt — and the envelope that
+    listed the actions is archived into the operator-owned processed dir, unreadable from
+    here. Without this the ledger never advances and every later envelope re-plans the same
+    already-closed issues (which is also what makes a stale-base envelope look plausible).
+
+    Only `ok` actions are recorded, and only for the shas the broker reports it covered —
+    a failed action must stay unrecorded so the next graduation retries it."""
+    recorded = 0
+    for res in receipt.get("issue_results") or []:
+        if not isinstance(res, dict) or not res.get("ok"):
+            continue
+        number = res.get("number")
+        if not isinstance(number, int):
+            continue
+        for sha in res.get("shas") or []:
+            if isinstance(sha, str) and sha:
+                store.record_issue_sync(number, sha, res.get("op") or "comment")
+                recorded += 1
+    return recorded
+
+
 def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = None) -> list[dict]:
     """Factory-side receipt ingestion (Component D): resolve every 'executing' approval
     whose payload pins a `broker_nonce` matching a receipt the operator's broker wrote.
@@ -369,8 +394,17 @@ def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = N
     Returns one `{'nonce', 'approval_id' (or None), 'status'}` per receipt consumed."""
     from ..common import paths
     from . import envelope as envelope_mod
-    receipts_dir = receipts_dir or paths.broker_receipts_dir()
-    done_dir = done_dir or paths.broker_receipts_done_dir()
+    # F1, the READ half: the factory WRITES envelopes to the spool named by
+    # `autonomy.broker_spool_root` (config), while `paths.broker_*` alone resolves the
+    # `FACTORY_BROKER_SPOOL` ENV var — which is set only in the operator's LaunchAgent
+    # plist, never in the factory's own environment. Resolving receipts without the config
+    # root therefore reads <factory>/state/broker/receipts, which the broker never writes
+    # to: every armed approval would strand in 'executing' until its TTL and then resolve
+    # 'stale', with the real receipt sitting unread in the shared spool. Both halves must
+    # resolve through the SAME root.
+    spool_root = _broker_spool_root()
+    receipts_dir = receipts_dir or paths.broker_receipts_dir(spool_root)
+    done_dir = done_dir or paths.broker_receipts_done_dir(spool_root)
     results = []
     executing = store.pending_approvals(status="executing")
     for nonce in envelope_mod.list_receipts(receipts_dir):
@@ -386,6 +420,7 @@ def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = N
                 note = f"broker pushed -> {(receipt.get('receipt_sha') or '')[:9]}"
                 store.resolve_approval(match["id"], "approved", note=note)
                 store.record_operator_action("broker-pushed", ref, note)
+                _record_synced_issues(store, receipt)
             else:
                 note = f"broker {rstatus}: {receipt.get('detail', '')}"
                 # F5 (round-2 integration fix): mark the payload BEFORE resolving (payload

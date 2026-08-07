@@ -143,13 +143,23 @@ def list_outbox(outbox_dir: str) -> list[str]:
 # -- receipts (broker -> factory) -------------------------------------------------------
 def write_receipt(*, nonce: str, status: str, receipts_dir: str, receipt_sha: str = "",
                   detail: str = "", policy_hash: str = "",
+                  issue_results: Optional[list] = None,
                   now: Optional[datetime] = None) -> str:
     """`status` is one of 'pushed' | 'rejected' | 'expired' (the design's receipt shape).
-    Written by the broker; read by the factory (`ingest_broker_receipts`)."""
+    Written by the broker; read by the factory (`ingest_broker_receipts`).
+
+    `issue_results` (F8, round-2 integration fix): per-action `{number, op, ok, shas,
+    url?, detail?}` dicts (`orchestrator.broker.execute_envelope`'s own return shape) —
+    the receipt is the ONLY record that survives on the factory-readable side once the
+    broker archives the original envelope into its own operator-owned processed_dir, so
+    this is what lets `reporting.approvals.ingest_broker_receipts` call
+    `store.record_issue_sync` for what actually happened, keeping the dedup ledger
+    (issue, commit) pairs in sync with reality instead of drifting permanently."""
     os.makedirs(receipts_dir, exist_ok=True)
     path = os.path.join(receipts_dir, f"{nonce}.receipt.json")
     payload = {"nonce": nonce, "status": status, "receipt_sha": receipt_sha,
               "detail": detail, "policy_hash": policy_hash,
+              "issue_results": issue_results or [],
               "executed_at": _iso(now or _now())}
     _atomic_write(path, json.dumps(payload, sort_keys=True, indent=2))
     return path
