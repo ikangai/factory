@@ -39,6 +39,63 @@ def test_fresh_db_has_a_nullable_claimed_at_column(bb):
     assert bb.get_task("t1")["claimed_at"] is None
 
 
+# F14/T3 (round-2 integration fix): a bare ADD COLUMN leaves claimed_at NULL for every
+# PRE-EXISTING row, including one already 'claimed'/'in_progress' at migration time — the
+# exact stuck-forever state Component F exists to fix, just for the pre-existing backlog.
+# Simulates a pre-migration DB: create the schema WITHOUT running _migrate (so no
+# claimed_at column exists yet), insert an in-flight task via raw SQL (set_task_status
+# would fail — the column doesn't exist), THEN run the migration and assert the backfill.
+def test_migration_backfills_claimed_at_for_pre_existing_in_flight_rows(tmp_path):
+    from factory.common import paths
+    board = Blackboard(db_path=str(tmp_path / "premig.db"))
+    with open(paths.SCHEMA_SQL, "r", encoding="utf-8") as fh:
+        board.conn.executescript(fh.read())    # schema WITHOUT claimed_at (never in CREATE TABLE)
+    board.conn.commit()
+    cols_before = {r[1] for r in board.conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "claimed_at" not in cols_before      # sanity: genuinely pre-migration
+
+    board.conn.execute(
+        "INSERT INTO tasks(id, title, detail, source, source_ref, status, spec_json, "
+        "created_at, updated_at) VALUES ('t1','x','','human','','in_progress','{}',"
+        "'2020-01-01T00:00:00.000000Z','2020-06-15T12:00:00.000000Z')")
+    board.conn.execute(
+        "INSERT INTO tasks(id, title, detail, source, source_ref, status, spec_json, "
+        "created_at, updated_at) VALUES ('t2','y','','human','','open','{}',"
+        "'2020-01-01T00:00:00.000000Z','2020-06-15T12:00:00.000000Z')")
+    board.conn.commit()
+
+    board._migrate()                            # the fix under test
+    board.conn.commit()
+
+    t1 = board.get_task("t1")
+    assert t1["claimed_at"] == "2020-06-15T12:00:00.000000Z"   # backfilled from updated_at
+    t2 = board.get_task("t2")
+    assert t2["claimed_at"] is None             # an OPEN task is never backfilled — never claimed
+    board.close()
+
+
+def test_migration_backfilled_row_is_immediately_reap_eligible(tmp_path):
+    """T3: pin the FIX, not just the backfill value — a pre-migration in-flight row must
+    actually become reclaimable once its lease is old enough, not stay stuck forever."""
+    from factory.common import paths
+    board = Blackboard(db_path=str(tmp_path / "premig2.db"))
+    with open(paths.SCHEMA_SQL, "r", encoding="utf-8") as fh:
+        board.conn.executescript(fh.read())
+    board.conn.commit()
+    old_ts = (datetime.now(timezone.utc) - timedelta(minutes=500)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ")
+    board.conn.execute(
+        "INSERT INTO tasks(id, title, detail, source, source_ref, status, spec_json, "
+        "created_at, updated_at) VALUES ('t1','x','','human','','in_progress','{}',?,?)",
+        (old_ts, old_ts))
+    board.conn.commit()
+    board._migrate()
+    board.conn.commit()
+    assert board.reap_expired_task_leases(240) == ["t1"]
+    assert board.get_task("t1")["status"] == "open"
+    board.close()
+
+
 def test_set_task_status_stamps_claimed_at_on_in_progress(bb):
     bb.add_task("t1", "x", source="human")
     bb.set_task_status("t1", "in_progress")
@@ -82,6 +139,20 @@ def test_reaps_an_expired_leaderless_claim(bb):
     row = bb.get_task("t1")
     assert row["status"] == "open"
     assert "lease expired" in row["result"]
+
+
+# F11 (round-2 integration fix): dry_run previews without mutating anything.
+def test_dry_run_reports_without_mutating(bb):
+    bb.add_task("t1", "x", source="human")
+    bb.set_task_status("t1", "in_progress")
+    _backdate(bb, "t1", 500)
+    ids = bb.reap_expired_task_leases(240, dry_run=True)
+    assert ids == ["t1"]
+    row = bb.get_task("t1")
+    assert row["status"] == "in_progress"        # untouched
+    assert row["claimed_at"] is not None
+    # a REAL reap right after still finds it (dry_run left it alone)
+    assert bb.reap_expired_task_leases(240) == ["t1"]
 
 
 def test_spares_a_fresh_claim(bb):
@@ -220,9 +291,11 @@ def test_run_shift_no_lease_note_when_nothing_expired(tmp_path, monkeypatch):
 
 
 # -- factory task reap CLI -------------------------------------------------------------------
-def test_cmd_task_reap_reclaims_and_reports(tmp_path, capsys):
+def test_cmd_task_reap_reclaims_and_reports_when_a_shift_is_running(tmp_path, capsys):
     with Blackboard(str(tmp_path / "f.db")) as s:
         s.init_db()
+        m = s.set_mission("x")
+        s.start_shift(token_budget=100, mission_id=m)      # F11: reap needs a safe exclusion
         s.add_task("t1", "x", source="human")
         s.set_task_status("t1", "in_progress")
         _backdate(s, "t1", 500)
@@ -233,9 +306,46 @@ def test_cmd_task_reap_reclaims_and_reports(tmp_path, capsys):
     assert "reclaimed 1 expired claim" in out
 
 
-def test_cmd_task_reap_nothing_to_reap(tmp_path, capsys):
+def test_cmd_task_reap_nothing_to_reap_when_a_shift_is_running(tmp_path, capsys):
+    with Blackboard(str(tmp_path / "f.db")) as s:
+        s.init_db()
+        m = s.set_mission("x")
+        s.start_shift(token_budget=100, mission_id=m)
+        orch.cmd_task(s, "reap", rest=None, source="human", result="", status=None, detail="")
+    out = capsys.readouterr().out
+    assert "reclaimed 0 expired claim" in out
+
+
+# -- F11 (round-2 integration fix): no running shift refuses without --force ----------------
+def test_cmd_task_reap_refuses_without_force_when_no_shift_is_running(tmp_path, capsys):
+    with Blackboard(str(tmp_path / "f.db")) as s:
+        s.init_db()
+        s.add_task("t1", "x", source="human")
+        s.set_task_status("t1", "in_progress")
+        _backdate(s, "t1", 500)
+        orch.cmd_task(s, "reap", rest=None, source="human", result="", status=None, detail="")
+        assert s.get_task("t1")["status"] == "in_progress"   # NOT touched
+    out = capsys.readouterr().out
+    assert "refusing to reap" in out and "t1" in out and "--force" in out
+
+
+def test_cmd_task_reap_force_reclaims_with_no_shift_running(tmp_path, capsys):
+    with Blackboard(str(tmp_path / "f.db")) as s:
+        s.init_db()
+        s.add_task("t1", "x", source="human")
+        s.set_task_status("t1", "in_progress")
+        _backdate(s, "t1", 500)
+        orch.cmd_task(s, "reap", rest=None, source="human", result="", status=None, detail="",
+                      force=True)
+        assert s.get_task("t1")["status"] == "open"
+    out = capsys.readouterr().out
+    assert "reclaimed 1 expired claim" in out
+
+
+def test_cmd_task_reap_no_shift_no_force_nothing_expired_reports_cleanly(tmp_path, capsys):
     with Blackboard(str(tmp_path / "f.db")) as s:
         s.init_db()
         orch.cmd_task(s, "reap", rest=None, source="human", result="", status=None, detail="")
     out = capsys.readouterr().out
-    assert "reclaimed 0 expired claim" in out
+    assert "nothing to reclaim" in out
+    assert "refusing" not in out          # nothing to refuse — say so plainly

@@ -698,13 +698,14 @@ _MAX_REOPENS = 2                       # a 3rd reopen is refused → escalate to
 
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
              source: str = "human", result: str = "", status: Optional[str] = None,
-             detail: str = "") -> None:
+             detail: str = "", force: bool = False) -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
     `task add "<title>" [--detail "<spec/brief>"]`, `task claim <id>`,
     `task done <id> [--result <sha>]`, `task block <id> [--result why]`,
-    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1).
-    claim/done STAMP the running shift, so the loop can tell what a shift shipped (the basis
-    for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
+    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1),
+    `task reap [--force]` (manual claim-lease sweep). claim/done STAMP the running shift,
+    so the loop can tell what a shift shipped (the basis for mission-progress). `--detail`
+    carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
             # Fix 8b (self-organizing-factory adversarial review — visibility): a task's
@@ -768,9 +769,30 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         # this is the operator's on-demand handle. keep_shift_id=the CURRENT running shift
         # (if any), same as the automatic sweep — never reclaims work this process itself
         # just claimed.
+        #
+        # F11 (round-2 integration fix): with NO running shift, keep_shift_id is None,
+        # which drops the exclusion ENTIRELY — every expired claim reclaims, including one
+        # the post-exit EXECUTOR RAIL is still actively finishing (a shift's row can close
+        # in the DB before its dispatched workers actually return; that's exactly the
+        # asynchronous window this CLI, run standalone, has no visibility into). Refuse a
+        # real reap with no running shift unless --force; preview (dry_run) what it would
+        # have reclaimed either way, so the operator can SEE the risk before overriding it.
         lease_minutes, _ = config.resolve_setting(store, "super_worker.claim_lease_minutes", 240)
+        current_shift = store.current_shift_id()
+        if current_shift is None and not force:
+            preview = store.reap_expired_task_leases(int(lease_minutes), dry_run=True)
+            if preview:
+                print(f"[task] refusing to reap: no shift is currently running, so there is "
+                      f"no safe claim to exclude — the post-exit executor rail may still be "
+                      f"finishing work claimed by a shift that already closed in the DB. "
+                      f"Would reclaim {len(preview)}: {', '.join(preview)}. "
+                      f"Re-run with --force to reclaim anyway.")
+            else:
+                print(f"[task] nothing to reclaim (lease {int(lease_minutes)}m) — "
+                      f"no shift running, --force not needed")
+            return
         reclaimed = store.reap_expired_task_leases(
-            int(lease_minutes), keep_shift_id=store.current_shift_id())
+            int(lease_minutes), keep_shift_id=current_shift)
         for tid in reclaimed:
             print(f"[task] reclaimed {tid} (expired claim lease)")
         print(f"[task] reclaimed {len(reclaimed)} expired claim(s) "
@@ -2294,6 +2316,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")
+    tsk.add_argument("--force", action="store_true",
+                     help="`task reap` only: reclaim even with no shift currently running "
+                          "(risks double-building a task the post-exit executor rail is "
+                          "still finishing) — preview-then-refuse is the default")
     pl = sub.add_parser("plan")             # the plan: conductor-maintained milestones
     pl.add_argument("action", choices=["add", "list", "status", "link", "estimate"])
     pl.add_argument("rest", nargs="*", help="title (add) / <id> [value] (status/link/estimate)")
@@ -2472,7 +2498,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
-                     result=a.result, status=a.status, detail=a.detail)
+                     result=a.result, status=a.status, detail=a.detail, force=a.force)
         elif a.cmd == "plan":
             cmd_plan(store, a.action, rest=a.rest, deliverable=a.deliverable,
                      acceptance=a.acceptance, budget_tokens=a.budget_tokens, order=a.order,
