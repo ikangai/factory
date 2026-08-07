@@ -44,6 +44,10 @@ SETTINGS_SPEC = {
     "super_worker.milestone_verify": bool,  # Task 3.3 (independent milestone-delivery grader)
     "super_worker.investigate_blocked": bool,  # Task 4.1 (post-shift investigator for blocked tasks)
     "super_worker.dispatch_waves": int,     # Task 5.2 (bounded same-shift second wave: 1=today, 2=one more)
+    "super_worker.red_proof": bool,         # Component E (publication-broker design): a shipped
+                                             # test must FAIL on the pristine base, not just pass
+                                             # on the candidate — a gate/verifier knob (FROZEN)
+    "super_worker.claim_lease_minutes": int,  # Component F: task-claim lease TTL (editable capacity)
 }
 
 

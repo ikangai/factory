@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The publication broker (Component C/G,
+     docs/plans/2026-08-06-publication-broker-design.md): runs as the OPERATOR's own
+     LaunchAgent — never a system LaunchDaemon, never the factory user. It holds the
+     operator's OWN GitHub credential (their normal `gh`/git credential helper) and, once
+     armed (autonomy.publication_broker: true + GH_TOKEN removed from the factory user's
+     secrets — runbook §4), is the ONLY thing on this machine that ever pushes to the real
+     remote.
+
+     This is a TEMPLATE: 04-install-broker-agent.sh substitutes every __TOKEN__ below with
+     the operator's real paths before installing it — never edit the placeholders in place
+     in this checked-in copy.
+
+     Install/reload (operator, no root):
+       bash deploy/user-factory/04-install-broker-agent.sh
+     Status / logs:
+       launchctl print gui/$(id -u)/com.factory.broker
+       tail -f __FACTORY_CHECKOUT__/logs/broker-agent.log
+
+     WatchPaths fires `broker run-once` the moment the factory writes a new envelope to the
+     outbox; StartInterval is a belt-and-suspenders poll (a WatchPaths event can in
+     principle be missed if the agent wasn't loaded at write time — envelopes are cheap to
+     re-poll for, never harmful to check twice).
+
+     FACTORY_BROKER_SPOOL/FACTORY_BROKER_BARE (round-2 integration fix): this is HALF of
+     connecting the spool — the OTHER half is the factory's own config.yaml
+     (autonomy.broker_spool_root), which 04-install-broker-agent.sh prints as a manual
+     follow-up (it cannot touch the factory account). Both MUST point at the same
+     SPOOL_ROOT or the broker polls a directory the factory never writes to and the
+     factory pushes into a bare repo the broker never reads — a silent no-op, not an
+     error, so verify with `factory broker status` (prints its resolved paths) on BOTH
+     sides after installing.
+
+     The unattended flag below is REQUIRED: a background LaunchAgent has no terminal to
+     prompt on. `require_pin` (default true, per allowlist entry) stays fully in force
+     either way: an unpinned tip is left 'pending' here, NEVER auto-approved. Content
+     approval (reviewing the operator-derived diff and pinning a tip) is a deliberate
+     separate act, either `factory broker run-once` run BY HAND (omit the unattended
+     flag; interactive) or `factory broker pin SHA` ahead of time. See
+     docs/runbooks/publication-broker.md. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__FACTORY_CHECKOUT__/bin/factory</string>
+    <string>broker</string>
+    <string>run-once</string>
+    <string>--unattended</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__OPERATOR_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FACTORY_BROKER_SPOOL</key>
+    <string>__SPOOL_ROOT__</string>
+    <key>FACTORY_BROKER_BARE</key>
+    <string>__BARE_REPO__</string>
+  </dict>
+  <key>WatchPaths</key>
+  <array>
+    <string>__OUTBOX_DIR__</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__FACTORY_CHECKOUT__/logs/broker-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>__FACTORY_CHECKOUT__/logs/broker-agent.log</string>
+  <key>WorkingDirectory</key>
+  <string>__FACTORY_CHECKOUT__</string>
+</dict>
+</plist>

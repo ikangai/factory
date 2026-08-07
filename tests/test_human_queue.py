@@ -56,8 +56,12 @@ def test_one_of_each_type_shapes_counts_and_order(store, tmp_path):
 
     appr = q["items"][1]
     assert appr["type"] == "approval"
+    # `status`/`actionable` joined the shape with F7 (armed-mode visibility): the queue now
+    # also renders 'executing' (awaiting the operator's broker) and broker-rejected rows,
+    # so a consumer must be able to tell which items are actually clickable.
     assert set(appr.keys()) == {"type", "approval_id", "kind", "summary", "n_commits",
-                                 "age_days", "stale"}
+                                 "status", "actionable", "age_days", "stale"}
+    assert appr["status"] == "pending" and appr["actionable"] is True
     assert appr["approval_id"] == approval_id
     assert appr["kind"] == "graduation"
     assert isinstance(appr["summary"], str) and appr["summary"]

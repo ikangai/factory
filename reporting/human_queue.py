@@ -95,20 +95,42 @@ def _approval_summary(kind: str, payload: dict) -> tuple[str, Optional[int]]:
 
 
 def _approval_items(store, now: datetime, stale_after_days: float) -> list[dict]:
+    """Pending approvals (the operator's own decision queue) PLUS, when the publication
+    broker is armed, the two states an armed publication passes through that the operator
+    otherwise never sees (F7, round-2 integration fix): 'executing' — approved here, now
+    waiting on the operator's broker, which can sit for the envelope's whole TTL — and a
+    broker rejection, whose REASON previously reached no operator surface at all (only the
+    row's note and the operator_actions audit table, which the dashboard never reads).
+    Only broker rejections are surfaced, not an operator's own Reject click: the latter is
+    a decision they just made, the former is news."""
+    rows = []
+    for status in ("pending", "executing"):
+        try:
+            rows.extend(store.pending_approvals(status=status))   # newest-first (store contract)
+        except Exception as e:
+            print(f"[queue] approvals unavailable ({status}): {e}")
     try:
-        rows = store.pending_approvals(status="pending")   # newest-first (store contract)
+        rows.extend([r for r in store.pending_approvals(status="rejected")
+                     if (r.get("payload") or {}).get("broker_rejected")][:3])
     except Exception as e:
-        print(f"[queue] approvals unavailable: {e}")
-        return []
+        print(f"[queue] broker rejections unavailable: {e}")
     items = []
     for r in rows:
         try:
             kind = r.get("kind") or ""
             payload = r.get("payload") or {}
             summary, n_commits = _approval_summary(kind, payload)
+            status = r.get("status") or "pending"
+            if status == "executing":
+                summary = f"{summary} — awaiting your broker"
+            elif payload.get("broker_rejected"):
+                reason = (r.get("note") or "broker rejected it").strip()
+                summary = f"{summary} — BROKER REJECTED: {reason[:160]}"
             age = _age_days(r.get("created_at"), now) or 0.0
             items.append({"type": "approval", "approval_id": r.get("id"), "kind": kind,
                           "summary": summary, "n_commits": n_commits,
+                          "status": status,
+                          "actionable": status == "pending",
                           "age_days": round(age, 3), "stale": age > stale_after_days})
         except Exception as e:   # one malformed row must not blank the whole section
             print(f"[queue] approval row {r.get('id')} skipped: {e}")

@@ -698,13 +698,14 @@ _MAX_REOPENS = 2                       # a 3rd reopen is refused → escalate to
 
 def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
              source: str = "human", result: str = "", status: Optional[str] = None,
-             detail: str = "") -> None:
+             detail: str = "", force: bool = False) -> None:
     """The backlog CLI the conductor drives: `task list [--status open]`,
     `task add "<title>" [--detail "<spec/brief>"]`, `task claim <id>`,
     `task done <id> [--result <sha>]`, `task block <id> [--result why]`,
-    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1).
-    claim/done STAMP the running shift, so the loop can tell what a shift shipped (the basis
-    for mission-progress). `--detail` carries the bounded brief/spec to the developer."""
+    `task reopen <id> --detail "<narrowed brief>"` (blocked → open with provenance; Task 1.1),
+    `task reap [--force]` (manual claim-lease sweep). claim/done STAMP the running shift,
+    so the loop can tell what a shift shipped (the basis for mission-progress). `--detail`
+    carries the bounded brief/spec to the developer."""
     if action == "list":
         for t in store.list_tasks(status=status):
             # Fix 8b (self-organizing-factory adversarial review — visibility): a task's
@@ -762,6 +763,40 @@ def cmd_task(store: Blackboard, action: str, *, rest: Optional[str] = None,
         store.set_task_status(rest, "open", result="")   # result is NOT NULL — clear via ''
         print(f"[task] reopened {rest} (reopen {len(prior) + 1} of {_MAX_REOPENS}) — "
               "detail narrowed, status open (1 row)")
+    elif action == "reap":
+        # Manual claim-lease sweep (Component F, docs/plans/2026-08-06-publication-broker-
+        # design.md) — the automatic one runs every shift start (orchestrator/shift.py);
+        # this is the operator's on-demand handle. keep_shift_id=the CURRENT running shift
+        # (if any), same as the automatic sweep — never reclaims work this process itself
+        # just claimed.
+        #
+        # F11 (round-2 integration fix): with NO running shift, keep_shift_id is None,
+        # which drops the exclusion ENTIRELY — every expired claim reclaims, including one
+        # the post-exit EXECUTOR RAIL is still actively finishing (a shift's row can close
+        # in the DB before its dispatched workers actually return; that's exactly the
+        # asynchronous window this CLI, run standalone, has no visibility into). Refuse a
+        # real reap with no running shift unless --force; preview (dry_run) what it would
+        # have reclaimed either way, so the operator can SEE the risk before overriding it.
+        lease_minutes, _ = config.resolve_setting(store, "super_worker.claim_lease_minutes", 240)
+        current_shift = store.current_shift_id()
+        if current_shift is None and not force:
+            preview = store.reap_expired_task_leases(int(lease_minutes), dry_run=True)
+            if preview:
+                print(f"[task] refusing to reap: no shift is currently running, so there is "
+                      f"no safe claim to exclude — the post-exit executor rail may still be "
+                      f"finishing work claimed by a shift that already closed in the DB. "
+                      f"Would reclaim {len(preview)}: {', '.join(preview)}. "
+                      f"Re-run with --force to reclaim anyway.")
+            else:
+                print(f"[task] nothing to reclaim (lease {int(lease_minutes)}m) — "
+                      f"no shift running, --force not needed")
+            return
+        reclaimed = store.reap_expired_task_leases(
+            int(lease_minutes), keep_shift_id=current_shift)
+        for tid in reclaimed:
+            print(f"[task] reclaimed {tid} (expired claim lease)")
+        print(f"[task] reclaimed {len(reclaimed)} expired claim(s) "
+              f"(lease {int(lease_minutes)}m)")
 
 
 def cmd_timesheet(store: Blackboard, *, shift: Optional[int] = None, limit: int = 200) -> None:
@@ -1070,6 +1105,13 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
         reviewer = _k("reviewer", False)                 # Phase 8: config-gated pre-merge review gate
         acceptance_exec = _k("acceptance_exec", False)   # Task 3.1: run the spec's named acceptance test
         investigate = _k("investigate_blocked", False)   # Task 4.1: post-shift investigator (P6 2-3)
+        # F10 (round-2 integration fix, Component E): red_proof was NEVER threaded through
+        # this resolution block, so develop.py's own None-fallback (a raw config.yaml
+        # read) was the ONLY path that ever ran — a store override (the dashboard's
+        # "applied at next shift" promise) was silently dead. resolve_setting via _k()
+        # here is the SAME store-override -> config.yaml -> default chain every other
+        # SETTINGS_SPEC knob already gets.
+        red_proof = _k("red_proof", False)
         scope_on, decompose_on = _k("scope_check", False), _k("auto_decompose", False)
         sj = dc = None                                  # GSD spec-driven checks (config-gated; see super_worker.*)
         if scope_on or decompose_on:
@@ -1089,7 +1131,7 @@ def cmd_run(store: Blackboard, *, mission: Optional[str] = None, token_budget: O
             st, shift_id, as_user=as_user, claude_bin=claude_bin, real=real,
             max_tasks=max_tasks, max_parallel=max_parallel, scope_judge=sj, decomposer=dc,
             require_test=require_test, reviewer=reviewer, acceptance_exec=acceptance_exec,
-            investigate_blocked=investigate)
+            investigate_blocked=investigate, red_proof=red_proof)
         # Self-organizing factory (Task 2.2): the real production wiring for the shift-
         # start trigger — config-gated OFF by default, like every LLM-spending stage this
         # rail grew (scope_check/reviewer/investigate_blocked): the maybe_plan_org
@@ -1303,8 +1345,21 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         return None
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
-    gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+    auton = config.load_config().get("autonomy") or {}
+    gate_on = bool(auton.get("push_approval", True))
     propose = gate_on and not dry_run       # gate ON + not an explicit preview → file, don't push
+    # F3 (round-2 integration fix): about to push for REAL (not proposing, not an explicit
+    # --dry-run preview) with the broker armed but push_approval off — the SAME forbidden
+    # combination _graduate_after_shift refuses, reachable here too (this CLI is Bash-
+    # invokable by the autonomous conductor). An explicit --dry-run still previews (it
+    # mutates nothing) so the operator can diagnose the misconfiguration itself.
+    if not propose and not dry_run and _broker_armed_without_approval_gate(auton):
+        msg = ("publication_broker is armed but push_approval is OFF — refusing to push "
+              "directly (this would bypass the broker's content-approval gate entirely). "
+              "Fix the config: push_approval must stay true while the broker is armed.")
+        print(f"[graduate] {msg}")
+        _maybe_file_graduation_failure(store, msg)
+        return {"action": "skip", "reason": "broker-armed-push-approval-off"}
     try:
         # Same cross-process push lock as execute_approval / the gate-off shift-end path:
         # every actor that pushes this repo outward (or previews it under the gate) serializes.
@@ -1333,10 +1388,17 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
         # card the operator just declined. Reuse `_same_graduation` (module-level, this
         # file) rather than re-deriving the compare — one source of truth for "unchanged".
         rej = store.latest_rejected_approval("graduation")
-        if rej is not None and _same_graduation(rej.get("payload") or {}, res):
+        if _is_human_rejection(rej) and _same_graduation(rej.get("payload") or {}, res):
             print("[graduate] unchanged since operator rejection — not re-proposing")
             return {"action": "skip", "reason": "rejected-unchanged"}
         approval_id = approvals.propose_graduation(store, preview=res)
+        if approval_id is None:
+            # F13 (round-2 integration fix): a graduation approval is already 'executing'
+            # (broker-armed, awaiting the operator's broker) — a second proposal would
+            # only ever contest the same base once the first one lands.
+            print("[graduate] a graduation approval is already executing — not "
+                  "re-proposing until it resolves")
+            return {"action": "skip", "reason": "already-executing"}
         print(f"graduation proposed → approval #{approval_id} pending (autonomy.push_approval)"
               f" — approve in the fleet GUI or set autonomy.push_approval: false")
         return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
@@ -1353,6 +1415,123 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     else:
         print(f"[graduate] {action}: {res.get('reason') or res.get('error', '')}")
     return res
+
+
+def cmd_broker(action: str, *, tip_sha: Optional[str] = None, note: str = "",
+               unattended: bool = False) -> Optional[dict]:
+    """`factory broker run-once | watch | status | pin <sha> | unpin <sha> | pins` — the
+    OPERATOR-side half of the publication broker (docs/plans/2026-08-06-publication-
+    broker-design.md, Component C). Deliberately does NOT open a Blackboard connection
+    (see `main`'s early-return for this command): the broker runs from the operator's own
+    factory checkout, reads only its own allowlist/pin-store/spent-ledger and the shared
+    envelope spool — never the guest-house's DB, which in production it cannot even reach
+    (700 home).
+
+    `run-once` defaults to INTERACTIVE (a human reviews the operator-derived diff and
+    confirms before an unpinned tip is pinned + published) — pass `--unattended` to skip
+    the prompt (a tip that isn't ALREADY pinned is then left 'pending', never auto-
+    approved). `watch` REFUSES to run at all without `--unattended` — a persistent poll
+    loop cannot prompt a human, so the choice must be explicit."""
+    from . import broker
+    from ..common import paths
+    outbox_dir = paths.broker_outbox_dir()
+    receipts_dir = paths.broker_receipts_dir()
+    allowlist_path = paths.broker_allowlist_path()
+    spent_path = paths.broker_spent_path()
+    pins_path = paths.broker_pins_path()
+    processed_dir = paths.broker_processed_dir()
+    # F1 (round-2 integration fix): print the RESOLVED paths on every action, not just
+    # status — a factory-side/operator-side spool mismatch is a silent, permanent no-op
+    # otherwise (the broker polls a real, empty directory forever). Compare this line
+    # against the factory's own `factory broker status` output (or the FACTORY_BROKER_*
+    # env vars / autonomy.broker_spool_root it resolves from) by hand.
+    print(f"[broker] resolved paths: outbox={outbox_dir} receipts={receipts_dir} "
+          f"allowlist={allowlist_path}")
+    if not os.path.isdir(outbox_dir):
+        print(f"[broker] WARNING: outbox does not exist yet at {outbox_dir} — either "
+              f"04-install-broker-agent.sh hasn't run, or this resolves to the WRONG "
+              f"path (check FACTORY_BROKER_SPOOL / autonomy.broker_spool_root on both "
+              f"sides)")
+    if action == "run-once":
+        results = broker.run_once(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                                  allowlist_path=allowlist_path, spent_path=spent_path,
+                                  pins_path=pins_path, processed_dir=processed_dir,
+                                  unattended=unattended)
+        for r in results:
+            extra = f" ({r['reason']})" if r.get("reason") else ""
+            print(f"[broker] {r['nonce'][:8]}: {r['status']}{extra}")
+        print(f"[broker] processed {len(results)} envelope(s)")
+        return {"processed": results}
+    if action == "watch":
+        if not unattended:
+            print("[broker] refusing to watch without --unattended — a persistent poll "
+                  "loop can't prompt interactively. Pin tips ahead of time with "
+                  "`factory broker pin <sha>`, or run `factory broker run-once` by hand "
+                  "to review + confirm.")
+            return None
+        print(f"[broker] watching {outbox_dir} (Ctrl-C to stop) — unattended: "
+              "require_pin still applies; an unpinned tip stays 'pending', never "
+              "auto-approved")
+        broker.watch(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                    allowlist_path=allowlist_path, spent_path=spent_path,
+                    pins_path=pins_path, processed_dir=processed_dir, unattended=True)
+        return None
+    if action == "status":
+        st = broker.status(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
+                           allowlist_path=allowlist_path)
+        if not st["ok"]:
+            print("[broker] STATUS: NOT OK — see warnings above/below before trusting "
+                  "this deployment")
+        print(f"[broker] {len(st['pending'])} pending envelope(s) in {outbox_dir}, "
+              f"{len(st['receipts'])} receipt(s) unarchived in {receipts_dir}")
+        for bp in st["bare_missing"]:
+            print(f"[broker] WARNING: allowlist bare_path does not exist: {bp}")
+        for n in st["pending"]:
+            print(f"  outbox: {n}")
+        for n in st["receipts"]:
+            print(f"  receipt: {n}")
+        return st
+    if action == "pin":
+        if not tip_sha:
+            print("[broker] usage: factory broker pin <tip_sha> [--note TEXT]")
+            return None
+        try:
+            broker.pin_tip(pins_path, tip_sha, note=note)
+        except ValueError as e:
+            print(f"[broker] refused: {e}")
+            return None
+        print(f"[broker] pinned {tip_sha}" + (f" — {note}" if note else ""))
+        return {"pinned": tip_sha}
+    if action == "unpin":
+        if not tip_sha:
+            print("[broker] usage: factory broker unpin <tip_sha>")
+            return None
+        ok = broker.unpin_tip(pins_path, tip_sha)
+        print(f"[broker] {'unpinned' if ok else 'was not pinned'}: {tip_sha}")
+        return {"unpinned": ok}
+    if action == "pins":
+        pins = broker.list_pins(pins_path)
+        for sha, meta in sorted(pins.items()):
+            print(f"  {sha}  {meta.get('pinned_at', '')}  {meta.get('note', '')}")
+        print(f"[broker] {len(pins)} pinned tip(s)")
+        return pins
+    print("[broker] usage: factory broker run-once|watch|status|pin <sha>|unpin <sha>|pins")
+    return None
+
+
+def cmd_broker_receipts(store: Blackboard) -> list[dict]:
+    """`factory broker-receipts` — the FACTORY-side sweep: ingest any receipts the
+    operator's broker has written, resolving their matching approvals (Component D).
+    Also runs automatically at shift start (orchestrator/shift.py, next to
+    reap_orphaned_approvals) — this CLI is the manual/on-demand handle."""
+    from ..reporting import approvals
+    results = approvals.ingest_broker_receipts(store)
+    for r in results:
+        print(f"[broker-receipts] {r['nonce'][:8]}: approval "
+              f"{('#' + str(r['approval_id'])) if r['approval_id'] else '(none matched)'} "
+              f"-> {r['status']}")
+    print(f"[broker-receipts] ingested {len(results)} receipt(s)")
+    return results
 
 
 def _factory_auto_head(root: str) -> Optional[str]:
@@ -1429,6 +1608,31 @@ def _same_graduation(payload: dict, preview: dict) -> bool:
             and payload.get("tip_sha", "") == preview.get("tip_sha", ""))
 
 
+def _is_human_rejection(row: Optional[dict]) -> bool:
+    """F5 (round-2 integration fix): True iff `row` is a resolved 'rejected' approval the
+    OPERATOR actually declined — never one the broker rejected on its own (a moved
+    branch, an unpinned tip, a stale nonce: `reporting.approvals.ingest_broker_receipts`
+    marks these `payload['broker_rejected'] = True`, distinguishable in the SAME
+    'rejected' status without a schema change). Every re-proposal-suppression check must
+    use this, not a bare `is not None`, or a transient broker rejection permanently
+    blocks re-proposing the identical-looking graduation/publication once its cause
+    clears."""
+    return row is not None and not (row.get("payload") or {}).get("broker_rejected")
+
+
+def _broker_armed_without_approval_gate(auton: dict) -> bool:
+    """F3 (round-2 integration fix): the FORBIDDEN combination — the broker's whole
+    envelope/pin mechanism only runs from `reporting.approvals.execute_approval`, which
+    only exists because `push_approval` filed a `pending_approvals` row in the first
+    place. With `push_approval: false`, graduation never goes near an approval row at
+    all — it pushes for real, right here, regardless of `publication_broker`. Callers
+    that reach their gate-OFF real-push branch must check this FIRST and refuse rather
+    than push directly while the operator believes the broker is the thing standing
+    between the factory and the real remote."""
+    return bool(auton.get("publication_broker", False)) and not bool(
+        auton.get("push_approval", True))
+
+
 def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                           graduate_fn=None, repo: Optional[str] = None,
                           root: Optional[str] = None, base: Optional[str] = None,
@@ -1461,7 +1665,8 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         sc = stop_check or killswitch.is_halted
         test_fn = _graduation_test_fn()
 
-        gate_on = bool((config.load_config().get("autonomy") or {}).get("push_approval", True))
+        auton = config.load_config().get("autonomy") or {}
+        gate_on = bool(auton.get("push_approval", True))
         if gate_on:
             # Fix 4a (final whole-branch review): the gate-ON preview FETCHES, and
             # execute_approval holds this SAME lock across its re-derivation + push — so the
@@ -1485,10 +1690,14 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                 # + SHAs, Fix 2) against the most recent rejected row; identical → skip
                 # filing. Any difference (new commit, moved tip) proposes normally.
                 rej = store.latest_rejected_approval("graduation")
-                if rej is not None and _same_graduation(rej.get("payload") or {}, preview):
+                if _is_human_rejection(rej) and _same_graduation(rej.get("payload") or {}, preview):
                     print("[run] graduation unchanged since operator rejection — not re-proposing")
                     return {"action": "skip", "reason": "rejected-unchanged"}
                 approval_id = approvals.propose_graduation(store, preview=preview)
+                if approval_id is None:            # F13: already 'executing' — don't coexist
+                    print("[run] a graduation approval is already executing — not "
+                          "re-proposing until it resolves")
+                    return {"action": "skip", "reason": "already-executing"}
                 print(f"[run] graduation proposed → approval #{approval_id} pending "
                       f"(autonomy.push_approval)")
                 return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
@@ -1496,6 +1705,22 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
             # injected graduate_fn that doesn't honor dry_run) — fall through to the SAME
             # abnormal-skip escalation a real push's skip would get, below.
             res = preview
+        elif _broker_armed_without_approval_gate(auton):
+            # F3 (round-2 integration fix): push_approval OFF means this branch pushes for
+            # REAL, unconditionally — the broker's whole envelope/pin mechanism only ever
+            # runs from execute_approval, which only exists because push_approval filed an
+            # approval row in the first place. publication_broker: true + push_approval:
+            # false is therefore not "belt and suspenders", it's a straight bypass: the
+            # broker is armed but never consulted, and the factory keeps pushing directly
+            # with whatever real credential it still holds. Refuse loudly rather than
+            # silently doing the (armed-but-unenforced) wrong thing.
+            msg = ("publication_broker is armed but push_approval is OFF — refusing to "
+                  "push directly (this would bypass the broker's content-approval gate "
+                  "entirely). Fix the config: push_approval must stay true while the "
+                  "broker is armed.")
+            print(f"[run] {msg}")
+            _maybe_file_graduation_failure(store, msg)
+            res = {"action": "skip", "reason": "broker-armed-push-approval-off"}
         else:
             # Gate OFF pushes for real → serialize with every other push-side actor
             # (an operator's Approve executing in the dashboard process, a manual
@@ -1510,8 +1735,11 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
         # (2026-07-07 blindspot pass). Escalate the skips that mean "the pipeline is
         # broken" through the same deduped failure seam as a raised graduate error;
         # benign: stop = operator brake, no-op = nothing worth pushing, lock-busy =
-        # another pusher holds the repo lock (the push IS happening — just elsewhere).
-        if res.get("action") == "skip" and res.get("reason") not in ("stop", "no-op", "lock-busy"):
+        # another pusher holds the repo lock (the push IS happening — just elsewhere);
+        # broker-armed-push-approval-off is already escalated above (avoid double-filing).
+        if (res.get("action") == "skip"
+                and res.get("reason") not in ("stop", "no-op", "lock-busy",
+                                              "broker-armed-push-approval-off")):
             _maybe_file_graduation_failure(store, f"graduate skipped: {res.get('reason')}")
         return res
     except Exception as e:  # noqa: BLE001 — a graduate/sync error must never crash the loop
@@ -1542,7 +1770,7 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
     not be able to kill the loop it guards — but never silently either: a persistent skip
     would recreate the blindspot, so the except prints its cause."""
     try:
-        from ..reporting import issue_sync
+        from ..reporting import approvals, issue_sync
         lag_fn = lag_fn or issue_sync.graduation_lag
         file_fn = file_fn or _maybe_file_graduation_failure
         root = config.get_adapter().entry()[0]
@@ -1588,10 +1816,13 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                     # every shift. A changed lag / different release proposes normally.
                     rej = store.latest_rejected_approval("publication")
                     rp = (rej.get("payload") or {}) if rej is not None else {}
-                    if rej is not None and rp.get("ahead") == p and rp.get("release") == release:
+                    if (_is_human_rejection(rej) and rp.get("ahead") == p
+                            and rp.get("release") == release):
                         print("[run] publication unchanged since operator rejection — not re-proposing")
-                    else:
-                        store.add_pending_approval("publication", {"ahead": p, "release": release})
+                    elif approvals.propose_publication(store, ahead=p, release=release) is None:
+                        # F13 (round-2 integration fix): already 'executing' — don't coexist
+                        print("[run] a publication approval is already executing — not "
+                              "re-proposing until it resolves")
         return {**lag, "publication": pub}
     except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
         print(f"[run] lag alarm skipped (non-fatal): {e}")
@@ -2043,6 +2274,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd = sub.add_parser("graduate")        # ff base->factory/auto + push + sync the target's issues
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
+    brk = sub.add_parser("broker")          # OPERATOR-side: verify + push prepared envelopes
+    brk.add_argument("action", choices=["run-once", "watch", "status", "pin", "unpin", "pins"])
+    brk.add_argument("tip_sha", nargs="?", default=None,
+                     help="full tip sha (pin/unpin only)")
+    brk.add_argument("--note", default="", help="operator note recorded with a pin")
+    brk.add_argument("--unattended", action="store_true",
+                     help="skip the interactive confirm prompt (run-once) / required to "
+                          "run at all (watch) — require_pin still applies either way")
+    sub.add_parser("broker-receipts")       # FACTORY-side: ingest broker receipts, resolve approvals
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
                      help="measure + report but store nothing and never auto-revert")
@@ -2081,7 +2321,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="deterministic dashboard gate: node --check the inline JS + "
                           "placeholder/section scans; exit 1 on failure (no browser/server)")
     tsk = sub.add_parser("task")            # the backlog CLI the conductor drives
-    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen"])
+    tsk.add_argument("action", choices=["list", "add", "claim", "done", "block", "reopen", "reap"])
     tsk.add_argument("rest", nargs="?", help='title (add) or FULL task id (claim/done/block/reopen)')
     tsk.add_argument("--detail", default="",
                      help="bounded brief/spec for `task add` (target surface + acceptance); "
@@ -2089,6 +2329,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     tsk.add_argument("--source", default="human")
     tsk.add_argument("--result", default="")
     tsk.add_argument("--status", default=None, help="filter for `task list`")
+    tsk.add_argument("--force", action="store_true",
+                     help="`task reap` only: reclaim even with no shift currently running "
+                          "(risks double-building a task the post-exit executor rail is "
+                          "still finishing) — preview-then-refuse is the default")
     pl = sub.add_parser("plan")             # the plan: conductor-maintained milestones
     pl.add_argument("action", choices=["add", "list", "status", "link", "estimate"])
     pl.add_argument("rest", nargs="*", help="title (add) / <id> [value] (status/link/estimate)")
@@ -2170,6 +2414,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if a.cmd == "schedule-uninstall":
         cmd_schedule_uninstall(loop=a.loop)
         return 0
+    # broker runs as the OPERATOR and never touches the blackboard (see cmd_broker) —
+    # handle before connecting, exactly like schedule-(un)install above.
+    if a.cmd == "broker":
+        cmd_broker(a.action, tip_sha=a.tip_sha, note=a.note, unattended=a.unattended)
+        return 0
 
     with Blackboard() as store:
         # Auto-apply the schema on open. It's all CREATE ... IF NOT EXISTS, so it's
@@ -2240,6 +2489,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_autopilot(a.action)
         elif a.cmd == "graduate":
             cmd_graduate(store, dry_run=a.dry_run)
+        elif a.cmd == "broker-receipts":
+            cmd_broker_receipts(store)
         elif a.cmd == "rebaseline":
             cmd_rebaseline(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
@@ -2260,7 +2511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_issue(a.action, title=a.title, body=a.body, label=a.label)
         elif a.cmd == "task":
             cmd_task(store, a.action, rest=a.rest, source=a.source,
-                     result=a.result, status=a.status, detail=a.detail)
+                     result=a.result, status=a.status, detail=a.detail, force=a.force)
         elif a.cmd == "plan":
             cmd_plan(store, a.action, rest=a.rest, deliverable=a.deliverable,
                      acceptance=a.acceptance, budget_tokens=a.budget_tokens, order=a.order,

@@ -39,8 +39,35 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     tripped brake, and no clean injection seam for tests). `None` (the default) is a pure
     no-op, so every EXISTING run_shift test stays byte-identical."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
-    store.reap_orphaned_approvals()                # + push approvals stranded 'executing' by a
-                                                   #   crash between claim and resolve (Fix 4d)
+    # Publication broker (Component D): a broker-armed approval legitimately SITS
+    # 'executing' for up to autonomy.envelope_ttl_hours while the operator's broker is
+    # offline/asleep — the default 1h orphan floor would mislabel that in-flight envelope
+    # "crashed". Widen the floor past the envelope's own expiry (+1h grace) ONLY when the
+    # broker is armed; OFF (the default) calls reap_orphaned_approvals exactly as before —
+    # byte-identical to the pre-broker behavior.
+    #
+    # F4 (round-2 integration fix): INGEST BEFORE REAP, not after. A receipt can land
+    # (the broker pushed successfully) at any time relative to shift boundaries; ingesting
+    # AFTER the reaper ran meant a row whose receipt said 'pushed <sha>' could already have
+    # been aged out and permanently marked 'stale — verify with git ls-remote' by the SAME
+    # call that would otherwise have resolved it 'approved' — a real, successful
+    # publication misrecorded as an unverifiable crash. Ingesting first means any row with
+    # a receipt already waiting is resolved and OUT of 'executing' before the reaper ever
+    # looks at it.
+    auton = config.load_config().get("autonomy", {}) or {}
+    if auton.get("publication_broker", False):
+        try:                                        # receipt ingestion: never sinks the shift
+            from ..reporting import approvals
+            ingested = approvals.ingest_broker_receipts(store)
+            if ingested:
+                print(f"[broker] ingested {len(ingested)} receipt(s) at shift start", flush=True)
+        except Exception as e:  # noqa: BLE001 — a spool/store hiccup must not block the shift
+            print(f"[broker] receipt ingestion error (non-fatal): {e}", flush=True)
+        ttl_h = float(auton.get("envelope_ttl_hours", 24) or 24)
+        store.reap_orphaned_approvals(max_age_hours=ttl_h + 1.0)
+    else:
+        store.reap_orphaned_approvals()             # + push approvals stranded 'executing' by a
+                                                     #   crash between claim and resolve (Fix 4d)
 
     if killswitch.is_halted():                     # the brake: don't even start
         return {"action": "halted", "shift_id": None, "reaped": len(reaped), "shipped": 0}
@@ -52,6 +79,19 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
         return {"action": "no_mission", "shift_id": None, "reaped": len(reaped), "shipped": 0}
 
     sh = store.start_shift(token_budget=token_budget, mission_id=m["id"])
+
+    # Claim leases (Component F, docs/plans/2026-08-06-publication-broker-design.md): a
+    # task orphaned OUTSIDE a shift (no shift_id) — or by a shift that crashed and never
+    # restarted — stays 'claimed'/'in_progress' forever; reap_orphaned_shifts only rescues
+    # a shift's own in-flight tasks while that shift row is still 'running'. keep_shift_id
+    # = THIS shift (just started above) so its own fresh claims are never mistaken for a
+    # stale lease. super_worker.claim_lease_minutes is a board-editable capacity knob
+    # (SETTINGS_SPEC, NOT frozen — see harness_surface.py's own comment on why).
+    lease_minutes, _ = config.resolve_setting(store, "super_worker.claim_lease_minutes", 240)
+    reclaimed_leases = store.reap_expired_task_leases(int(lease_minutes), keep_shift_id=sh)
+    if reclaimed_leases:
+        print(f"[leases] reclaimed {len(reclaimed_leases)} expired claim(s): "
+              f"{', '.join(reclaimed_leases)}", flush=True)
 
     # Self-organizing factory (design: docs/plans/2026-07-09-self-organizing-factory-
     # design.md §3; impl Task 2.2): the shift-start / mission-change trigger. Placed HERE —
@@ -136,6 +176,9 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     if budget_hit:
         note = (f"budget exhausted: spent {spent} of {token_budget} tokens before dispatch — "
                 f"executor skipped, claimed tasks requeued")
+        resume_note = f"{resume_note}\n{note}" if resume_note else note
+    if reclaimed_leases:                                # close-out visibility (Component F)
+        note = f"reclaimed {len(reclaimed_leases)} expired claim(s)"
         resume_note = f"{resume_note}\n{note}" if resume_note else note
 
     # Self-harness loop (design: docs/plans/2026-08-05-self-harness-loop-design.md,

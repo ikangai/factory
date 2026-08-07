@@ -95,6 +95,21 @@ class Blackboard:
         if cols and "org_class" not in cols:           # org-chart class assignment (self-organizing
             self.conn.execute(                          # factory, Task 1.1) — '' = unclassified/no chart
                 "ALTER TABLE tasks ADD COLUMN org_class TEXT NOT NULL DEFAULT ''")
+        if cols and "claimed_at" not in cols:          # claim leases (Component F, docs/plans/
+            self.conn.execute(                          # 2026-08-06-publication-broker-design.md) —
+                "ALTER TABLE tasks ADD COLUMN claimed_at TEXT")  # NULL until first claimed
+            # F14 (round-2 integration fix): a bare ADD COLUMN leaves claimed_at NULL for
+            # EVERY existing row — including any task ALREADY 'claimed'/'in_progress' at
+            # migration time. reap_expired_task_leases requires claimed_at IS NOT NULL, so
+            # those rows would be stuck 'in_progress' forever with no lease to ever expire
+            # — precisely the dead-worker-holds-the-task-forever state Component F exists
+            # to fix, just for the pre-existing backlog instead of a future one. Backfill
+            # claimed_at = updated_at (the last time anything touched the row — the best
+            # available proxy for "when this claim actually started") for exactly those
+            # rows, so they're immediately eligible for the sweep going forward.
+            self.conn.execute(
+                "UPDATE tasks SET claimed_at = updated_at "
+                "WHERE status IN ('claimed','in_progress') AND claimed_at IS NULL")
         if cols:                                        # index milestone_id AFTER it's guaranteed to exist
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id)")
         # budget_ledger gained shift attribution + wall-clock + worker profile (dashboard wishlist).
@@ -443,6 +458,8 @@ class Blackboard:
             sets.append("result = ?"); params.append(result)
         if shift_id is not None:
             sets.append("shift_id = ?"); params.append(shift_id)
+        if status in ("claimed", "in_progress"):        # claim leases (Component F): stamp the
+            sets.append("claimed_at = ?"); params.append(now_iso())  # lease clock on every (re-)claim
         params.append(id)
         self._exec(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params)
 
@@ -901,6 +918,47 @@ class Blackboard:
             rows = self._all(
                 "SELECT * FROM tasks WHERE status IN ('claimed','in_progress') ORDER BY created_at")
         return [self._with_spec(r) for r in rows]
+
+    def reap_expired_task_leases(self, ttl_minutes: int, *,
+                                 keep_shift_id: Optional[int] = None,
+                                 dry_run: bool = False) -> list[str]:
+        """Claim leases (Component F, docs/plans/2026-08-06-publication-broker-design.md):
+        a task orphaned OUTSIDE a shift (no shift_id) or by a shift that never restarts
+        stays 'claimed'/'in_progress' forever — `reap_orphaned_shifts` only rescues a
+        shift's own in-flight tasks when THAT shift's row is still 'running', which is
+        never true once the process holding it is simply gone. Reclaim any in-flight task
+        whose `claimed_at` is older than `ttl_minutes`, EXCLUDING `keep_shift_id` (the
+        currently running shift's own fresh claims are never premature — only a claim
+        belonging to a DIFFERENT or no shift is a dead-worker signal) -> 'open', with a
+        result note AND a task_evidence row (task-evidence-style — the same forensic
+        pattern `add_task_evidence` uses at close-out).
+
+        `dry_run` (round-2 integration fix, F11): return the ids that WOULD be reclaimed
+        without mutating anything — the caller's own seam for refusing a real reap when
+        it has no safe `keep_shift_id` to exclude (see `orchestrator.cmd_task`'s 'reap'
+        action, which is the only caller that can legitimately have none).
+
+        Returns the (would-be-)reclaimed task ids."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+        conds = ["status IN ('claimed','in_progress')", "claimed_at IS NOT NULL",
+                "claimed_at < ?"]
+        params: list = [cutoff]
+        if keep_shift_id is not None:
+            conds.append("(shift_id IS NULL OR shift_id != ?)")
+            params.append(keep_shift_id)
+        rows = self._all(
+            f"SELECT id FROM tasks WHERE {' AND '.join(conds)} ORDER BY claimed_at",
+            tuple(params))
+        ids = [r["id"] for r in rows]
+        if dry_run:
+            return ids
+        for tid in ids:
+            note = f"claim lease expired (>{ttl_minutes}m) — reclaimed by the sweep"
+            self.set_task_status(tid, "open", result=note)
+            self.add_task_evidence(tid, action="reap", stage="claim_lease", reply_head=note)
+        return ids
 
     def requeue_shift_tasks(self, shift_id: int) -> int:
         """Return a shift's in-flight (claimed/in_progress) tasks to 'open' so the next

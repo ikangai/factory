@@ -82,7 +82,7 @@ def _apply_setting(key: str, value) -> dict:
     """Validate + persist a whitelisted runtime override (Task 6.2). Raises ValueError (→400) on a
     bad key/value, sqlite3.OperationalError (→503) on a busy store. Takes effect at the NEXT shift
     (that's when cmd_run resolves knobs), so we say so honestly."""
-    from ..common import config
+    from ..common import config, harness_surface
     if key not in config.SETTINGS_SPEC:
         raise ValueError(f"unknown setting {key!r}")
     kind = config.SETTINGS_SPEC[key]
@@ -98,6 +98,15 @@ def _apply_setting(key: str, value) -> dict:
             raise ValueError("int setting must be an integer")
         if n < 0:
             raise ValueError("int setting must be >= 0")
+        # F15 (round-2 integration fix): n>=0 alone let e.g. claim_lease_minutes=0 through
+        # — a board click that makes every shift start reclaim EVERY in-flight task,
+        # including ones a parallel worker is still actively building. SANE_BOUNDS is the
+        # SAME per-knob range harness_surface.py already declares for the self-harness
+        # loop's own proposals; the dashboard is just another writer of the identical
+        # store.set_setting seam and must obey the identical bound.
+        bounds = harness_surface.SANE_BOUNDS.get(key)
+        if bounds is not None and not (bounds[0] <= n <= bounds[1]):
+            raise ValueError(f"{key} must be between {bounds[0]} and {bounds[1]} (got {n})")
         stored = str(n)
     with Blackboard() as store:
         store.init_db()

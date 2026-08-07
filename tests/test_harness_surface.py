@@ -50,11 +50,14 @@ def test_frozen_knob_keys_blocks_every_gate_verifier_knob():
         assert key in hs.FROZEN_KNOB_KEYS, key
 
 
-def test_frozen_knob_keys_is_exactly_the_five_gate_verifier_keys():
+def test_frozen_knob_keys_is_exactly_the_six_gate_verifier_keys():
+    # Grown by one (2026-08-06, publication-broker design Component E): red_proof is a
+    # gate/verifier knob exactly like the other five — born frozen, per this test's own
+    # purpose (list every CURRENT frozen gate key, not an eternal five-item invariant).
     assert hs.FROZEN_KNOB_KEYS == {
         "super_worker.require_test", "super_worker.acceptance_exec",
         "super_worker.scope_check", "super_worker.reviewer",
-        "super_worker.milestone_verify"}
+        "super_worker.milestone_verify", "super_worker.red_proof"}
 
 
 # -- editable_settings_keys ---------------------------------------------------------------

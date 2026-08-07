@@ -141,6 +141,14 @@ super_worker:
   # discarded by the gate (stage 'no_test'), so a merge proves the work, not just non-regression.
   # Test-only / docs-only / empty diffs pass. Enabled 2026-06-30 (operator).
   require_test: true
+  # Red-proof (Component E, docs/plans/2026-08-06-publication-broker-design.md): require_test
+  # only proves a test FILE exists — it is gameable by a test that trivially passes either way.
+  # When true (and require_test is also true — nothing to red-proof otherwise), each changed
+  # test file must FAIL against a fresh detached worktree at the pristine base (before the
+  # worker touched it) or the candidate discards (stage 'no_test', "test passes on the
+  # pristine base"). A gate/verifier knob — FROZEN in harness_surface.FROZEN_KNOB_KEYS, board-
+  # toggleable elsewhere (in SETTINGS_SPEC). Default false for bake-in.
+  red_proof: false
   # Task 3.1 (Phase 3): spec-named acceptance EXECUTION gate (objective done-condition, P2). When
   # true, the spec's OWN named acceptance test — a tests/<path>.py[::name] ref extracted from
   # spec.acceptance — is RUN in the candidate AFTER the suite gate: a RED run discards the
@@ -227,6 +235,14 @@ super_worker:
   # "retire one first" so the conductor can't sprawl the bench. generalist doesn't count against
   # it (it's the fail-open default and can't be retired).
   max_profiles: 12
+  # Claim leases (Component F, docs/plans/2026-08-06-publication-broker-design.md): a task
+  # orphaned OUTSIDE a shift (or by a shift that never restarts) otherwise stays 'claimed'/
+  # 'in_progress' forever — the dead-worker-holds-the-task-forever state. Every shift start
+  # (and `factory task reap` on demand) reclaims any in-flight task whose claim is older than
+  # this many minutes AND does not belong to the currently running shift. An EDITABLE capacity
+  # knob (in SETTINGS_SPEC, board-toggleable, SANE_BOUNDS 10-1440) — NOT frozen: tuning lease
+  # length is legitimate; it cannot disable the sweep itself (shift.py calls it unconditionally).
+  claim_lease_minutes: 240
   # Phase 8 (config-gated OFF): a cheap pre-merge REVIEW gate. When true, an isolated blind
   # claude_p (frontier tier — review is judgment) reads git diff base..branch + the task and
   # returns {approve, reason}; a reject discards the candidate (blocked-task lesson). Fail-open
@@ -319,6 +335,31 @@ autonomy:
   # to @human — the rail cannot fix factory infrastructure) + a factory learning, instead
   # of vanishing into a log print. New autonomous behavior → defaults OFF.
   failure_tasks: false
+  # Publication broker (docs/plans/2026-08-06-publication-broker-design.md): when true,
+  # an APPROVED graduation/promotion never pushes origin or calls `gh` from the factory
+  # side at all — it pushes the tip to a LOCAL bare spool repo and writes a publication
+  # envelope for an operator-run broker (`factory broker run-once|watch|status`, a
+  # LaunchAgent under the operator's OWN account) to re-verify against live git state and
+  # push for real with the operator's own credential. The factory holds no GitHub
+  # credential in this mode. A BRAKE-shaped structural knob, config.yaml-only like every
+  # other autonomy.* key: turning it on is a deliberate operator file edit (after removing
+  # GH_TOKEN from the factory user's secrets per the runbook), never a board click.
+  # Default OFF — false reproduces the pre-broker push path byte-for-byte.
+  publication_broker: false
+  # How long a prepared envelope stays valid before the broker refuses it outright
+  # (expired, never retried silently) — the operator's broker may be offline/asleep for a
+  # while; this bounds how stale an unexecuted approval is allowed to get. Config-only,
+  # frozen via the autonomy. prefix, like every other key in this block.
+  envelope_ttl_hours: 24
+  # The factory-side half of connecting the two broker components (round-2 integration
+  # fix — a fresh install otherwise wakes the operator's broker on the shared outbox
+  # while the factory writes envelopes into its OWN checkout's default spool, so the
+  # broker polls a directory the factory never touches). MUST match the SPOOL_ROOT
+  # 04-install-broker-agent.sh provisioned on the operator's side (it prints the exact
+  # value to paste here as its final step) — e.g. "/Users/Shared/factory-broker".
+  # Empty (default) preserves the pre-existing default resolution (dev/single-user mode,
+  # tests: <factory>/state/broker, or the FACTORY_BROKER_SPOOL env var).
+  broker_spool_root: ""
 
 # --- grade: the merge-quality gate (real behavioral grade vs the _smoke_grade stub) --------
 grade:
