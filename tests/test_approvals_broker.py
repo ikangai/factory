@@ -292,3 +292,46 @@ def test_ingest_broker_receipts_empty_when_no_receipts(tmp_path):
     with _store(tmp_path) as s:
         assert approvals.ingest_broker_receipts(
             s, receipts_dir=str(tmp_path / "nope"), done_dir=str(tmp_path / "done")) == []
+
+
+# F12 (round-2 integration fix): a prepare_fn that RAISES (e.g. an OSError writing the
+# envelope) must never strand the row 'executing' with no nonce — it must revert to
+# 'pending' (retryable), audited, exactly like any other failed push attempt.
+def test_execute_approval_graduation_prepare_fn_raising_reverts_to_pending(tmp_path, monkeypatch):
+    _fake_config(monkeypatch, publication_broker=True)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("graduation", {"range": "a..b", "n_commits": 2,
+                                                    "base_sha": "b0", "tip_sha": "t0",
+                                                    "synced_preview": []})
+        fn = _grad_fn([], preview={"action": "dry_run", "range": "a..b", "n_commits": 2,
+                                   "base_sha": "b0", "tip_sha": "t0", "synced": []})
+
+        def boom(**kw):
+            raise OSError("No space left on device")
+
+        res = approvals.execute_approval(s, aid, graduate_fn=fn, prepare_graduate_fn=boom)
+        assert res["ok"] is False
+        assert "No space left on device" in res["result"]["error"]
+        row = s.get_approval(aid)
+        assert row["status"] == "pending"           # NOT stranded 'executing'
+        assert "broker_nonce" not in row["payload"]  # nothing partial recorded
+        actions = s.recent_operator_actions()
+        assert actions[0]["action"] == "approve-failed"
+        assert "No space left on device" in actions[0]["detail"]
+
+
+def test_execute_approval_publication_prepare_fn_raising_reverts_to_pending(tmp_path, monkeypatch):
+    _fake_config(monkeypatch, publication_broker=True)
+    with _store(tmp_path) as s:
+        aid = s.add_pending_approval("publication", {"ahead": 5, "release": "main"})
+
+        def lag_fn(**kw):
+            return {"ahead": 5}
+
+        def boom(**kw):
+            raise RuntimeError("worktree add failed")
+
+        res = approvals.execute_approval(s, aid, lag_fn=lag_fn, prepare_promote_fn=boom)
+        assert res["ok"] is False
+        assert "worktree add failed" in res["result"]["error"]
+        assert s.get_approval(aid)["status"] == "pending"

@@ -42,6 +42,24 @@ from __future__ import annotations
 from ..common import config, filelock
 
 
+def _run_prepare(prepare_fn, **kwargs) -> dict:
+    """F12 (round-2 integration fix): a broker-mode prepare_fn (graduate_and_prepare_
+    envelope / promote_and_prepare_envelope) can raise — most concretely an OSError
+    writing the envelope file (a full disk, a permissions hiccup on the spool). Left
+    uncaught, that exception used to escape execute_approval entirely: the row was
+    already claimed 'executing' (atomically, at the very top of this function, before any
+    of this ever runs) with NO broker_nonce ever recorded, so it becomes unmatchable —
+    stranded until the orphan-approval TTL eventually ages it out to 'stale', with no
+    audit trail explaining why. Converting the exception into the SAME
+    `{'action': 'error', 'error': ...}` shape every other prepare-path failure already
+    produces routes it through the EXISTING tail (`_fail_attempt`: executing -> pending,
+    audited, retryable) instead of surfacing as a raw, unexplained 500."""
+    try:
+        return prepare_fn(**kwargs)
+    except Exception as e:  # noqa: BLE001 — a prepare-path failure must never strand the row
+        return {"action": "error", "error": str(e)[:300]}
+
+
 def _broker_spool_root() -> str | None:
     """The factory-side half of connecting the spool to the operator's broker
     (round-2 integration fix, F1): `autonomy.broker_spool_root` (config.yaml, empty/unset
@@ -85,12 +103,40 @@ def _graduation_payload(preview: dict) -> dict:
     }
 
 
-def propose_graduation(store, *, preview: dict) -> int:
+def _kind_has_executing(store, kind: str) -> bool:
+    """F13 (round-2 integration fix): True iff a `kind` approval is currently 'executing'.
+    `add_pending_approval`'s own supersede-first UPDATE only touches 'pending' rows — a
+    broker-armed approval can sit 'executing' for a long time (up to
+    autonomy.envelope_ttl_hours) waiting for the operator's broker, and a second proposal
+    filed in that window would coexist with it rather than superseding it. Approving that
+    second row would prepare a SECOND envelope contesting the SAME base the first one is
+    (or already has) pushed — at best redundant, at worst a guaranteed "base moved"
+    rejection the moment the first envelope lands. Callers refuse to propose while this
+    is true; the existing row's own resolution (a receipt, or the orphan-approval reaper)
+    is what clears the way for the next proposal."""
+    return any(r.get("kind") == kind for r in store.pending_approvals(status="executing"))
+
+
+def propose_graduation(store, *, preview: dict) -> Optional[int]:
     """File a graduation approval from a `graduate_and_push(dry_run=True)` preview. Thin:
     the payload carries only what the Queue-tab card renders. `add_pending_approval`
     handles the supersede-one-live-proposal-per-kind semantics, so a fresher preview
-    (e.g. next shift) automatically retires a stale one. Returns the new row's id."""
+    (e.g. next shift) automatically retires a stale one. Returns the new row's id, or
+    None if a graduation approval is already 'executing' (F13 — refuses instead of
+    coexisting; see `_kind_has_executing`)."""
+    if _kind_has_executing(store, "graduation"):
+        return None
     return store.add_pending_approval("graduation", _graduation_payload(preview))
+
+
+def propose_publication(store, *, ahead: int, release: str) -> Optional[int]:
+    """File a publication (base->release promotion) approval — the direct-
+    `store.add_pending_approval("publication", ...)` call sites' policy wrapper (F13,
+    mirroring `propose_graduation`'s own guard): refuses (returns None) while a
+    publication approval is already 'executing'."""
+    if _kind_has_executing(store, "publication"):
+        return None
+    return store.add_pending_approval("publication", {"ahead": ahead, "release": release})
 
 
 def _result_note(result: dict) -> str:
@@ -228,9 +274,10 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     return {"ok": False, "error": "preview-stale", "fresh": fresh}
                 if broker_on:
                     prepare_fn = prepare_graduate_fn or issue_sync.graduate_and_prepare_envelope
-                    result = prepare_fn(root=root, base=base, repo=repo, store=store,
-                                        test_fn=test_fn, approval_id=approval_id,
-                                        spool_root=_broker_spool_root())
+                    result = _run_prepare(prepare_fn, root=root, base=base, repo=repo,
+                                          store=store, test_fn=test_fn,
+                                          approval_id=approval_id,
+                                          spool_root=_broker_spool_root())
                 else:
                     result = graduate_fn(root=root, base=base, repo=repo, store=store,
                                          test_fn=test_fn)
@@ -268,9 +315,10 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     return {"ok": False, "error": "preview-stale", "fresh": fresh_payload}
                 if broker_on:
                     prepare_fn = prepare_promote_fn or issue_sync.promote_and_prepare_envelope
-                    result = prepare_fn(root=root, base=base, release=release,
-                                        repo=config.target_repo_slug(), approval_id=approval_id,
-                                        spool_root=_broker_spool_root())
+                    result = _run_prepare(prepare_fn, root=root, base=base, release=release,
+                                          repo=config.target_repo_slug(),
+                                          approval_id=approval_id,
+                                          spool_root=_broker_spool_root())
                 else:
                     promote_fn = promote_fn or issue_sync.promote_to_release
                     result = promote_fn(root=root, base=base, release=release)

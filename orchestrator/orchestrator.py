@@ -1392,6 +1392,13 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
             print("[graduate] unchanged since operator rejection — not re-proposing")
             return {"action": "skip", "reason": "rejected-unchanged"}
         approval_id = approvals.propose_graduation(store, preview=res)
+        if approval_id is None:
+            # F13 (round-2 integration fix): a graduation approval is already 'executing'
+            # (broker-armed, awaiting the operator's broker) — a second proposal would
+            # only ever contest the same base once the first one lands.
+            print("[graduate] a graduation approval is already executing — not "
+                  "re-proposing until it resolves")
+            return {"action": "skip", "reason": "already-executing"}
         print(f"graduation proposed → approval #{approval_id} pending (autonomy.push_approval)"
               f" — approve in the fleet GUI or set autonomy.push_approval: false")
         return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
@@ -1687,6 +1694,10 @@ def _graduate_after_shift(store: Blackboard, *, real: bool, shipped: int,
                     print("[run] graduation unchanged since operator rejection — not re-proposing")
                     return {"action": "skip", "reason": "rejected-unchanged"}
                 approval_id = approvals.propose_graduation(store, preview=preview)
+                if approval_id is None:            # F13: already 'executing' — don't coexist
+                    print("[run] a graduation approval is already executing — not "
+                          "re-proposing until it resolves")
+                    return {"action": "skip", "reason": "already-executing"}
                 print(f"[run] graduation proposed → approval #{approval_id} pending "
                       f"(autonomy.push_approval)")
                 return {"action": "proposed", "approval_id": approval_id, "n_commits": n}
@@ -1759,7 +1770,7 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
     not be able to kill the loop it guards — but never silently either: a persistent skip
     would recreate the blindspot, so the except prints its cause."""
     try:
-        from ..reporting import issue_sync
+        from ..reporting import approvals, issue_sync
         lag_fn = lag_fn or issue_sync.graduation_lag
         file_fn = file_fn or _maybe_file_graduation_failure
         root = config.get_adapter().entry()[0]
@@ -1808,8 +1819,10 @@ def _warn_graduation_lag(store: Blackboard, *, threshold: int = _GRAD_LAG_ALARM,
                     if (_is_human_rejection(rej) and rp.get("ahead") == p
                             and rp.get("release") == release):
                         print("[run] publication unchanged since operator rejection — not re-proposing")
-                    else:
-                        store.add_pending_approval("publication", {"ahead": p, "release": release})
+                    elif approvals.propose_publication(store, ahead=p, release=release) is None:
+                        # F13 (round-2 integration fix): already 'executing' — don't coexist
+                        print("[run] a publication approval is already executing — not "
+                              "re-proposing until it resolves")
         return {**lag, "publication": pub}
     except Exception as e:  # noqa: BLE001 — the alarm must never crash the loop
         print(f"[run] lag alarm skipped (non-fatal): {e}")
