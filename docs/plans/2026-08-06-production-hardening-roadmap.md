@@ -96,9 +96,14 @@ does not yet split interior authority.
 **SHIPPED** (feat/publication-broker, per `docs/plans/2026-08-06-publication-broker-
 design.md`): envelope + spool + broker core, factory-side broker mode + issue-preview
 consent-compare, red-proof tests, claim leases, and the deploy kit + runbook —
-`docs/runbooks/publication-broker.md`.
-
-The reviewer's P0-3 finished, plus the two cheap high-value items.
+`docs/runbooks/publication-broker.md`. **Hardened 2026-08-07** after a probe-executed
+security review found the first cut only verified an envelope's internal consistency +
+destination liveness, never that a human had actually approved the *content* — see the
+design doc's amended authority line: an operator-owned pin store now authorizes content
+(default `require_pin: true`), an operator-owned append-only ledger is the real
+replay-guard authority (not the factory-writable receipt copy), `watch`/the LaunchAgent
+require an explicit `--unattended` opt-in and never bypass the pin gate, and `gh` issue
+actions are field-validated before ever reaching argv.
 
 - **Operator-side broker.** The factory user loses its push credential. Graduation/publish
   prepares an **approval envelope** — action, repository, base sha, tip/candidate sha,
@@ -109,6 +114,9 @@ The reviewer's P0-3 finished, plus the two cheap high-value items.
   invalidated, never retried silently. Extends the existing sha-binding
   (reporting/approvals.py) to promotion and issue closure; issue-closing keywords get a
   preview in the envelope (generated commit text must not close issues sight-unseen).
+  Destination liveness alone is NOT content authenticity — the operator's own pin store
+  (`~/.factory-broker/pins`) is the gate that actually binds a publication to a reviewed
+  decision; see the design doc's amended authority line.
 - **Red-proof tests.** In the code round, the shipped test must FAIL against the pristine
   base and PASS against the candidate (where the harness can run it both ways); a test
   that passes on base is flagged `stage=no_test` evidence, not merged silently.

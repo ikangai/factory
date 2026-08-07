@@ -168,9 +168,14 @@ def read_receipt(receipts_dir: str, nonce: str) -> Optional[dict]:
 
 
 def has_receipt(receipts_dir: str, nonce: str) -> bool:
-    """True iff `nonce` already has a receipt — a SPENT nonce. The broker refuses to
-    execute an envelope whose nonce already has one (at-least-once prep, exactly-once
-    intent; see run_once's own idempotency note for the residual gh-side risk)."""
+    """True iff `nonce` already has a receipt IN THIS (factory-writable, shared) SPOOL
+    DIRECTORY. INFORMATIONAL ONLY (security fix round, 2026-08-07) — `receipts_dir` lives
+    in the same factory-writable tree as the outbox, so this is NOT the replay-guard
+    authority: `orchestrator.broker.verify_envelope` consults the operator-owned spent
+    ledger (`orchestrator.broker.is_spent`, `~/.factory-broker/spent`) instead, which the
+    factory user cannot write to. This function is still useful for the factory-side
+    ingestion path (`reporting.approvals.ingest_broker_receipts`), which only needs A
+    record to resolve its own pending_approvals row — not a security-critical read."""
     return os.path.isfile(os.path.join(receipts_dir, f"{nonce}.receipt.json"))
 
 

@@ -94,10 +94,58 @@ def broker_bare_repo(root: Optional[str] = None) -> str:
 
 
 def broker_allowlist_path(path: Optional[str] = None) -> str:
-    """The operator's own allowlist (`~/.factory-broker.yaml`, 600) — the sole authority
-    on what the broker may push where (the envelope only ever REQUESTS). Never under
-    FACTORY_ROOT: it must survive/differ independent of the factory checkout."""
+    """The operator's own allowlist (`~/.factory-broker.yaml`, 600) — authorizes the
+    DESTINATION (repo_slug/base_branch -> remote_url/bare_path). Never under FACTORY_ROOT:
+    it must survive/differ independent of the factory checkout."""
     if path:
         return path
     return os.environ.get("FACTORY_BROKER_ALLOWLIST") or os.path.expanduser(
         "~/.factory-broker.yaml")
+
+
+# -- operator-owned authority store (security fix round, 2026-08-07): the pin store and
+# spent-nonce ledger are the ACTUAL content-authenticity + replay authority — they must
+# live somewhere the factory user (attacker-controlled under the guest-house threat model)
+# cannot write, unlike the shared spool (outbox/receipts, group-writable so the factory
+# CAN write there — that's the whole point of a one-way handoff). `~/.factory-broker/` is
+# a NEW directory, deliberately separate from the `~/.factory-broker.yaml` allowlist FILE
+# (no path collision), 700, operator home only, never group-shared.
+def broker_operator_dir(path: Optional[str] = None) -> str:
+    if path:
+        return path
+    return os.environ.get("FACTORY_BROKER_OPERATOR_DIR") or os.path.expanduser(
+        "~/.factory-broker")
+
+
+def broker_pins_path(path: Optional[str] = None) -> str:
+    """Operator-approved CONTENT (tip shas) — the authenticity gate `require_pin`
+    consults. Never derived from anything the factory writes."""
+    if path:
+        return path
+    override = os.environ.get("FACTORY_BROKER_PINS")
+    if override:
+        return override
+    return os.path.join(broker_operator_dir(), "pins")
+
+
+def broker_spent_path(path: Optional[str] = None) -> str:
+    """Operator-owned append-only spent-nonce ledger — THE replay-guard authority
+    (`verify_envelope` consults this, never the factory-writable spool receipt copy)."""
+    if path:
+        return path
+    override = os.environ.get("FACTORY_BROKER_SPENT")
+    if override:
+        return override
+    return os.path.join(broker_operator_dir(), "spent")
+
+
+def broker_processed_dir(path: Optional[str] = None) -> str:
+    """Where `run_once` archives an envelope+hash pair once it has a verdict — operator-
+    owned (unlike the old outbox/done, which sat inside the factory-writable spool and so
+    was itself re-droppable by the very actor the replay guard exists to stop)."""
+    if path:
+        return path
+    override = os.environ.get("FACTORY_BROKER_PROCESSED")
+    if override:
+        return override
+    return os.path.join(broker_operator_dir(), "processed")

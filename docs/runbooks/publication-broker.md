@@ -9,15 +9,40 @@ sign-off sentence in code:
 
 ## The authority line
 
-> The factory PREPARES publications; it never executes them when the broker is armed. An
-> envelope is a REQUEST — the broker's own operator-side allowlist, never any envelope
-> field, is the authority on what may be pushed where. The broker re-verifies every sha
-> against live state immediately before acting; mismatch, expiry, or a reused nonce
-> invalidates the envelope permanently. Issue actions execute only from the approved
-> preview. The factory user holds no GitHub credential when armed.
+**Corrected 2026-08-07** after a probe-executed security review: the original wording
+(destination-match + live-state re-verification) proved internal consistency and a live,
+reachable, fast-forward destination — it did NOT prove a human had approved the
+*content*. A compromised factory could point `tip_sha` at any commit that happened to be
+a fast-forward descendant of the real base and pass every check. The corrected model,
+what the code actually enforces today:
 
-Everything below exists to make that sentence true, and to let you verify it's true
-rather than take it on faith.
+> The factory PREPARES publications; it never executes them when the broker is armed. An
+> envelope is a REQUEST. The operator's own allowlist (`~/.factory-broker.yaml`)
+> authorizes the **destination**. The operator's own pin store
+> (`~/.factory-broker/pins`) authorizes the **content** — a `tip_sha` must be a sha the
+> operator explicitly reviewed and approved, never inferred from the envelope alone. The
+> operator's own append-only ledger (`~/.factory-broker/spent`) is the **replay-guard**
+> authority. The broker re-verifies every field against LIVE state immediately before
+> acting; mismatch, expiry, or a reused nonce invalidates the envelope permanently. Issue
+> actions execute only from the approved preview, field-validated before ever reaching
+> `gh`'s argv. The factory user holds no GitHub push/issue credential when armed (it
+> keeps a read-only `git fetch` for the base branch — see "Credential model" below).
+
+**What this does NOT defend against**, read before you rely on any of it:
+
+- An allowlist entry with `require_pin: false` disables the content-authenticity gate for
+  that entry — you get destination + liveness checks only, exactly what the *original*
+  (now-corrected) design assumed was already the whole story. Never set this without
+  understanding you're opting back INTO the original gap.
+- Pinning a sha without actually reading the diff you're shown gives you nothing — the
+  pin store records that you *acted*, not that you *reviewed*. Read the operator-derived
+  commits/diffstat every single time.
+- `watch`/the LaunchAgent (`--unattended`) never bypasses `require_pin` — an unpinned tip
+  is left `pending`, never auto-approved — but a `require_pin: false` entry publishes
+  unattended by design by the same reasoning as the first bullet.
+
+Everything below exists to make the corrected sentence true, and to let you verify it's
+true rather than take it on faith.
 
 ## Topology
 
@@ -34,46 +59,59 @@ rather than take it on faith.
   │                                  + envelope.json.sha256        (bare, group-shared) │
   │                                          │                                          │
   └──────────────────────────────────────────┼──────────────────────────────────────────┘
-                                              │  spool: outbox/ (factory writes,
+                                              │  SHARED spool: outbox/ (factory writes,
                                               │  operator/broker reads via 'staff' group)
                                               ▼
   ┌──────────────────────────── operator account (broker) ─────────────────────────────┐
   │                                                                                     │
-  │  factory broker run-once / watch  (LaunchAgent, WatchPaths on outbox)               │
-  │      1. content hash matches (tamper/truncation guard)                             │
-  │      2. schema_version known, not expired, nonce has no receipt yet                │
-  │      3. ~/.factory-broker.yaml allowlist has a matching repo_slug/base_branch entry │
-  │         (no entry ⇒ reject — THIS is the authority, not the envelope)              │
-  │      4. git ls-remote <remote_url> refs/heads/<base_branch> == envelope.base_sha    │
-  │         (has anyone moved the branch since approval? drill 3's exact check)        │
-  │      5. git merge-base --is-ancestor base_sha tip_sha  (fast-forward ONLY)          │
-  │                                          │                                          │
-  │                          ok ─────────────┼───────────── any failure                 │
-  │                           │                                    │                    │
-  │                           ▼                                    ▼                    │
-  │   git push <remote_url> tip_sha:refs/heads/<base_branch>   receipt: rejected/expired │
-  │   gh issue comment/close (from the envelope's own preview                           │
-  │   text, never re-derived) — the OPERATOR's own credential                           │
-  │                           │                                                         │
-  │                           ▼                                                         │
-  │                  receipt: pushed + receipt_sha                                      │
-  │                                          │                                          │
-  └──────────────────────────────────────────┼──────────────────────────────────────────┘
-                                              │  spool: receipts/ (broker writes,
-                                              │  factory reads)
+  │  factory broker run-once / watch  (LaunchAgent: run-once --unattended, WatchPaths)  │
+  │      1. a SINGLE verified nonce identity (envelope content == the filename)         │
+  │      2. content hash matches; schema known; nonce not in ~/.factory-broker/spent    │
+  │         (operator-owned ledger — the SHARED receipts/ copy is informational only)   │
+  │      3. not expired                                                                 │
+  │      4. ~/.factory-broker.yaml allowlist has a matching repo_slug/base_branch entry  │
+  │         — DESTINATION authority (bare_path/remote_url come from HERE, never the      │
+  │         envelope) — no entry ⇒ reject                                                │
+  │      5. git ls-remote <remote_url> refs/heads/<base_branch> == envelope.base_sha     │
+  │         (has anyone moved the branch since approval? drill 3's exact check)          │
+  │      6. git merge-base --is-ancestor base_sha tip_sha  (fast-forward ONLY)           │
+  │      7. require_pin (default true) ⇒ tip_sha in ~/.factory-broker/pins — CONTENT     │
+  │         authority. Unpinned: unattended ⇒ 'pending' (left for later, not spent);     │
+  │         interactive ⇒ show the operator-DERIVED diff (read from the bare repo's OWN  │
+  │         objects, never the envelope's claims) and prompt                             │
+  │                                          │                                           │
+  │           confirmed/pinned ──────────────┼───────────── declined / any other failure │
+  │                           │                                    │                     │
+  │                           ▼                                    ▼                     │
+  │   git push <remote_url> tip_sha:refs/heads/<base_branch>   mark ~/.factory-broker/    │
+  │   gh issue comment/close (field-validated, capped,          spent + receipt:         │
+  │   from the envelope's own preview text — the                rejected/expired         │
+  │   OPERATOR's own credential)                                                         │
+  │                           │                                                          │
+  │                           ▼                                                          │
+  │        mark ~/.factory-broker/spent + receipt: pushed + receipt_sha                  │
+  │                                          │                                           │
+  └──────────────────────────────────────────┼───────────────────────────────────────────┘
+                                              │  SHARED spool: receipts/ (broker writes an
+                                              │  INFORMATIONAL copy; factory reads for
+                                              │  ingestion only — NOT the spend authority)
                                               ▼
                         factory broker-receipts  (shift start + on demand)
                         resolves the pending_approvals row: approved / rejected
 ```
 
 Dev/single-user mode: the same code paths run under ONE account (operator == factory
-user) — the spool defaults to `<factory>/state/broker/{outbox,receipts}` and a local bare
-at `<factory>/state/broker/clive-publish.git` instead of `/Users/Shared/factory-broker/`;
-override either with `FACTORY_BROKER_SPOOL`/`FACTORY_BROKER_BARE`/
-`FACTORY_BROKER_ALLOWLIST` (see `common/paths.py`). Useful for development and for the
-hermetic test suite (`tests/test_broker.py`, `tests/test_envelope.py`) — never a
-substitute for the real cross-account split in production; a single-user deployment gets
-NO credential separation at all (the same account holds both halves).
+user) — the shared spool defaults to `<factory>/state/broker/{outbox,receipts}` and a
+local bare at `<factory>/state/broker/clive-publish.git`; the operator-owned authority
+dir defaults to `~/.factory-broker/` either way (it's never inside the shared spool).
+Override any of these with `FACTORY_BROKER_SPOOL`/`FACTORY_BROKER_BARE`/
+`FACTORY_BROKER_ALLOWLIST`/`FACTORY_BROKER_OPERATOR_DIR`/`FACTORY_BROKER_PINS`/
+`FACTORY_BROKER_SPENT`/`FACTORY_BROKER_PROCESSED` (see `common/paths.py`). Useful for
+development and for the hermetic test suite (`tests/test_broker.py`,
+`tests/test_envelope.py`) — never a substitute for the real cross-account split in
+production; a single-user deployment gets NO credential separation at all AND no real
+content-authenticity boundary either (the same account both writes envelopes and pins
+them) — it only exercises the mechanism, not the security property.
 
 ## Prerequisites
 
@@ -95,26 +133,33 @@ bash deploy/user-factory/04-install-broker-agent.sh --dry-run  # preview only, n
 
 This creates:
 
-- `/Users/Shared/factory-broker/{outbox,receipts}` (each with a `done/` subdir) — group-
-  shared via the `staff` group every regular macOS account belongs to by default (the same
-  mechanism `01-create-user.sh` already uses for the code-handoff bare repo). This is
-  **not** a literal `chown factory:staff` — that needs root, which this script deliberately
-  never asks for; `install -d -m 2775 -g staff` (setgid, group-writable) plus
+- `/Users/Shared/factory-broker/{outbox,receipts}` (each with a `done/` subdir) — SHARED,
+  group-writable via the `staff` group every regular macOS account belongs to by default
+  (the same mechanism `01-create-user.sh` already uses for the code-handoff bare repo).
+  This is **not** a literal `chown factory:staff` — that needs root, which this script
+  deliberately never asks for; `install -d -m 2775 -g staff` (setgid, group-writable) plus
   `git init --bare --shared=group` on the publish repo achieve the same cross-user access
-  without it.
+  without it. The factory user CAN write here — that's the design (a one-way handoff) —
+  which is exactly why nothing security-critical is decided by reading this tree; see the
+  next bullet.
 - `/Users/Shared/factory-broker/clive-publish.git` — the local bare repo the factory
   pushes candidate tips to and the broker pushes FROM to the real remote.
+- **`~/.factory-broker/` (700, your home, operator-only — the factory user CANNOT write
+  here)** — `pins` (content approvals) and `spent` (the replay-guard ledger). This is the
+  actual security boundary the earlier bullets are not.
 - `~/.factory-broker.yaml` (600, your home — **only written if absent**, never overwritten
   on a rerun) — pre-filled with `base_branch`/`bare_path` derived from the factory
   checkout's `config.yaml` where possible; `remote_url` is always left as `CHANGE-ME` for
-  you to fill in by hand (this script must never guess a push target).
+  you to fill in by hand (this script must never guess a push target); `require_pin: true`
+  is written explicitly so you see the knob and its default.
 - `~/Library/LaunchAgents/com.factory.broker.plist`, bootstrapped into `gui/$UID`
   (idempotent — bootout-then-bootstrap on a rerun, mirroring `03-install-daemons.sh`'s own
-  loop). `WatchPaths` on the outbox fires `broker run-once` per envelope;
-  `StartInterval=300` is a belt-and-suspenders poll.
+  loop), running `broker run-once --unattended`. `WatchPaths` on the outbox fires it per
+  envelope; `StartInterval=300` is a belt-and-suspenders poll. `--unattended` never
+  bypasses `require_pin` — see "The authority line" above.
 
 Re-run any time to pick up a new plist; it never touches an already-written
-`~/.factory-broker.yaml`.
+`~/.factory-broker.yaml` or an existing `~/.factory-broker/` dir.
 
 ## Arming
 
@@ -140,6 +185,8 @@ step 2 immediately):
        base_branch: chore/extract-factory
        bare_path: /Users/Shared/factory-broker/clive-publish.git
        allow_issue_ops: true
+       require_pin: true    # CONTENT authorization — see "what this does not defend
+                             # against" before you ever set this false
      # a SECOND entry, same shape, for target.release_branch (promotion envelopes,
      # action=promote) if you also approve publications from the queue
    ```
@@ -156,82 +203,154 @@ step 2 immediately):
    Verify: `sudo -u factory -i git -C ~/fab/clive push origin HEAD:some-throwaway-branch`
    must now FAIL (no credential) — that failure is the proof the boundary is real, not
    a bug to fix.
+   **Known gap, tracked for a follow-up fix (do not work around it yourself):** the armed
+   prepare path (`graduate_and_prepare_envelope`) reads `base_sha` from the factory's
+   LOCAL `origin/<base>` ref rather than fetching fresh — deliberately, so it needs no
+   credential at all right now, but it also means that ref can go stale across repeated
+   publications with no credential left to refresh it, and a subsequent envelope may pin
+   a `base_sha` the broker then rejects as "base moved" even though nothing hostile
+   happened. If you see repeated "base moved" rejections with no explanation, this is the
+   likely cause — check the design doc for the current status of that fix before
+   re-provisioning any credential as a workaround.
 4. Set `autonomy.publication_broker: true` in the factory's `config.yaml` (on the branch
    the factory actually runs — see `apply-config-overlay.py`/the deploy branch convention
-   if you run the guest-house deployment).
-5. Run the drill-3 procedure below before trusting any of this unattended.
+   if you run the guest-house deployment). Also confirm `autonomy.push_approval: true` —
+   the broker only intercepts the path that already goes through an operator Approve
+   click; verify by hand (as of this writing the code does not yet refuse the
+   contradictory combination for you) that a graduation still files a Queue-tab approval
+   rather than pushing directly.
+5. Content approval is a SEPARATE, ongoing act, not a one-time setup step: either run
+   `factory broker run-once` BY HAND (no `--unattended`) and review+confirm each
+   publication as it comes, or pre-approve specific tips with `factory broker pin <sha>`.
+   The LaunchAgent runs unattended and will never do this for you.
+6. Run the drill-3 procedure below before trusting any of this unattended.
 
 ## Verification checklist
 
 - [ ] `bin/factory broker status` runs cleanly from your own account with no errors.
 - [ ] `~/.factory-broker.yaml` is `600`, owned by you, and has no `CHANGE-ME` left in an
-      entry you intend to use.
+      entry you intend to use; `require_pin` is `true` unless you have a specific,
+      documented reason to disable it for that entry.
+- [ ] `~/.factory-broker/` exists, is `700`, owned by you — `ls -la ~/.factory-broker`
+      from the FACTORY user's account must fail (Permission denied).
 - [ ] `launchctl print gui/$(id -u)/com.factory.broker` shows the agent loaded, pointed at
-      your real checkout path, `WatchPaths` on the real outbox dir.
+      your real checkout path, `WatchPaths` on the real outbox dir, `--unattended` in
+      the arguments.
 - [ ] The factory user's `GH_TOKEN` is gone from `~factory/.factory-secrets/env` and
-      `gh auth status` (as factory) reports logged out.
-- [ ] A test push from the factory user's account to the real remote fails for lack of
-      credential (the step 3 verification above).
-- [ ] `autonomy.publication_broker: true` is set on the branch the factory actually runs.
+      `gh auth status` (as factory) reports logged out; a test push (see step 3 above)
+      fails for lack of credential.
+- [ ] `autonomy.publication_broker: true` AND `autonomy.push_approval: true` are BOTH set
+      on the branch the factory actually runs — verified by hand (see step 4's note: the
+      code does not yet refuse the contradictory combination for you).
 - [ ] The drill-3 procedure (below) has been run at least once, for real, on this
       deployment.
+- [ ] You have personally run `factory broker run-once` interactively at least once and
+      confirmed the diff shown matches what you expected — not just that the flow works.
+
+## Content approval: pinning
+
+`factory broker pin <tip_sha> [--note "why"]` records that YOU reviewed and approve
+exactly that commit, in `~/.factory-broker/pins` (700, operator-only). `factory broker
+unpin <tip_sha>` removes it. `factory broker pins` lists everything currently pinned.
+
+You will normally never need to pin ahead of time — running `factory broker run-once` by
+hand (the default, no `--unattended`) shows you the operator-*derived* diff (read
+straight from the bare repo's own git objects: `git log --oneline base..tip`,
+`git diff --stat base..tip`, changed paths — never the envelope's own claimed
+`range`/`n_commits`, which are labeled as unverified in the prompt) and pins for you on
+confirmation. Pre-pinning is for a specific, reviewed tip you already know is coming
+(e.g. from a `factory broker status`/Queue-tab preview) and want the unattended
+LaunchAgent to be able to publish without you present.
+
+**Pinning a sha you have not actually reviewed defeats the entire point** — the pin store
+records an action, not a verified decision. Read the diff.
 
 ## Receipt semantics
 
-A receipt (`<nonce>.receipt.json` in `receipts/`, archived to `receipts/done/` once
-ingested) is the broker's **permanent, one-shot** verdict on one envelope:
+A receipt (`<nonce>.receipt.json` in `receipts/`, archived out of the shared spool into
+`~/.factory-broker/processed/` — operator-owned, NOT the old factory-writable
+`outbox/done/` — once finalized) is the broker's **permanent, one-shot** verdict on one
+envelope:
 
 - `pushed` — the real push succeeded; `receipt_sha` is the pushed tip. Issue actions from
-  the envelope's own preview ran too (best-effort per action — one `gh` failure doesn't
-  undo the push or block the others; failures show up in the broker's own log, not the
-  receipt).
+  the envelope's own preview ran too (best-effort per action, each field-validated before
+  ever reaching `gh` — one `gh` failure doesn't undo the push or block the others;
+  failures show up in the broker's own log, not the receipt).
 - `rejected` — any verification check failed (bad hash, no allowlist entry, base moved,
-  not-a-fast-forward, a real push that itself failed) — `detail` names the reason.
+  not-a-fast-forward, a real push that itself failed, or an interactive decline) —
+  `detail` names the reason.
 - `expired` — the envelope outlived `autonomy.envelope_ttl_hours` (default 24) before the
   broker ever got to it (e.g. your machine was asleep). Distinct status from `rejected` so
   it's easy to tell "the operator wasn't around in time" from "something was wrong".
+- **`pending`** (not a receipt status — no receipt is written for it) — the envelope
+  verified clean on destination/liveness but its `tip_sha` isn't pinned and the run was
+  `--unattended`. Left untouched in `outbox/`, NOT marked spent: a later
+  `factory broker pin <sha>` followed by any later run (interactive or unattended) can
+  still complete it. This is the ONLY outcome that doesn't finalize — everything else is
+  permanent.
 
-**A nonce with a receipt is spent forever** — `orchestrator/broker.py:verify_envelope`
-refuses to re-execute it even if somehow re-presented (the replayed-nonce drill). The
-factory-side approval that produced the envelope stays `pending_approvals.status =
-'executing'` until a receipt shows up; `reporting.approvals.ingest_broker_receipts`
-resolves it (`approved` on `pushed`, `rejected` otherwise) — called automatically at every
-shift start and on demand via `factory broker-receipts`. `orchestrator/shift.py` also
-widens the orphan-approval reaper's grace period while the broker is armed (an envelope
-legitimately outlives the default 1h "probably crashed" floor while your broker is simply
-offline).
+**A nonce that reaches ANY terminal outcome is spent forever**, authoritatively via
+`~/.factory-broker/spent` (operator-owned, append-only) — `orchestrator/broker.py:
+verify_envelope` refuses to re-execute it even if somehow re-presented (the replayed-nonce
+drill), and deleting the informational `receipts/` copy does NOT un-spend it (that copy
+lives in the same factory-writable tree as the outbox — it is not the authority; see "The
+authority line"). The factory-side approval that produced the envelope stays
+`pending_approvals.status = 'executing'` until a receipt shows up; `reporting.approvals.
+ingest_broker_receipts` resolves it (`approved` on `pushed`, `rejected` otherwise) —
+called automatically at every shift start and on demand via `factory broker-receipts`.
+`orchestrator/shift.py` also widens the orphan-approval reaper's grace period while the
+broker is armed (an envelope legitimately outlives the default 1h "probably crashed"
+floor while your broker is simply offline — including while it sits `pending`,
+unpinned).
 
-A **rejected/expired envelope is never retried silently.** The operator's Approve click
-made local progress (the tip is safely on `factory/auto` and the local bare repo either
-way) — re-approving the same graduation from the Queue tab prepares a fresh envelope with
-a fresh nonce and fresh shas.
+A **terminal rejected/expired envelope is never retried silently.** The operator's
+Approve click made local progress (the tip is safely on `factory/auto` and the local bare
+repo either way) — re-approving the same graduation from the Queue tab prepares a fresh
+envelope with a fresh nonce and fresh shas. A `pending` (unpinned, unattended) envelope is
+different: it is NOT dead — pin the tip and rerun.
 
 ## Drill-3 procedure
 
 Drill 3 (`docs/plans/2026-08-06-production-hardening-roadmap.md` Part 5): *change the
-branch/candidate after approval — execution rejected.* The code-level proof lives in `tests/test_broker.py`
-(`test_verify_rejects_base_moved_since_approval`, `test_verify_rejects_tampered_envelope`,
-`test_verify_rejects_a_spent_nonce_replay`, `test_verify_rejects_an_expired_envelope`, and
-`test_verify_happy_path`) — real local git repos, no mocks, exercised on every test run. To rehearse
-it live, against your own real deployment:
+branch/candidate after approval — execution rejected.* The code-level proof lives in
+`tests/test_broker.py` (`test_verify_rejects_base_moved_since_approval`,
+`test_verify_rejects_tampered_envelope`, `test_verify_rejects_a_spent_nonce_replay`,
+`test_deleting_the_spool_receipt_does_not_unspend_the_nonce`,
+`test_verify_rejects_when_filename_nonce_differs_from_content_nonce`,
+`test_verify_rejects_an_expired_envelope`,
+`test_critical1_unpinned_malicious_tip_never_reaches_the_real_remote`, and
+`test_verify_happy_path_with_a_pin_is_ok`) — real local git repos, no mocks, exercised on
+every test run. To rehearse it live, against your own real deployment (`--unattended`
+throughout, since that's the production posture — do each step, then move to the next
+WITHOUT pinning unless the step says to):
 
 1. **Base moved.** Approve a graduation (broker armed). BEFORE running
-   `factory broker run-once`, push any other commit directly to the real remote's base
-   branch (from anywhere else with access). Run `factory broker run-once` — expect a
-   `rejected` receipt citing "base moved"; confirm the intruding commit is untouched on
-   the remote (nothing force-pushed over it).
+   `factory broker run-once --unattended`, push any other commit directly to the real
+   remote's base branch (from anywhere else with access). Run it — expect a `rejected`
+   receipt citing "base moved"; confirm the intruding commit is untouched on the remote
+   (nothing force-pushed over it).
 2. **Tamper.** Find the pending envelope under `outbox/`, hand-edit a field in the `.json`
-   (leave the `.sha256` sidecar alone). Run `run-once` — expect `rejected`, "content hash
-   mismatch".
-3. **Replayed nonce.** After a successful `pushed` receipt, manually re-drop the SAME
-   envelope+hash files back into `outbox/` (they were archived to `outbox/done/` — copy
-   them back). Run `run-once` — expect `rejected`, "already has a receipt".
-4. **Expiry.** Approve a graduation, then don't run the broker until
+   (leave the `.sha256` sidecar alone). Run `run-once --unattended` — expect `rejected`,
+   "content hash mismatch".
+3. **Unpinned (the content-authenticity check, the round-2 addition).** Approve a fresh
+   graduation, do NOT pin it. Run `run-once --unattended` — expect status `pending` (no
+   receipt written), the envelope still sitting in `outbox/`, and the real remote
+   UNCHANGED. This is the check CRITICAL-1 exists for.
+4. **Replayed nonce.** Pin the tip from step 3 (`factory broker pin <sha>`), run
+   `run-once --unattended` again — expect `pushed`. Now manually re-drop the SAME
+   envelope+hash files back into `outbox/` (they were archived to
+   `~/.factory-broker/processed/` — copy them back). Run `run-once --unattended` again —
+   expect `rejected`, "already spent". Then delete the receipt copy in `receipts/` and
+   run once more — still `rejected`, "already spent" (the ledger, not the receipt file,
+   is authority).
+5. **Expiry.** Approve a graduation, then don't run the broker until
    `autonomy.envelope_ttl_hours` has passed (or temporarily set it very low for the
-   drill). Run `run-once` — expect an `expired` receipt.
-5. **Happy path.** Approve a graduation with nothing else changed; run `run-once`; confirm
-   `pushed`, the real remote now has the new tip, and `factory broker-receipts` resolves
-   the approval to `approved`.
+   drill). Run `run-once --unattended` — expect an `expired` receipt.
+6. **Happy path.** Approve a graduation with nothing else changed; run
+   `factory broker run-once` BY HAND (interactive, no `--unattended`); read the
+   operator-derived diff it shows you; confirm; verify `pushed`, the real remote now has
+   the new tip, the tip now appears in `factory broker pins`, and
+   `factory broker-receipts` resolves the approval to `approved`.
 
 Record the outcome of each step (pass/fail + evidence) in this file's revision history or
 your own ops log before marking the drill complete for a given deployment.
@@ -241,15 +360,18 @@ your own ops log before marking the drill complete for a given deployment.
 ```bash
 launchctl bootout gui/$(id -u)/com.factory.broker
 rm -f ~/Library/LaunchAgents/com.factory.broker.plist
-# leave the spool + bare repo in place unless you're fully decommissioning — the
-# outbox/receipts history is useful forensics. To remove everything:
+# leave the spool + bare repo + operator authority dir in place unless you're fully
+# decommissioning — the outbox/receipts/pins/spent history is useful forensics. To
+# remove everything:
 rm -rf /Users/Shared/factory-broker
 rm -f ~/.factory-broker.yaml
+rm -rf ~/.factory-broker
 ```
 
 Disarming without a full teardown: set `autonomy.publication_broker: false` — the factory
 returns to pushing directly (re-provision `GH_TOKEN` on the factory user first, or nothing
-will publish at all).
+will publish at all). Existing pins/spent history is harmless to leave in place — it's
+simply unused while disarmed.
 
 ## Troubleshooting
 
@@ -261,6 +383,18 @@ will publish at all).
   `~/.factory-broker.yaml` must match EXACTLY what `config.target_repo_slug()` /
   `target.base_branch` resolve to on the factory side — a trailing slash or a stale
   branch name is the usual cause.
+- **A publication sits `pending` forever under the LaunchAgent.** This is EXPECTED, not a
+  bug — `--unattended` never pins. Review it (`factory broker status`, then compare
+  against what you approved on the Queue tab) and either pin it
+  (`factory broker pin <sha>`) or run `factory broker run-once` by hand to review+confirm
+  interactively.
+- **`factory broker pin` fails with "not a sha".** The value must look like a git sha
+  (7-40 hex chars) — copy it from `factory broker status`'s pending-envelope listing or
+  the Queue tab, not from memory.
+- **A test push from the factory account still works after "removing" `GH_TOKEN`.**
+  `gh auth logout` only clears `gh`'s own credential helper; if the factory checkout also
+  has an SSH key with push access, or a cached credential in `~/.git-credentials` /
+  macOS Keychain, those survive independently — check ALL of them, not just `GH_TOKEN`.
 - **The LaunchAgent won't load / `launchctl bootstrap` errors.** GUI LaunchAgents require
   an actual logged-in GUI session for the target UID — `launchctl bootstrap gui/$UID`
   from a headless SSH session with no Aqua session behind it can fail in ways this

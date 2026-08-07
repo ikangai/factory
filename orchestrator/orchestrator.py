@@ -1368,29 +1368,52 @@ def cmd_graduate(store: Blackboard, *, dry_run: bool = False) -> Optional[dict]:
     return res
 
 
-def cmd_broker(action: str) -> Optional[dict]:
-    """`factory broker run-once | watch | status` — the OPERATOR-side half of the
-    publication broker (docs/plans/2026-08-06-publication-broker-design.md, Component C).
-    Deliberately does NOT open a Blackboard connection (see `main`'s early-return for this
-    command): the broker runs from the operator's own factory checkout, reads only its
-    own allowlist (`~/.factory-broker.yaml`) and the envelope spool — never the guest-
-    house's DB, which in production it cannot even reach (700 home)."""
+def cmd_broker(action: str, *, tip_sha: Optional[str] = None, note: str = "",
+               unattended: bool = False) -> Optional[dict]:
+    """`factory broker run-once | watch | status | pin <sha> | unpin <sha> | pins` — the
+    OPERATOR-side half of the publication broker (docs/plans/2026-08-06-publication-
+    broker-design.md, Component C). Deliberately does NOT open a Blackboard connection
+    (see `main`'s early-return for this command): the broker runs from the operator's own
+    factory checkout, reads only its own allowlist/pin-store/spent-ledger and the shared
+    envelope spool — never the guest-house's DB, which in production it cannot even reach
+    (700 home).
+
+    `run-once` defaults to INTERACTIVE (a human reviews the operator-derived diff and
+    confirms before an unpinned tip is pinned + published) — pass `--unattended` to skip
+    the prompt (a tip that isn't ALREADY pinned is then left 'pending', never auto-
+    approved). `watch` REFUSES to run at all without `--unattended` — a persistent poll
+    loop cannot prompt a human, so the choice must be explicit."""
     from . import broker
     from ..common import paths
     outbox_dir = paths.broker_outbox_dir()
     receipts_dir = paths.broker_receipts_dir()
     allowlist_path = paths.broker_allowlist_path()
+    spent_path = paths.broker_spent_path()
+    pins_path = paths.broker_pins_path()
+    processed_dir = paths.broker_processed_dir()
     if action == "run-once":
         results = broker.run_once(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
-                                  allowlist_path=allowlist_path)
+                                  allowlist_path=allowlist_path, spent_path=spent_path,
+                                  pins_path=pins_path, processed_dir=processed_dir,
+                                  unattended=unattended)
         for r in results:
-            print(f"[broker] {r['nonce'][:8]}: {r['status']}")
+            extra = f" ({r['reason']})" if r.get("reason") else ""
+            print(f"[broker] {r['nonce'][:8]}: {r['status']}{extra}")
         print(f"[broker] processed {len(results)} envelope(s)")
         return {"processed": results}
     if action == "watch":
-        print(f"[broker] watching {outbox_dir} (Ctrl-C to stop)")
+        if not unattended:
+            print("[broker] refusing to watch without --unattended — a persistent poll "
+                  "loop can't prompt interactively. Pin tips ahead of time with "
+                  "`factory broker pin <sha>`, or run `factory broker run-once` by hand "
+                  "to review + confirm.")
+            return None
+        print(f"[broker] watching {outbox_dir} (Ctrl-C to stop) — unattended: "
+              "require_pin still applies; an unpinned tip stays 'pending', never "
+              "auto-approved")
         broker.watch(outbox_dir=outbox_dir, receipts_dir=receipts_dir,
-                    allowlist_path=allowlist_path)
+                    allowlist_path=allowlist_path, spent_path=spent_path,
+                    pins_path=pins_path, processed_dir=processed_dir, unattended=True)
         return None
     if action == "status":
         st = broker.status(outbox_dir=outbox_dir, receipts_dir=receipts_dir)
@@ -1401,7 +1424,31 @@ def cmd_broker(action: str) -> Optional[dict]:
         for n in st["receipts"]:
             print(f"  receipt: {n}")
         return st
-    print("[broker] usage: factory broker run-once | watch | status")
+    if action == "pin":
+        if not tip_sha:
+            print("[broker] usage: factory broker pin <tip_sha> [--note TEXT]")
+            return None
+        try:
+            broker.pin_tip(pins_path, tip_sha, note=note)
+        except ValueError as e:
+            print(f"[broker] refused: {e}")
+            return None
+        print(f"[broker] pinned {tip_sha}" + (f" — {note}" if note else ""))
+        return {"pinned": tip_sha}
+    if action == "unpin":
+        if not tip_sha:
+            print("[broker] usage: factory broker unpin <tip_sha>")
+            return None
+        ok = broker.unpin_tip(pins_path, tip_sha)
+        print(f"[broker] {'unpinned' if ok else 'was not pinned'}: {tip_sha}")
+        return {"unpinned": ok}
+    if action == "pins":
+        pins = broker.list_pins(pins_path)
+        for sha, meta in sorted(pins.items()):
+            print(f"  {sha}  {meta.get('pinned_at', '')}  {meta.get('note', '')}")
+        print(f"[broker] {len(pins)} pinned tip(s)")
+        return pins
+    print("[broker] usage: factory broker run-once|watch|status|pin <sha>|unpin <sha>|pins")
     return None
 
 
@@ -2109,7 +2156,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     grd.add_argument("--dry-run", action="store_true",
                      help="preview the push range + issue actions without mutating anything")
     brk = sub.add_parser("broker")          # OPERATOR-side: verify + push prepared envelopes
-    brk.add_argument("action", choices=["run-once", "watch", "status"])
+    brk.add_argument("action", choices=["run-once", "watch", "status", "pin", "unpin", "pins"])
+    brk.add_argument("tip_sha", nargs="?", default=None,
+                     help="full tip sha (pin/unpin only)")
+    brk.add_argument("--note", default="", help="operator note recorded with a pin")
+    brk.add_argument("--unattended", action="store_true",
+                     help="skip the interactive confirm prompt (run-once) / required to "
+                          "run at all (watch) — require_pin still applies either way")
     sub.add_parser("broker-receipts")       # FACTORY-side: ingest broker receipts, resolve approvals
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
@@ -2241,7 +2294,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # broker runs as the OPERATOR and never touches the blackboard (see cmd_broker) —
     # handle before connecting, exactly like schedule-(un)install above.
     if a.cmd == "broker":
-        cmd_broker(a.action)
+        cmd_broker(a.action, tip_sha=a.tip_sha, note=a.note, unattended=a.unattended)
         return 0
 
     with Blackboard() as store:

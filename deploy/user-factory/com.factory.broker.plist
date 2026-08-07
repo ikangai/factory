@@ -21,7 +21,15 @@
      WatchPaths fires `broker run-once` the moment the factory writes a new envelope to the
      outbox; StartInterval is a belt-and-suspenders poll (a WatchPaths event can in
      principle be missed if the agent wasn't loaded at write time — envelopes are cheap to
-     re-poll for, never harmful to check twice). -->
+     re-poll for, never harmful to check twice).
+
+     The unattended flag below is REQUIRED: a background LaunchAgent has no terminal to
+     prompt on. `require_pin` (default true, per allowlist entry) stays fully in force
+     either way: an unpinned tip is left 'pending' here, NEVER auto-approved. Content
+     approval (reviewing the operator-derived diff and pinning a tip) is a deliberate
+     separate act, either `factory broker run-once` run BY HAND (omit the unattended
+     flag; interactive) or `factory broker pin SHA` ahead of time. See
+     docs/runbooks/publication-broker.md. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -31,6 +39,7 @@
     <string>__FACTORY_CHECKOUT__/bin/factory</string>
     <string>broker</string>
     <string>run-once</string>
+    <string>--unattended</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
