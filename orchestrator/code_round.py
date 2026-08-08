@@ -36,6 +36,50 @@ from ..common.textutil import clean_line
 # open-ended pytest marathon.
 MAX_RED_PROOF_NODES = 20
 
+# -- crash-consistency intent-row wrapping (design: docs/plans/2026-08-08-crash-
+# consistency-design.md, Component B). run_code_round executes on a WORKER THREAD (the
+# ThreadPoolExecutor in orchestrator/develop.py's execute_claimed_tasks) — the store's
+# single sqlite3.Connection is main-thread-only, so these helpers open their OWN
+# short-lived connection per call (WAL mode already tolerates concurrent connections)
+# rather than sharing one across threads. `db_path=None` (every caller/test that doesn't
+# thread it) is a pure no-op — zero behavior change for anyone who hasn't opted in.
+# BINDING CONSTRAINT: a store hiccup here must never break or block a merge — every
+# helper is fail-soft (log + continue, never raise).
+
+
+def _op_begin(db_path, kind, idem_key, **kw):
+    if not db_path or not idem_key:
+        return None
+    try:
+        from ..common.store import Blackboard
+        with Blackboard(db_path) as s:
+            return s.begin_operation(kind, idem_key, **kw)
+    except Exception as e:  # noqa: BLE001 — fail-soft: never block the merge on a store hiccup
+        print(f"[reconcile] begin_operation({kind}) failed (non-fatal): {e}", flush=True)
+        return None
+
+
+def _op_complete(db_path, op_id, receipt):
+    if not db_path or not op_id:
+        return
+    try:
+        from ..common.store import Blackboard
+        with Blackboard(db_path) as s:
+            s.complete_operation(op_id, receipt)
+    except Exception as e:  # noqa: BLE001 — fail-soft
+        print(f"[reconcile] complete_operation failed (non-fatal): {e}", flush=True)
+
+
+def _op_set_status(db_path, op_id, status, detail=""):
+    if not db_path or not op_id:
+        return
+    try:
+        from ..common.store import Blackboard
+        with Blackboard(db_path) as s:
+            s.set_operation_status(op_id, status, detail)
+    except Exception as e:  # noqa: BLE001 — fail-soft
+        print(f"[reconcile] set_operation_status failed (non-fatal): {e}", flush=True)
+
 
 def _collect_test_bodies(file_path: str) -> dict[str, str]:
     """AST-parse `file_path` (no subprocess — a static read) into
@@ -106,7 +150,8 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                    regression_tol: float = 0.0,
                    require_test: bool = False, acceptance_ref: str = None,
                    require_held_out: bool = True, red_proof: bool = False,
-                   base_repo: Optional[str] = None, base_sha: Optional[str] = None) -> dict:
+                   base_repo: Optional[str] = None, base_sha: Optional[str] = None,
+                   task_id: str = "", db_path: Optional[str] = None) -> dict:
     """Grade + auto-merge / discard one code candidate. Returns a result dict whose
     `action` is one of: halted | discarded | merged | auto_reverted | revert_failed.
 
@@ -132,7 +177,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     anything and discards the candidate (stage 'no_test'). `base_repo`/`base_sha` are the
     caller's seam (develop.py threads the pristine clone + its pre-dispatch HEAD) — when
     either is missing, red-proofing is silently skipped (nothing to check against), never
-    a crash and never a false discard."""
+    a crash and never a false discard.
+
+    `task_id`/`db_path` (crash consistency, Component B): when BOTH are given, the merge
+    (and its possible auto-revert self-heal) is wrapped in an `operations` intent row
+    keyed `merge:<task_id>:<cand_tip_sha>` — see the module's `_op_*` helpers. Either
+    missing (the default) is a byte-identical no-op: no extra git/store call, today's
+    exact behavior."""
     if killswitch.is_halted():
         return {"action": "halted"}
 
@@ -263,6 +314,30 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         return {"action": "halted", "stage": "pre_merge", **extra}
     before = {"working": champion_scores["working"],
               "held_out": champion_scores.get("held_out", 0.0), "tests_passed": True}
+
+    # Crash-consistency intent row (Component B), keyed on task + candidate tip — the
+    # SAME candidate branch re-graded twice (e.g. a reconciler re-entry after a crash)
+    # must never merge a second time. Fail-soft + opt-in: db_path/task_id absent (every
+    # caller/test that hasn't threaded them) is a pure no-op.
+    op_id = None
+    if db_path and task_id:
+        try:
+            cand_tip_sha = adapter.current_commit(cand_repo)
+        except Exception:  # noqa: BLE001 — no tip sha to key on → skip tracking, never crash
+            cand_tip_sha = None
+        if cand_tip_sha:
+            begun = _op_begin(db_path, "merge", f"merge:{task_id}:{cand_tip_sha}",
+                              target_ref=branch, tip_sha=cand_tip_sha,
+                              payload={"task_id": task_id, "label": label})
+            if begun:
+                op = begun.get("operation") or {}
+                if begun.get("skip"):
+                    # Already applied/reconciled — this exact merge already happened;
+                    # repeating it would double-merge the same candidate.
+                    return {"action": "merged", "merge_sha": op.get("receipt", ""),
+                            "scores": None, "idempotent_skip": True, **extra}
+                op_id = op.get("id")
+
     try:
         # Provenance trailer (blindspot fix 2026-07-07): the sha→task chain must survive
         # WITHOUT the blackboard — the public repo's history was unexplainable on DB loss.
@@ -273,7 +348,9 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         message = f"factory: {label}" + (f"\n\nFactory-Task: {ref}" if ref else "")
         merge_sha = adapter.merge_branch(main_repo, branch, message=message)
     except Exception as e:  # merge conflict / git failure → clean discard (adapter aborted)
+        _op_set_status(db_path, op_id, "failed", f"merge failed: {e}"[:2000])
         return {"action": "discarded", "stage": "merge", "error": str(e), **extra}
+    _op_complete(db_path, op_id, merge_sha)
 
     # 5. re-baseline the NEW champion + self-heal. ANY failure here (a regression OR a
     #    grading crash) auto-reverts — never leave an ungraded merge in the repo.
@@ -290,8 +367,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         try:
             revert_sha = adapter.revert_commit(main_repo, merge_sha)
         except Exception as e:  # revert itself failed — can't self-heal; surface loudly
+            _op_set_status(db_path, op_id, "failed", f"revert failed: {e}"[:2000])
             return {"action": "revert_failed", "stage": "revert",
                     "merge_sha": merge_sha, "error": str(e), "why": reg["why"], **extra}
+        # Auto-revert self-heal: the SAME operation row moves applied -> reconciled — we
+        # already KNOW the full fate of this merge (landed, then reverted), so there is
+        # no ambiguity left for a reconciler to resolve later.
+        _op_set_status(db_path, op_id, "reconciled", f"auto-reverted -> {revert_sha}")
         return {"action": "auto_reverted", "merge_sha": merge_sha,
                 "revert_sha": revert_sha, "why": reg["why"], **extra}
     return {"action": "merged", "merge_sha": merge_sha, "scores": after_scores, **extra}

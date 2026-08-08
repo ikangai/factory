@@ -119,7 +119,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                  require_test: Optional[bool] = None, reviewer: bool = False,
                  reviewer_model: Optional[str] = None,
                  acceptance_ref: Optional[str] = None, task_ref: str = "",
-                 red_proof: Optional[bool] = None) -> dict:
+                 red_proof: Optional[bool] = None,
+                 task_id: str = "", db_path: Optional[str] = None) -> dict:
     """Run ONE task through the gated pipeline and return the round result. The conductor
     NEVER runs this itself (a headless `claude -p` backgrounds + orphans a long sub-command).
     `real=False` (default): merge into a THROWAWAY clone (mechanics only, discarded).
@@ -128,7 +129,9 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
     `merge_lock` serializes the shared factory/auto worktree across PARALLEL workers (real).
     `reviewer_model` (Fix 1c): an optional tier ALIAS override for the pre-merge reviewer
     call (an org chart's per-class reviewer tier); None preserves today's config-derived
-    reviewer_tier read exactly."""
+    reviewer_tier read exactly. `task_id`/`db_path` (crash consistency, Component B):
+    threaded straight through to `run_code_round`'s intent-row wrapping; both empty is a
+    no-op (today's behavior, byte-identical)."""
     adapter = config.get_adapter()
     cs = champion_scores or {"working": 0.0, "held_out": 0.0}
     gf = grade_fn or _smoke_grade
@@ -141,7 +144,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
                                  reviewer_model=reviewer_model, red_proof=red_proof,
-                                 acceptance_ref=acceptance_ref, task_ref=task_ref)
+                                 acceptance_ref=acceptance_ref, task_ref=task_ref,
+                                 task_id=task_id, db_path=db_path)
     work = tempfile.mkdtemp(prefix="cf-champ-", dir="/tmp")    # throwaway: isolated → no lock needed
     main = os.path.join(work, "champion")
     try:
@@ -152,7 +156,8 @@ def develop_task(task_text: str, *, as_user: Optional[str] = None, claude_bin: s
                                  profile_overlay=profile_overlay, model=model,
                                  require_test=require_test, reviewer=reviewer,
                                  reviewer_model=reviewer_model, red_proof=red_proof,
-                                 acceptance_ref=acceptance_ref, task_ref=task_ref)
+                                 acceptance_ref=acceptance_ref, task_ref=task_ref,
+                                 task_id=task_id, db_path=db_path)
     finally:
         shutil.rmtree(work, ignore_errors=True)   # throwaway — never touches the real target
 
@@ -378,6 +383,7 @@ def execute_claimed_tasks(store, shift_id: int, *, as_user: Optional[str] = None
                            reviewer_model=reviewer_model_by_id[task["id"]],
                            acceptance_ref=acc_ref, grade_fn=grade_fn,
                            champion_scores=champion_scores, red_proof=red_proof,
+                           task_id=task["id"], db_path=store.db_path,   # crash consistency
                            task_ref=f"{task['id']}: {task['title'][:100]}")
             except Exception as e:                    # noqa: BLE001 — contain a dispatch blow-up
                 return {"action": "error", "error": str(e)}
@@ -664,7 +670,8 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                       require_test: Optional[bool] = None, reviewer: bool = False,
                       reviewer_model: Optional[str] = None,
                       acceptance_ref: Optional[str] = None, task_ref: str = "",
-                      red_proof: Optional[bool] = None) -> dict:
+                      red_proof: Optional[bool] = None,
+                      task_id: str = "", db_path: Optional[str] = None) -> dict:
     """Run one develop→grade→auto-merge turn. Returns the round result dict (or
     {action: "no_candidate"} if the worker produced no change, "halted" if the brake is
     on). Never leaves clones behind. `merge_lock`, when given, serializes the
@@ -675,7 +682,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
     `_review_candidate` — None preserves today's config-derived reviewer_tier read.
     `red_proof` (Component E, docs/plans/2026-08-06-publication-broker-design.md):
     None falls back to config.yaml's super_worker.red_proof (default False) — same
-    resolution pattern as `require_test`."""
+    resolution pattern as `require_test`. `task_id`/`db_path` (crash consistency,
+    Component B, docs/plans/2026-08-08-crash-consistency-design.md): threaded straight
+    through to `run_code_round`'s intent-row wrapping around the merge; both empty is a
+    no-op (today's behavior, byte-identical)."""
     from ..roles.common import develop_candidate
 
     if killswitch.is_halted():
@@ -771,6 +781,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                     champion_scores=champion_scores, grade_fn=grade_fn,
                     changed_paths=changed, label=branch, task_ref=task_ref, require_test=rt,
                     red_proof=rp, base_repo=dev_clone, base_sha=base_sha,
+                    task_id=task_id, db_path=db_path,   # crash consistency (Component B)
                     acceptance_ref=acceptance_ref,   # Task 3.1: run the spec's named test in the candidate
                     # held-out is REBASELINE scope, not per-merge scope (adversarial-review
                     # fix round, 2026-08-05): run_code_round's OWN default is now fail-closed

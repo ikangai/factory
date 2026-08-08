@@ -247,7 +247,14 @@ class TargetAdapter(abc.ABC):
     def revert_commit(self, repo: str, sha: str) -> str:
         """Self-heal: revert `sha` (e.g. a merge that regressed). Returns the new HEAD.
         Detects whether `sha` is a merge and passes `-m 1` only then — so it's correct
-        for both a plain commit and a `--no-ff` merge across git versions."""
+        for both a plain commit and a `--no-ff` merge across git versions.
+
+        Crash-consistency fix (docs/plans/2026-08-08-crash-consistency-design.md,
+        Component B): the revert commit gets a `Factory-Revert: <sha>` trailer appended
+        (via `--amend`, so git's own default "This reverts commit <sha>..." body stays
+        intact and human-legible) — `git revert --no-edit` alone writes no such marker,
+        so a reconciler could not otherwise distinguish "merged then auto-reverted" from
+        "never merged" by reading git history alone."""
         parents = subprocess.run(["git", "-C", repo, "rev-list", "--parents", "-n", "1", sha],
                                  capture_output=True, text=True, check=True).stdout.split()
         cmd = ["git", "-C", repo, "revert", "--no-edit"]
@@ -255,4 +262,9 @@ class TargetAdapter(abc.ABC):
             cmd += ["-m", "1"]
         cmd.append(sha)
         subprocess.run(cmd, check=True, capture_output=True, text=True)
+        body = subprocess.run(["git", "-C", repo, "log", "-1", "--format=%B"],
+                              capture_output=True, text=True, check=True).stdout.rstrip("\n")
+        subprocess.run(["git", "-C", repo, "commit", "--amend", "-m",
+                        f"{body}\n\nFactory-Revert: {sha}"],
+                       check=True, capture_output=True, text=True)
         return self.current_commit(repo)
