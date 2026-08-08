@@ -84,36 +84,58 @@ Prerequisite: a backup exists. `scripts/backup_blackboard.sh` (scheduled via
    post-corruption.
 3. **Restore.**
    ```
-   factory db-restore ~/factory-db-backups/blackboard-<STAMP>.db --yes
+   # Drill / rehearse anywhere — an explicit target is always safe:
+   factory db-restore ~/factory-db-backups/blackboard-<STAMP>.db --db /tmp/drill.db --yes
+
+   # The real store. --yes does NOT authorize this; you type the target path when asked
+   # (or pass --i-mean-the-real-store to answer it up front):
+   factory db-restore ~/factory-db-backups/blackboard-<STAMP>.db
    ```
-   Omit `--yes` to get an interactive confirm first. The command:
-   - refuses outright unless STOP is engaged and no runner is alive (not skippable by
-     `--yes` — that flag only skips the confirm prompt);
-   - `PRAGMA integrity_check`s the **snapshot** before touching anything;
-   - moves the current `store/blackboard.db` (+ `-wal`/`-shm`) aside, timestamped
-     `blackboard.db.bak-<UTC-STAMP>` — **never deleted**;
-   - copies the snapshot in, then `PRAGMA integrity_check`s the **result** — a torn/bad
-     copy rolls back automatically (the moved-aside original is copied back into place;
-     the bad copy is moved aside too, as `.failed-<STAMP>`, never deleted);
-   - re-runs `init_db()` (additive migrations — a snapshot taken before a schema change,
-     e.g. before the `operations` table existed, gains it here with no data loss);
-   - runs the reconciler (with `ignore_stop=True` — see §2's note) so anything the
-     corruption window or the restore itself left ambiguous gets resolved or escalated
-     immediately, not silently at the next shift;
-   - prints a counts summary (tasks by status, shifts, operations by status).
-4. **Cross-check against git.** The counts summary is a sanity sheet, not proof — compare
-   it against reality:
+   **STOP being engaged is not consent.** STOP means "the factory is braked" and is often
+   ambient for unrelated reasons — an agent developing this tool once had a restore hit the
+   real store on exactly that technicality. Overwriting the default target therefore needs a
+   second, deliberate act that `--yes` cannot supply.
+
+   The command, in order:
+   - refuses unless STOP is engaged AND no runner is alive AND nothing holds a write lock on
+     the target (it tries `BEGIN IMMEDIATE` — a PID file only knows about `run --loop`, not
+     the dashboard, a second CLI, a worker, or an open `sqlite3` shell);
+   - `PRAGMA integrity_check`s the **snapshot**, then checks it is actually a blackboard
+     (the signature tables must be present). Integrity alone is not enough: SQLite reports a
+     0-byte file as a valid, healthy, EMPTY database, so a truncated download or an unrelated
+     `chat.db` would otherwise pass every gate and wipe the store while reporting success;
+   - **prints a preflight sheet — always, even with `--yes`**: target, snapshot path/size/date,
+     and row counts for both, so a wipe is visible *before* it happens rather than inferred
+     afterwards;
+   - checkpoints the live db (`wal_checkpoint(TRUNCATE)`), then moves it aside as
+     `blackboard.db.bak-<UTC-STAMP>` (+ `…-wal`/`…-shm` if any) — **never deleted**, and never
+     clobbering an earlier backup taken in the same second. The sidecar suffix goes *after*
+     the stamp deliberately: SQLite looks for `<name>-wal` beside `<name>`, so the old
+     `<db>-wal.bak-<STAMP>` naming orphaned the WAL and opening the backup after a real crash
+     silently returned a checkpoint-old database that reported itself healthy;
+   - copies the snapshot in, `PRAGMA integrity_check`s the **result**, and on failure moves
+     the bad copy aside as `.failed-<STAMP>` and puts the previous db **and its sidecars**
+     back;
+   - re-runs `init_db()` (additive migrations — a snapshot predating a schema change, e.g.
+     before the `operations` table existed, gains it here);
+   - runs the reconciler (`ignore_stop=True`, see §2) so anything the corruption window left
+     ambiguous is resolved or escalated now, not silently at the next shift;
+   - prints a counts summary. If anything fails *after* the copy, it prints the exact command
+     to put your previous database back, before surfacing the error.
+4. **Cross-check against git.** The counts summary is a sanity sheet, not proof:
    ```
    git -C <target>.factory-auto log --oneline | wc -l      # commits on the auto branch
    factory task list --status open                          # anything the reconciler reopened
    factory learn list --role factory                        # any 'unknown' escalations
    ```
-   A snapshot older than the crash will show FEWER tasks/shifts than git's own history —
-   that's expected, not a bug; the reconciler cannot invent rows the snapshot never had,
-   only resolve the ones that exist.
-5. **Resume.** `rm STOP` (or the dashboard) once satisfied. The `.bak-*`/`.failed-*`
-   siblings left in `store/` are gitignored and yours to keep or clear —
-   `scripts/backup_blackboard.sh` doesn't touch them.
+   A snapshot older than the crash legitimately shows FEWER tasks/shifts than git's history —
+   the reconciler cannot invent rows the snapshot never had. **But check it against the
+   preflight sheet you were shown**: if the snapshot's counts were wildly below the live db's,
+   you restored the wrong file, and the previous db is still sitting next to it as
+   `.bak-<STAMP>`.
+5. **Resume.** `rm STOP` (or the dashboard) once satisfied. The `.bak-*`/`.failed-*` siblings
+   in `store/` are gitignored (verified: the main file and both sidecars) and yours to keep or
+   clear — `scripts/backup_blackboard.sh` doesn't touch them.
 
 ## 4. Drill 1 — kill at each wrapped boundary
 
@@ -146,20 +168,51 @@ Run it against a **throwaway** clone/dispatch, never a real graduation:
 
 ## 5. Drill 4 — corrupt, restore, reconcile, verify
 
-1. On a **disposable copy** of `store/blackboard.db` (never the live one — copy it
-   aside first), corrupt it: truncate the file, or overwrite a chunk with
-   `dd if=/dev/urandom of=blackboard.db bs=1024 count=1 seek=10 conv=notrunc`.
-2. Confirm the corruption is real: `sqlite3 blackboard.db "PRAGMA integrity_check;"`
-   should NOT print `ok`.
-3. Swap it into place (STOP engaged, no runner alive), or just point
-   `factory db-restore` at a real backup snapshot directly — the drill's point is the
-   RESTORE path, not the corruption mechanism.
-4. Run `factory db-restore <snapshot> --yes` (§3).
-5. Verify: the restore's own `PRAGMA integrity_check` passed (it refuses otherwise — see
-   `orchestrator/db_restore.py`'s `restored-db-corrupt` rollback path), the reconciler ran
-   (`reconcile.examined`/`resolved`/`unknown` in the printed summary, not skipped for
-   STOP), and the counts summary roughly matches `git log --oneline factory/auto | wc -l`
-   for landed work.
+Runs entirely on a throwaway database. Nothing here touches `store/blackboard.db`; that
+is what `--db` exists for, and it is why the drill is safe to rehearse whenever you like.
+
+```bash
+# 1. a disposable copy of a real snapshot, and a "live" db to be clobbered
+cp ~/factory-db-backups/blackboard-<STAMP>.db /tmp/drill-snap.db
+cp store/blackboard.db /tmp/drill-live.db          # the factory may be running; this is a copy
+
+# 2. corrupt the drill's live db, and prove the corruption is real.
+#    Overwrite the HEADER: scribbling on a random interior page usually still reports
+#    "ok", because integrity_check only reads pages it can reach from the schema.
+dd if=/dev/urandom of=/tmp/drill-live.db bs=100 count=1 conv=notrunc
+sqlite3 /tmp/drill-live.db "PRAGMA integrity_check;"     # "file is not a database"
+
+# 3. restore into it (STOP must be engaged; --db keeps the real store out of reach)
+touch STOP
+factory db-restore /tmp/drill-snap.db --db /tmp/drill-live.db --yes
+```
+
+**What to verify, all of it visible in what the command prints:**
+
+- the **preflight sheet** appeared *before* anything was written, and its snapshot row
+  counts are what you expected — this is the check that catches restoring the wrong file;
+- `moved aside -> /tmp/drill-live.db.bak-<STAMP>` and the `to undo:` line are printed;
+  the corrupted original is still on disk, exactly as promised;
+- the reconciler ran rather than skipping for STOP (`reconciler: examined N, resolved N,
+  escalated N unknown`);
+- the counts summary matches the snapshot's preflight numbers.
+
+Then prove the safety net for real — open the moved-aside backup and confirm it still has
+its own content (this is the property that silently failed before the sidecar-naming fix):
+
+```bash
+sqlite3 /tmp/drill-live.db.bak-<STAMP> "PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;"
+```
+
+**Refusal drills** (each should refuse and change nothing — the interesting half):
+
+```bash
+: > /tmp/empty.db
+factory db-restore /tmp/empty.db --db /tmp/drill-live.db --yes    # snapshot-not-a-blackboard
+rm STOP && factory db-restore /tmp/drill-snap.db --db /tmp/drill-live.db --yes   # stop-not-engaged
+```
+
+Clean up with `rm -f /tmp/drill-*`; re-engage or clear STOP as you intend.
 
 ## 6. Canonicality matrix (Component E)
 
@@ -175,7 +228,7 @@ are structural facts about the codebase, not something a check can veto at reque
 | agora bus (`chat.db`) | Notifications only, never workflow state | `common/bus.py` never imports `common.store`/opens the blackboard — tested statically (`tests/test_canonicality.py`) |
 | dashboard | Authenticated command submission only | `dashboard/fleet_server.py`'s `do_POST` whitelist (a fixed tuple of paths, checked before any body is even read) — tested statically |
 
-Two read-only `reporting/` modules explicitly claim "never writes to the store" in their
+Three read-only `reporting/` modules explicitly claim "never writes WORKFLOW state" in their
 own docstrings (`summary.py`, `diary.py`, `blog.py`) — asserted by AST-scanning them for
 any call to a `Blackboard` write method (`tests/test_canonicality.py`). This is
 deliberately NOT a blanket "nothing under reporting/ writes" claim: `reporting/

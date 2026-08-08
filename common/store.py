@@ -981,6 +981,13 @@ class Blackboard:
             rows = self._all("SELECT * FROM operations ORDER BY id LIMIT ?", (limit,))
         return [self._with_op_payload(r) for r in rows]
 
+    def operations_count_by_status(self) -> dict:
+        """`{status: count}` computed in SQL. The callers that only need a tally (the
+        db-restore summary sheet) must not pull the whole table into Python to count it —
+        operations grows one row per merge/push forever and has no retention sweep."""
+        rows = self._all("SELECT status, COUNT(*) AS n FROM operations GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:
         r = self._one("SELECT value FROM settings WHERE key = ?", (key,))

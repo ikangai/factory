@@ -1567,7 +1567,8 @@ def cmd_reconcile(store: Blackboard, *, dry_run: bool = False) -> dict:
     return result
 
 
-def cmd_db_restore(snapshot: str, *, yes: bool = False) -> dict:
+def cmd_db_restore(snapshot: str, *, yes: bool = False, db: Optional[str] = None,
+                   allow_default_target: bool = False) -> dict:
     """`factory db-restore <snapshot> [--yes]` — the Component D restore drill's real
     handle (design: docs/plans/2026-08-08-crash-consistency-design.md). Run OUTSIDE an
     open store connection (it may replace the db file), exactly like `cmd_reset` — see
@@ -1576,7 +1577,8 @@ def cmd_db_restore(snapshot: str, *, yes: bool = False) -> dict:
     timestamped — never delete, copy in, integrity-check the result, re-migrate, run the
     reconciler, print a counts summary)."""
     from . import db_restore
-    result = db_restore.restore(snapshot, yes=yes)
+    result = db_restore.restore(snapshot, db_path=db, yes=yes,
+                                allow_default_target=allow_default_target)
     if not result.get("ok"):
         reason = result.get("reason", "")
         detail = result.get("detail", "")
@@ -1584,6 +1586,8 @@ def cmd_db_restore(snapshot: str, *, yes: bool = False) -> dict:
         return result
     for p in result.get("moved_aside") or []:
         print(f"[db-restore] moved aside -> {p}")
+    if result.get("recovery"):
+        print(f"[db-restore] to undo: {result['recovery']}")
     recon = result.get("reconcile") or {}
     print(f"[db-restore] reconciler: examined {recon.get('examined', 0)}, "
           f"resolved {len(recon.get('resolved') or [])}, "
@@ -2352,9 +2356,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="preview the bounded planned/executing rows without resolving anything")
     dbr = sub.add_parser("db-restore")      # safe DB restore (Component D, design 2026-08-08)
     dbr.add_argument("snapshot", help="path to a sqlite3 .backup snapshot (see scripts/backup_blackboard.sh)")
+    dbr.add_argument("--db", default=None,
+                     help="target db to restore INTO (default: the real store). Give an "
+                          "explicit path to exercise/drill this tool safely.")
     dbr.add_argument("--yes", action="store_true",
-                     help="skip the interactive confirm prompt (the STOP-engaged + "
-                          "no-live-runner refusal is NOT skippable)")
+                     help="skip the interactive confirm for an explicit --db target. It "
+                          "does NOT authorize overwriting the real store, and it does "
+                          "NOT skip the STOP-engaged / no-live-runner / snapshot-identity "
+                          "refusals.")
+    dbr.add_argument("--i-mean-the-real-store", dest="allow_default_target",
+                     action="store_true",
+                     help="required (or type the path when prompted) to overwrite the "
+                          "REAL store — STOP being engaged is not consent.")
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
                      help="measure + report but store nothing and never auto-revert")
@@ -2493,7 +2506,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     # db-restore may REPLACE the db file — handle before connecting, exactly like reset.
     if a.cmd == "db-restore":
-        result = cmd_db_restore(a.snapshot, yes=a.yes)
+        result = cmd_db_restore(a.snapshot, yes=a.yes, db=a.db,
+                                allow_default_target=a.allow_default_target)
         return 0 if result.get("ok") else 1
 
     with Blackboard() as store:
