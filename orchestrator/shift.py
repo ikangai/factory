@@ -39,6 +39,27 @@ def run_shift(store, *, token_budget: int, conductor: Callable, executor: Option
     tripped brake, and no clean injection seam for tests). `None` (the default) is a pure
     no-op, so every EXISTING run_shift test stays byte-identical."""
     reaped = store.reap_orphaned_shifts()          # crash recovery FIRST — before anything new
+
+    # Crash-consistency reconciler (design: docs/plans/2026-08-08-crash-consistency-
+    # design.md, Component C): MUST run here — between the shift reaper above and the
+    # broker receipt ingestion / approval reaper just below — so it sees a crash-orphaned
+    # 'executing' operations row BEFORE reap_orphaned_approvals converts it into the
+    # lossy 'stale' ("may or may not have reached origin — verify manually"). Own STOP
+    # check inside run_reconcile: the killswitch check further down in this function
+    # runs too late to guard this sweep. Fail-open + loud, mirroring org_planner's own
+    # failure posture below — a reconciler blow-up must never sink the shift it exists
+    # to protect.
+    try:
+        from . import reconcile as reconcile_mod
+        recon = reconcile_mod.run_reconcile(store)
+        n_resolved = len(recon.get("resolved") or [])
+        n_unknown = len(recon.get("unknown") or [])
+        if n_resolved or n_unknown:
+            print(f"[reconcile] resolved {n_resolved} operation(s), escalated "
+                  f"{n_unknown} unknown — see `factory reconcile --dry-run`", flush=True)
+    except Exception as e:  # noqa: BLE001 — never sink the shift on a reconciler blow-up
+        print(f"[reconcile] sweep error (non-fatal): {e}", flush=True)
+
     # Publication broker (Component D): a broker-armed approval legitimately SITS
     # 'executing' for up to autonomy.envelope_ttl_hours while the operator's broker is
     # offline/asleep — the default 1h orphan floor would mislabel that in-flight envelope

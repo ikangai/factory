@@ -1534,6 +1534,39 @@ def cmd_broker_receipts(store: Blackboard) -> list[dict]:
     return results
 
 
+def cmd_reconcile(store: Blackboard, *, dry_run: bool = False) -> dict:
+    """`factory reconcile [--dry-run]` — the manual/post-restore handle on the crash-
+    consistency reconciler (design: docs/plans/2026-08-08-crash-consistency-design.md,
+    Component C). Also runs automatically at shift start (orchestrator/shift.py, right
+    after `reap_orphaned_shifts`). `--dry-run` previews the bounded row list it would
+    examine, resolving nothing."""
+    from . import reconcile as reconcile_mod
+    result = reconcile_mod.run_reconcile(store, dry_run=dry_run)
+    action = result.get("action")
+    if action == "halted":
+        print("[reconcile] STOP engaged — not sweeping.")
+        return result
+    if action == "dry_run":
+        rows = result.get("rows") or []
+        if not rows:
+            print("[reconcile] nothing to reconcile — no planned/executing operations.")
+        for r in rows:
+            print(f"  #{r['id']} [{r['kind']}] {r['idem_key']} — {r['status']}")
+        print(f"[reconcile] {len(rows)} row(s) would be examined (dry-run — nothing changed)")
+        return result
+    resolved = result.get("resolved") or []
+    unknown = result.get("unknown") or []
+    for r in resolved:
+        print(f"  #{r['id']} [{r['kind']}] -> {r['status']}: {r.get('detail', '')}")
+    for r in unknown:
+        print(f"  #{r['id']} [{r['kind']}] -> unknown: {r.get('detail', '')}")
+    print(f"[reconcile] examined {result.get('examined', 0)}, resolved {len(resolved)}, "
+          f"escalated {len(unknown)} unknown"
+          + (" — see `factory learn list --role factory` / the backlog for the escalation(s)"
+             if unknown else ""))
+    return result
+
+
 def _factory_auto_head(root: str) -> Optional[str]:
     """The champion's current HEAD sha (the last accumulated merge on factory/auto)."""
     import subprocess
@@ -2283,6 +2316,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="skip the interactive confirm prompt (run-once) / required to "
                           "run at all (watch) — require_pin still applies either way")
     sub.add_parser("broker-receipts")       # FACTORY-side: ingest broker receipts, resolve approvals
+    rec = sub.add_parser("reconcile")       # crash-consistency sweep (design 2026-08-08)
+    rec.add_argument("--dry-run", action="store_true",
+                     help="preview the bounded planned/executing rows without resolving anything")
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
                      help="measure + report but store nothing and never auto-revert")
@@ -2491,6 +2527,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "broker-receipts":
             cmd_broker_receipts(store)
+        elif a.cmd == "reconcile":
+            cmd_reconcile(store, dry_run=a.dry_run)
         elif a.cmd == "rebaseline":
             cmd_rebaseline(store, dry_run=a.dry_run)
         elif a.cmd == "learn":
