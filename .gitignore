@@ -2,6 +2,12 @@
 store/*.db
 store/*.db-wal
 store/*.db-shm
+# db-restore's own "move aside, never delete" sidecars (orchestrator/db_restore.py) —
+# timestamped .bak-*/.failed-* siblings it leaves next to store/blackboard.db.
+store/*.db.bak-*
+store/*.db.bak-*-wal
+store/*.db.bak-*-shm
+store/*.db.failed-*
 logs/runs/
 logs/*.log
 *.pyc

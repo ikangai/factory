@@ -272,7 +272,7 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
                   base: Optional[str] = None, remote: str = "origin",
                   merge_repo: Optional[str] = None, receipts_dir: Optional[str] = None,
                   runner=subprocess.run, limit: int = DEFAULT_LIMIT,
-                  dry_run: bool = False) -> dict:
+                  dry_run: bool = False, ignore_stop: bool = False) -> dict:
     """The reconciler sweep. Own STOP check (see the module docstring's binding rule 4).
     `root`/`base`/`merge_repo`/`receipts_dir` default to the live config/adapter/spool
     when not given (production); tests inject them directly against real tmp-dir git
@@ -281,10 +281,17 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
     `dry_run` resolves nothing — returns the bounded row list that WOULD be examined
     (id/kind/idem_key/status only), for `factory reconcile --dry-run`'s preview.
 
+    `ignore_stop` (Component D, `orchestrator.db_restore`): a restore's OWN precondition
+    REQUIRES STOP to be engaged, so the normal STOP gate would make the reconciler a
+    permanent no-op there — an explicit, human-triggered administrative act (mirroring
+    `reporting.approvals.execute_approval`'s documented STOP-bypass reasoning: STOP
+    brakes AUTONOMOUS work, not an operator's explicit command). Never set by the
+    shift.py wiring or the `factory reconcile` CLI — both stay STOP-honoring.
+
     Returns `{'action': 'halted'|'dry_run'|'reconciled', 'examined': int,
     'resolved': [...], 'unknown': [...]}` (resolved/unknown are the post-resolution
     operation rows)."""
-    if killswitch.is_halted():
+    if not ignore_stop and killswitch.is_halted():
         return {"action": "halted", "examined": 0, "resolved": [], "unknown": []}
 
     if root is None:
