@@ -124,7 +124,8 @@ actions are field-validated before ever reaching argv.
   shift close-out reports leases it released. Kills the dead-worker-holds-task-forever
   state.
 
-### Phase 2 — Crash consistency + canonical state
+### Phase 2 — Crash consistency + canonical state  *(SHIPPED — feat/crash-consistency,
+docs/plans/2026-08-08-crash-consistency-design.md, docs/runbooks/crash-recovery.md)*
 
 - **Intent rows.** A new `operations` table: idempotency key, operation kind
   (merge / graduate-push / issue-sync), input hashes + base sha,
