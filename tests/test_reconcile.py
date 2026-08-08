@@ -74,7 +74,10 @@ def test_resolve_merge_not_landed_returns_task_to_open(tmp_path, store):
 
     reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main")
     op = store.get_operation_by_key("merge:task-2:CANDTIP")
-    assert op["status"] == "reconciled"
+    # 'failed', not 'reconciled': the effect did NOT happen, so this row must stay
+    # retryable — 'reconciled' is what begin_operation treats as "already done" and
+    # would suppress the operator's retry (Phase 2 review, F2).
+    assert op["status"] == "failed"
     assert "not landed" in op["detail"]
     assert store.get_task("task-2")["status"] == "open"
 
@@ -91,7 +94,10 @@ def test_resolve_merge_landed_then_reverted_returns_task_to_open(tmp_path, store
 
     reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main")
     op = store.get_operation_by_key("merge:task-3:CANDTIP")
-    assert op["status"] == "reconciled"
+    # 'failed', not 'reconciled': the effect did NOT happen, so this row must stay
+    # retryable — 'reconciled' is what begin_operation treats as "already done" and
+    # would suppress the operator's retry (Phase 2 review, F2).
+    assert op["status"] == "failed"
     assert "reverted" in op["detail"]
     assert store.get_task("task-3")["status"] == "open"
 
@@ -168,7 +174,10 @@ def test_resolve_graduate_push_not_landed_unclaims_the_approval(tmp_path, store)
 
     reconcile.run_reconcile(store, root=root, base="main")
     op = store.get_operation_by_key(f"grad:o/r:{old_sha}:{never_pushed_sha}")
-    assert op["status"] == "reconciled"
+    # 'failed', not 'reconciled': the effect did NOT happen, so this row must stay
+    # retryable — 'reconciled' is what begin_operation treats as "already done" and
+    # would suppress the operator's retry (Phase 2 review, F2).
+    assert op["status"] == "failed"
     assert "not landed" in op["detail"]
     assert store.get_approval(aid)["status"] == "pending"   # returned, retryable
 
@@ -352,3 +361,86 @@ def test_run_reconcile_unrecognized_kind_escalates(store):
     result = reconcile.run_reconcile(store, root=None)
     assert len(result["unknown"]) == 1
     assert result["unknown"][0]["status"] == "unknown"
+
+
+# ==========================================================================================
+# Phase 2 adversarial-review regressions (F1/F2/F3). Each of these FAILED before its fix.
+# ==========================================================================================
+def test_landed_merge_is_repaired_even_after_the_shift_reaper_requeued_the_task(tmp_path, store):
+    """F1 — the headline crash repair, in the WIRED order. `reap_orphaned_shifts` runs at
+    shift.py:41, BEFORE this sweep, and requeues the crashed shift's in-flight tasks to
+    'open'. The original guard repaired only 'claimed'/'in_progress' tasks, so by the time
+    the reconciler ran it was always False: the merge sat in git, the task went back on the
+    backlog, and the factory rebuilt work it had already landed — exactly the consequence
+    the design set out to prevent. git is canonical for what landed; the store follows."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    merge_sha = _commit(repo, "b.txt", "2",
+                        message="factory: cand\n\nFactory-Task: task-f1")
+
+    shift_id = store.start_shift(token_budget=1000)
+    store.add_task("task-f1", "a task", source="worker")
+    store.set_task_status("task-f1", "in_progress", shift_id=shift_id)
+    store.begin_operation("merge", "merge:task-f1:CANDTIP", tip_sha="CANDTIP",
+                          payload={"task_id": "task-f1"}, shift_id=shift_id)
+
+    store.reap_orphaned_shifts()                       # the production order
+    assert store.get_task("task-f1")["status"] == "open"
+
+    reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main")
+
+    task = store.get_task("task-f1")
+    assert task["status"] == "done", "already-merged work would be redispatched"
+    assert task["result"] == merge_sha
+
+
+def test_a_not_landed_operation_does_not_suppress_the_operators_retry(store):
+    """F2 — `begin_operation` treats 'reconciled' as a terminal success (skip=True), but the
+    reconciler wrote 'reconciled' for NOT-landed too. A graduation push that never happened
+    was therefore permanently suppressed on retry AND reported as 'synced'/'approved' — the
+    machinery lying about an effect, which this phase forbids. Not-landed is now 'failed'."""
+    key = "grad:me/repo:aaa:bbb"
+    first = store.begin_operation(kind="graduate_push", idem_key=key, target_ref="main",
+                                  base_sha="aaa", tip_sha="bbb")
+    store.set_operation_status(first["operation"]["id"], "failed",
+                               "not landed: not an ancestor of origin/main")
+
+    retry = store.begin_operation(kind="graduate_push", idem_key=key, target_ref="main",
+                                  base_sha="aaa", tip_sha="bbb")
+    assert retry["skip"] is False, "a push that never landed must stay retryable"
+
+
+def test_an_applied_operation_still_suppresses_a_repeat(store):
+    """The other half of F2: the idempotency win must survive the fix."""
+    key = "grad:me/repo:ccc:ddd"
+    first = store.begin_operation(kind="graduate_push", idem_key=key, target_ref="main",
+                                  base_sha="ccc", tip_sha="ddd")
+    store.complete_operation(first["operation"]["id"], receipt="pushedsha")
+
+    again = store.begin_operation(kind="graduate_push", idem_key=key, target_ref="main",
+                                  base_sha="ccc", tip_sha="ddd")
+    assert again["skip"] is True, "an effect that DID happen must not be repeated"
+
+
+def test_an_unanswerable_ancestor_check_escalates_instead_of_asserting_not_landed(store):
+    """F3 — `merge-base --is-ancestor` answers with exit 0/1. Exit 128 ('not a valid object
+    name' — an unknown tip after restoring a snapshot taken on another clone, a missing
+    tracking ref) means the question could not be ASKED. Resolving that to 'not landed' is
+    a guess, and it unclaimed the approval on the strength of it."""
+    class _R:
+        def __init__(self, rc, err=""):
+            self.returncode, self.stdout, self.stderr = rc, "", err
+
+    def fake_runner(argv, **kw):
+        if "--is-ancestor" in argv:
+            return _R(128, "fatal: Not a valid object name origin/main")
+        return _R(0)
+
+    op = store.begin_operation("graduate_push", "grad:z:1:2", target_ref="main",
+                               base_sha="1", tip_sha="2")["operation"]
+    reconcile._resolve_graduate_push(store, op, root=".", base="main",
+                                     remote="origin", runner=fake_runner)
+
+    row = store.get_operation(op["id"])
+    assert row["status"] == "unknown", "an unanswerable question must not become an answer"
+    assert "exited 128" in row["detail"]

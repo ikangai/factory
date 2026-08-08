@@ -103,15 +103,29 @@ def _resolve_merge(store, op: dict, *, merge_repo: Optional[str], auto_branch: s
             break
 
     task = store.get_task(task_id)
-    crash_interrupted = bool(task) and task.get("status") in ("claimed", "in_progress")
+    status = (task or {}).get("status")
     if standing:
+        # LANDED. Repair the task record whenever it disagrees with git — NOT only when
+        # it is still claimed/in_progress. `reap_orphaned_shifts` (shift.py:41) runs
+        # BEFORE this sweep and has already requeued the crashed shift's tasks to 'open',
+        # so a claimed/in_progress-only guard is False by the time we get here and the
+        # headline repair never fires: the merge sits in git, the task goes back on the
+        # backlog, and the factory rebuilds work it already landed (Phase 2 review, F1).
+        # git is canonical for "what landed" — the store follows it.
         store.set_operation_status(op["id"], "reconciled", f"landed: {standing}")
-        if crash_interrupted:
+        if status != "done":
             store.set_task_status(task_id, "done", result=standing)
     else:
         why = "not landed" if not merge_shas else "landed then auto-reverted"
-        store.set_operation_status(op["id"], "reconciled", why)
-        if crash_interrupted:
+        # NOT landed => the intended effect did NOT happen, so this row must never signal
+        # "already done" to a later `begin_operation`. 'failed' is the honest terminal
+        # state and keeps the work retryable; 'reconciled' means "resolved AND the effect
+        # is in place" and is what suppresses a retry (review F2).
+        store.set_operation_status(op["id"], "failed", why)
+        # Only repair a task the crash left mid-flight. An 'open' task is already correct
+        # (the reaper requeued it) and a 'blocked' one carries a legitimate failure record
+        # that must not be silently reopened.
+        if status in ("claimed", "in_progress"):
             store.set_task_status(task_id, "open")
 
 
@@ -156,7 +170,20 @@ def _resolve_graduate_push(store, op: dict, *, root: Optional[str], base: str,
                             f"manually: {cmd}")
         return
 
-    landed = _ok(anc)
+    # `git merge-base --is-ancestor` answers with exit 0 (yes) or exit 1 (no). ANY other
+    # code — 128 for "not a valid object name" (an unknown tip_sha, e.g. after a restore
+    # from a snapshot taken on another clone; a missing origin/<base> tracking ref) —
+    # means the question could not be ASKED, not that the answer is no. Treating it as
+    # "not landed" is a guess, and guessing is what this phase forbids (review F3).
+    rc = getattr(anc, "returncode", 1)
+    if rc not in (0, 1):
+        err = (getattr(anc, "stderr", "") or "").strip()[:200]
+        _escalate(store, op, f"cannot determine whether op #{op['id']} landed — "
+                            f"`merge-base --is-ancestor` exited {rc} ({err}); "
+                            f"verify manually: {cmd}")
+        return
+
+    landed = rc == 0
     match = _matching_executing_approval(store, "graduation", base_sha, tip_sha)
     if landed:
         store.set_operation_status(op["id"], "applied",
@@ -168,7 +195,10 @@ def _resolve_graduate_push(store, op: dict, *, root: Optional[str], base: str,
                 "reconcile-resolved", f"approval-{match['id']}",
                 "graduation push confirmed landed via git (reconciler sweep)")
     else:
-        store.set_operation_status(op["id"], "reconciled",
+        # 'failed', not 'reconciled' — see the merge resolver's note: the push did NOT
+        # happen, so the operator's retry must not be suppressed by begin_operation's
+        # skip (which would report a never-executed push as 'synced' + 'approved').
+        store.set_operation_status(op["id"], "failed",
                                   f"not landed: not an ancestor of {remote}/{target_ref}")
         if match:
             store.unclaim_approval(match["id"])
