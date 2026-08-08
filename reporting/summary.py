@@ -8,7 +8,7 @@ summary with EXACTLY three sections: `## Discoveries`, `## Decisions`,
 `## Proposed next steps`. The LLM is grounded ONLY in the gathered data.
 
 Guarantees:
-  * read-only — never writes to the store, never promotes (no add_promotion /
+  * read-only — never writes WORKFLOW state to the store, never promotes (no add_promotion /
     set_champion / set_stage call anywhere here);
   * never crashes — if `claude_p` errors/returns empty/omits a required section,
     we fall back to a deterministic templated summary built from the gathered data;

@@ -91,7 +91,12 @@ _ACCOUNTING_ONLY_WRITES = {"add_budget"}
 @pytest.mark.parametrize("module", _READONLY_REPORTING_MODULES)
 def test_readonly_reporting_module_never_calls_a_store_write_method(module):
     source = _read("reporting", module)
-    assert "read-only" in source.lower() and "never writes to the store" in source, (
+    # The claim asserted here must be the one the code actually keeps. It used to be the
+    # blanket "never writes to the store", which this test's own `add_budget` carve-out
+    # proves imprecise — so the test was pinning a sentence it knew to be wrong (Phase 2
+    # canonicality review, C2). The accurate contract is: no WORKFLOW writes; spend
+    # ledgering is telemetry every role emits.
+    assert "read-only" in source.lower() and "never writes WORKFLOW state" in source, (
         f"{module} no longer claims the read-only contract this test enforces — "
         f"update _READONLY_REPORTING_MODULES if that's an intentional change")
     write_methods = _blackboard_write_method_names() - _ACCOUNTING_ONLY_WRITES

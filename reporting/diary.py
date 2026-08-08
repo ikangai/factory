@@ -13,7 +13,9 @@ Mirrors `reporting/summary.py`:
   * never crashes — on an LLM error/empty/transport-sentinel reply it falls back to
     a deterministic first-person paragraph built straight from the gathered data
     (still voice-compliant: no headers, no bullets);
-  * read-only — never writes to the store, never promotes.
+  * read-only — never writes WORKFLOW state to the store, never promotes. (It does
+    ledger its own token spend via `store.add_budget`: telemetry every role emits,
+    not a workflow decision — see tests/test_canonicality.py.)
 """
 from __future__ import annotations
 
