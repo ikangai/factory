@@ -13,12 +13,13 @@ import json
 import os
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..common import mode as modemod
 from ..common.store import Blackboard
 from ..orchestrator import autopilot
 from ..reporting import fleet_viz, human_queue
+from . import auth
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -295,6 +296,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return False
 
+    def _request_token(self) -> str:
+        """The board key, from the header the page sends or the `?k=` the operator pastes
+        once. Query support exists so the very first load can hand the page its key; the
+        page then stores it and uses the header from then on."""
+        header = self.headers.get(auth.HEADER)
+        if header:
+            return header
+        return (parse_qs(urlparse(self.path).query).get(auth.QUERY_KEY) or [""])[0]
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path not in ("/api/mode", "/api/stop", "/api/resume", "/api/mission",
@@ -303,6 +313,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, b'{"error":"unknown write action"}', "application/json")
         if not self._local_origin():
             return self._send(403, b'{"error":"cross-origin refused (CSRF guard)"}', "application/json")
+        # AUTHENTICATION (Phase 3 prerequisite). The CSRF guard above is NOT one: its first
+        # branch allows a request that sends no Origin header, which is every `curl` and
+        # every script. Localhost binding is not an identity boundary either — every local
+        # account reaches 127.0.0.1, including a worker or a grader we are otherwise busy
+        # isolating. Without this check, any local process can approve a publication or
+        # clear the killswitch. See dashboard/auth.py.
+        if not auth.verify(self._request_token()):
+            return self._send(403,
+                              b'{"error":"write requires the board key - reopen the board '
+                              b'with the ?k=... URL printed at startup"}',
+                              "application/json")
         if path in ("/api/settings", "/api/worker"):   # runtime knobs + workforce (Task 6.2)
             length = int(self.headers.get("Content-Length", 0) or 0)
             try:
@@ -397,10 +418,17 @@ def serve(host: str = "127.0.0.1", port: int = 8788, *, open_browser: bool = Tru
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}"
     print(f"[viz] fleet mission-control on {url}  (Ctrl-C to stop)")
+    # Mint the write credential before accepting a single request, so there is never a
+    # window in which the board is up and unauthenticated.
+    token = auth.ensure_token()
+    print(auth.startup_banner(host, port, token))
     if open_browser:
         import subprocess
         try:
-            subprocess.run(["open", url], check=False, capture_output=True)
+            # Hand the browser the keyed URL: the page stores the key and strips it from
+            # the address bar on first load.
+            subprocess.run(["open", auth.board_url(host, port, token)],
+                           check=False, capture_output=True)
         except Exception:  # noqa: BLE001
             pass
     try:

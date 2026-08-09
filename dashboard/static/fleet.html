@@ -595,6 +595,38 @@ code{background:var(--g100);padding:1px 5px;border-radius:4px;color:var(--amber-
 <div id="stamp"></div>
 
 <script>
+// ---- board key (Phase 3 prerequisite: dashboard/auth.py) -----------------------------
+// Every WRITE route now requires a shared secret that lives in a 0600 file inside the
+// factory's home. Reads are unchanged. The operator opens the board once with the ?k=...
+// URL the server prints at startup; we stash it and send it as a header from then on, so
+// the key stops appearing in the address bar, history or referrers.
+// A local process that cannot read that file cannot approve, resume, or re-steer — which
+// is the whole point: localhost is not an identity boundary.
+const BOARD_KEY_STORE='factoryBoardKey';
+(function(){
+  try{
+    const k=new URLSearchParams(location.search).get('k');
+    if(k){
+      localStorage.setItem(BOARD_KEY_STORE,k);
+      history.replaceState({},'',location.pathname);   // drop the key from the URL
+    }
+  }catch(e){}
+})();
+// One wrapper instead of touching ten fetch() call sites in this file — less to get wrong,
+// and it cannot be forgotten by a future call site.
+(function(){
+  const raw=window.fetch;
+  window.fetch=function(input,init){
+    init=init||{};
+    const method=(init.method||'GET').toUpperCase();
+    if(method!=='GET'&&method!=='HEAD'){
+      let key='';
+      try{key=localStorage.getItem(BOARD_KEY_STORE)||'';}catch(e){}
+      if(key){init.headers=Object.assign({},init.headers||{},{'X-Factory-Token':key});}
+    }
+    return raw.call(this,input,init);
+  };
+})();
 const PHASES=[{key:'research',ico:'🔬',lbl:'Research'},{key:'plan',ico:'🧭',lbl:'Plan'},
  {key:'develop',ico:'⚒',lbl:'Develop'},{key:'gate',ico:'🛡',lbl:'Gate'},{key:'assess',ico:'🎯',lbl:'Assess'}];
 const CX=210,CY=210,R=140,el=id=>document.getElementById(id),SVG='http://www.w3.org/2000/svg';
