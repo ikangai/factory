@@ -52,6 +52,11 @@ FROZEN_SURFACES: tuple[str, ...] = (
     "orchestrator/broker.py",
     "reporting/envelope.py",
     "deploy/",
+    # Crash consistency (docs/plans/2026-08-08-crash-consistency-design.md): the
+    # reconciler is the authority on what actually landed after a crash — a self-harness
+    # proposal that could quietly weaken its resolution (e.g. make it resolve 'unknown'
+    # as landed) would defeat the whole point of never lying about an effect.
+    "orchestrator/reconcile.py",
 )
 
 # Config-key prefixes that are NEVER a legal `setting` proposal target, independent of

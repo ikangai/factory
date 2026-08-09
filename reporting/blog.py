@@ -12,7 +12,9 @@ Mirrors `reporting/summary.py` / `reporting/diary.py`:
   * never crashes — on an LLM error/empty/too-short/transport-sentinel reply it falls
     back to a deterministic templated article built straight from the gathered data
     (real title + sections, never invents);
-  * read-only — never writes to the store, never promotes.
+  * read-only — never writes WORKFLOW state to the store, never promotes. (It does
+    ledger its own token spend via `store.add_budget`: telemetry every role emits,
+    not a workflow decision — see tests/test_canonicality.py.)
 """
 from __future__ import annotations
 

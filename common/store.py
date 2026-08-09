@@ -883,6 +883,111 @@ class Blackboard:
             "applied_at = COALESCE(?, applied_at), result = ? WHERE id = ?",
             (status, now_iso(), decided_by, applied_at, result, proposal_id))
 
+    # -- operations: crash-consistency intent rows (design: docs/plans/2026-08-08-
+    # crash-consistency-design.md, Component A) — a durable record that the factory is
+    # ABOUT to perform an external effect, so a crash mid-effect can be RECONCILED
+    # against git/GitHub truth on the next startup (orchestrator/reconcile.py) rather
+    # than silently losing the fact it happened or blindly repeating it. Thin CRUD only
+    # — every resolution decision lives in the reconciler, mirroring the store's
+    # existing CRUD/policy split (org_charts, harness_proposals, ...).
+    @staticmethod
+    def _with_op_payload(row: Optional[dict]) -> Optional[dict]:
+        if row is not None:
+            try:
+                row["payload"] = json.loads(row.get("payload_json") or "{}")
+            except Exception:  # noqa: BLE001 — a corrupt blob degrades to an empty payload
+                row["payload"] = {}
+        return row
+
+    def begin_operation(self, kind: str, idem_key: str, *, target_ref: str = "",
+                        base_sha: str = "", tip_sha: str = "",
+                        payload: Optional[dict] = None,
+                        shift_id: Optional[int] = None) -> dict:
+        """Record intent to perform an external effect, keyed by a deterministic
+        `idem_key` — the identity of the EFFECT itself, never a timestamp (e.g.
+        'merge:<task_id>:<cand_tip_sha>', 'grad:<repo>:<base_sha>:<tip_sha>'). INSERT-
+        first, guarded by the idem_key UNIQUE constraint — exactly like
+        `claim_approval`'s atomic transition, the constraint itself IS the race guard
+        (no separate exists-then-insert check). A fresh row is created directly in
+        'executing' (this is called immediately before the irreversible act, so
+        'planned' collapses into 'executing' the instant the row exists — the
+        reconciler treats both statuses identically; see orchestrator/reconcile.py).
+
+        Returns `{'operation': <row or None>, 'created': bool, 'skip': bool}`.
+        `skip=True` iff a row for this idem_key ALREADY existed and had already reached
+        a terminal success state ('applied'/'reconciled') — the caller must NOT repeat
+        the effect (the idempotency win). Any other pre-existing status is returned
+        as-is for the caller to inspect; the reconciler, not this call, is the actual
+        authority on a row still stuck 'planned'/'executing'/'failed'/'unknown'."""
+        ts = now_iso()
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO operations(kind, idem_key, status, target_ref, base_sha, "
+                "tip_sha, payload_json, attempts, shift_id, created_at, updated_at) "
+                "VALUES (?,?,'executing',?,?,?,?,1,?,?,?)",
+                (kind, idem_key, target_ref, base_sha, tip_sha,
+                 json.dumps(payload or {}), shift_id, ts, ts))
+            self.conn.commit()
+            row = self.get_operation(cur.lastrowid)
+            return {"operation": row, "created": True, "skip": False}
+        except sqlite3.IntegrityError:
+            existing = self.get_operation_by_key(idem_key)
+            skip = bool(existing) and existing["status"] in ("applied", "reconciled")
+            return {"operation": existing, "created": False, "skip": skip}
+
+    def complete_operation(self, operation_id: int, receipt: str = "") -> bool:
+        """Rowcount-guarded transition executing -> applied (mirrors claim_approval's
+        single-UPDATE guard): only an operation still 'executing' completes — called
+        immediately after the effect succeeds. Returns True iff THIS call performed the
+        transition."""
+        cur = self.conn.execute(
+            "UPDATE operations SET status = 'applied', receipt = ?, "
+            "attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'executing'",
+            (receipt, now_iso(), operation_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def set_operation_status(self, operation_id: int, status: str, detail: str = "") -> bool:
+        """Administrative transition (any status -> `status`) — the reconciler's own
+        resolution verb, and the fail-path setter for a wrapper that already knows an
+        attempt failed. Deliberately UNGUARDED by the prior status (unlike
+        `complete_operation`): the reconciler routinely moves a row from
+        'planned'/'executing' to 'reconciled'/'unknown', a self-heal moves 'applied' to
+        'reconciled' (merge-then-auto-revert, same row), and a wrapper may need
+        'executing' -> 'failed'. Returns True iff a row with this id exists."""
+        cur = self.conn.execute(
+            "UPDATE operations SET status = ?, detail = ?, updated_at = ? WHERE id = ?",
+            (status, detail, now_iso(), operation_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_operation(self, operation_id: int) -> Optional[dict]:
+        return self._with_op_payload(
+            self._one("SELECT * FROM operations WHERE id = ?", (operation_id,)))
+
+    def get_operation_by_key(self, idem_key: str) -> Optional[dict]:
+        return self._with_op_payload(
+            self._one("SELECT * FROM operations WHERE idem_key = ?", (idem_key,)))
+
+    def operations(self, status: Optional[str] = None, limit: int = 500) -> list[dict]:
+        """Operations rows, oldest-first (id ASC — the reconciler processes crash-
+        orphaned rows in the order they were opened), optionally filtered to one
+        `status`."""
+        if status:
+            rows = self._all(
+                "SELECT * FROM operations WHERE status = ? ORDER BY id LIMIT ?",
+                (status, limit))
+        else:
+            rows = self._all("SELECT * FROM operations ORDER BY id LIMIT ?", (limit,))
+        return [self._with_op_payload(r) for r in rows]
+
+    def operations_count_by_status(self) -> dict:
+        """`{status: count}` computed in SQL. The callers that only need a tally (the
+        db-restore summary sheet) must not pull the whole table into Python to count it —
+        operations grows one row per merge/push forever and has no retention sweep."""
+        rows = self._all("SELECT status, COUNT(*) AS n FROM operations GROUP BY status")
+        return {r["status"]: r["n"] for r in rows}
+
     # -- settings: whitelisted runtime overrides (Phase 6.1) ----------------
     def get_setting(self, key: str) -> Optional[str]:
         r = self._one("SELECT value FROM settings WHERE key = ?", (key,))

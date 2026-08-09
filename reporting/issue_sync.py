@@ -24,6 +24,40 @@ from typing import Optional
 from ..common import paths
 from . import envelope as envelope_mod
 
+# -- crash-consistency intent-row wrapping (design: docs/plans/2026-08-08-crash-
+# consistency-design.md, Component B). Both call sites here run on the MAIN thread with
+# an already-open `store`, unlike code_round.py's worker-thread merge — so these wrap the
+# store directly rather than opening a fresh connection. BINDING CONSTRAINT: a store
+# hiccup must never block a graduation push/prepare — every helper is fail-soft.
+
+
+def _op_begin(store, kind, idem_key, **kw):
+    if not idem_key:
+        return None
+    try:
+        return store.begin_operation(kind, idem_key, **kw)
+    except Exception as e:  # noqa: BLE001 — fail-soft: never block the push on a store hiccup
+        print(f"[reconcile] begin_operation({kind}) failed (non-fatal): {e}", flush=True)
+        return None
+
+
+def _op_complete(store, op_id, receipt):
+    if not op_id:
+        return
+    try:
+        store.complete_operation(op_id, receipt)
+    except Exception as e:  # noqa: BLE001 — fail-soft
+        print(f"[reconcile] complete_operation failed (non-fatal): {e}", flush=True)
+
+
+def _op_fail(store, op_id, detail):
+    if not op_id:
+        return
+    try:
+        store.set_operation_status(op_id, "failed", str(detail)[:2000])
+    except Exception as e:  # noqa: BLE001 — fail-soft
+        print(f"[reconcile] set_operation_status failed (non-fatal): {e}", flush=True)
+
 # A close keyword immediately followed by an (optionally gh-prefixed) issue ref.
 # \b anchors the keyword to a word start so 'prefix #9' does not read as 'fix #9'.
 _CLOSE_RE = re.compile(
@@ -250,11 +284,29 @@ def graduate_and_push(*, root: str, base: str, repo: str, store,
         if not passed:                               # the INTEGRATED tip — re-run the suite on it and
             return {"action": "skip", "reason": "tests-failed", "report": report}   # skip if red
 
+    # Crash-consistency intent row (Component B), keyed on repo+base+tip — the local HEAD
+    # is already the tip we're about to push (the ff-merge above already moved it), so it
+    # doubles as the idem_key's tip_sha with no extra git call after the push.
+    pre_push_tip = (git("rev-parse", "HEAD").stdout or "").strip()
+    op = _op_begin(store, "graduate_push", f"grad:{repo}:{old_sha}:{pre_push_tip}",
+                  target_ref=base, base_sha=old_sha, tip_sha=pre_push_tip) if pre_push_tip else None
+    op_row = (op or {}).get("operation") or {}
+    if (op or {}).get("skip"):
+        # Already applied/reconciled — this exact push already landed; pushing again
+        # would be a no-op at best (git rejects a second identical push) but the sync
+        # loop below must not re-derive/re-post from a range git may now reject.
+        return {"action": "synced", "range": f"{old_sha}..{op_row.get('tip_sha', pre_push_tip)}",
+               "n_commits": 0, "synced": [], "base_sha": old_sha,
+               "tip_sha": op_row.get("tip_sha", pre_push_tip), "idempotent_skip": True}
+    op_id = op_row.get("id")
+
     push = git("push", remote, base)                # plain push: a rejected push fails, never forces
     if getattr(push, "returncode", 1) != 0:
+        _op_fail(store, op_id, "push-failed")
         return {"action": "skip", "reason": "push-failed"}
 
     new_sha = (git("rev-parse", "HEAD").stdout or "").strip()
+    _op_complete(store, op_id, new_sha)
     rng = f"{old_sha}..{new_sha}"
     commits = commits_in_range(root, rng, runner=runner)
     synced = sync_issues(repo, commits, store=store, runner=runner)
@@ -378,7 +430,8 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
                                   runner=subprocess.run, stop_check=None, test_fn=None,
                                   spool_root: Optional[str] = None,
                                   approval_id: Optional[int] = None,
-                                  ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
+                                  ttl_hours: float = 24.0, policy_hash: str = "",
+                                  on_nonce: Optional[callable] = None) -> dict:
     """BROKER-ARMED graduation: fetch (read-only — see the "credential model" note below),
     ff base<-auto_branch, retest, push the tip to the LOCAL bare spool repo (a file-path
     remote — no PUSH credential, ever), then build + write a publication envelope
@@ -403,7 +456,17 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
     Returns the same skip/reason shapes as `graduate_and_push` on failure (stop/fetch-
     failed/not-on-base/not-fast-forward/no-op/tests-failed/bare-push-failed), or
     `{'action': 'prepared', 'nonce', 'envelope', 'base_sha', 'tip_sha', 'range',
-    'n_commits'}` on success."""
+    'n_commits'}` on success.
+
+    Crash consistency (Component B, docs/plans/2026-08-08-crash-consistency-design.md):
+    the envelope's own intent row (`gradprep:<nonce>`) begins the instant the nonce is
+    known and completes right after the envelope file is durably written. `on_nonce`
+    (when given) is called with the fresh nonce BEFORE the envelope is written to disk —
+    the caller (reporting.approvals.execute_approval) uses this to stamp `broker_nonce`
+    onto the approval's payload FIRST, closing the orphan-envelope window structurally
+    (an envelope on disk with no way to match its receipt back to an approval row); the
+    intent row is the belt to that suspender. A raising `on_nonce` never blocks the
+    write — fail-soft, like every other Component B wrapper."""
     if stop_check and stop_check():
         return {"action": "skip", "reason": "stop"}
 
@@ -459,8 +522,25 @@ def graduate_and_prepare_envelope(*, root: str, base: str, repo: str, store,
         tip_sha=new_sha, range_=rng, n_commits=len(commits), issue_actions=issue_actions,
         approval_id=approval_id or 0, policy_hash=policy_hash or envelope_mod.policy_hash(),
         ttl_hours=ttl_hours)
+    nonce = env["nonce"]
+
+    # Crash-consistency intent row (Component B) — begins the instant the nonce exists.
+    op = _op_begin(store, "graduate_prepare", f"gradprep:{nonce}",
+                   target_ref=base, base_sha=old_sha, tip_sha=new_sha,
+                   payload={"approval_id": approval_id, "repo": repo})
+    op_id = ((op or {}).get("operation") or {}).get("id")
+
+    if on_nonce is not None:
+        # Stamp the approval's payload with broker_nonce BEFORE the envelope hits disk —
+        # closes the orphan-envelope window structurally (see the docstring above).
+        try:
+            on_nonce(nonce)
+        except Exception as e:  # noqa: BLE001 — fail-soft: never block the write
+            print(f"[reconcile] on_nonce callback failed (non-fatal): {e}", flush=True)
+
     envelope_mod.write_envelope(env, paths.broker_outbox_dir(spool))
-    return {"action": "prepared", "nonce": env["nonce"], "envelope": env,
+    _op_complete(store, op_id, nonce)
+    return {"action": "prepared", "nonce": nonce, "envelope": env,
            "base_sha": old_sha, "tip_sha": new_sha, "range": rng, "n_commits": len(commits)}
 
 
@@ -468,7 +548,8 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
                                  repo: str = "", runner=subprocess.run,
                                  spool_root: Optional[str] = None,
                                  approval_id: Optional[int] = None,
-                                 ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
+                                 ttl_hours: float = 24.0, policy_hash: str = "",
+                                 store=None, on_nonce: Optional[callable] = None) -> dict:
     """BROKER-ARMED promotion: mirrors `graduate_and_prepare_envelope` for the
     base->release hop, including its F2 fetch fix (round-2 integration review): fetches
     origin/<base> AND origin/<release> read-only (fail closed, mirroring
@@ -536,8 +617,32 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
             tip_sha=new_sha, range_=f"{release_ref}..{base_ref}", n_commits=n_commits,
             issue_actions=[], approval_id=approval_id or 0,
             policy_hash=policy_hash or envelope_mod.policy_hash(), ttl_hours=ttl_hours)
+        nonce = env["nonce"]
+
+        # Crash-consistency intent row + nonce pre-stamp, identical to
+        # `graduate_and_prepare_envelope`'s. This path was left unwrapped in Component B
+        # (Phase 2 review, F6), so the window the design called out as "NEW — not in the
+        # roadmap" stayed fully open for kind='publication': envelope on disk, no
+        # `broker_nonce` on the approval row, so the broker pushes it and
+        # `ingest_broker_receipts` (which matches only on `payload.broker_nonce`) can never
+        # claim the receipt — the row ages out to 'stale' while the promotion SUCCEEDED.
+        op = _op_begin(store, "graduate_prepare", f"gradprep:{nonce}",
+                       target_ref=release, base_sha=old_release_sha, tip_sha=new_sha,
+                       payload={"approval_id": approval_id, "repo": repo,
+                                "kind": "publication"})
+        op_id = ((op or {}).get("operation") or {}).get("id")
+
+        if on_nonce is not None:
+            # Stamp the payload BEFORE the envelope hits disk — closes the window
+            # structurally; the intent row is the belt to that suspender.
+            try:
+                on_nonce(nonce)
+            except Exception as e:  # noqa: BLE001 — fail-soft: never block the write
+                print(f"[reconcile] on_nonce callback failed (non-fatal): {e}", flush=True)
+
         envelope_mod.write_envelope(env, paths.broker_outbox_dir(spool))
-        return {"action": "prepared", "nonce": env["nonce"], "envelope": env,
+        _op_complete(store, op_id, nonce)
+        return {"action": "prepared", "nonce": nonce, "envelope": env,
                "sha": new_sha, "n_commits": n_commits}
     finally:
         git("worktree", "remove", "--force", wt)

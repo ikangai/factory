@@ -1534,6 +1534,74 @@ def cmd_broker_receipts(store: Blackboard) -> list[dict]:
     return results
 
 
+def cmd_reconcile(store: Blackboard, *, dry_run: bool = False) -> dict:
+    """`factory reconcile [--dry-run]` — the manual/post-restore handle on the crash-
+    consistency reconciler (design: docs/plans/2026-08-08-crash-consistency-design.md,
+    Component C). Also runs automatically at shift start (orchestrator/shift.py, right
+    after `reap_orphaned_shifts`). `--dry-run` previews the bounded row list it would
+    examine, resolving nothing."""
+    from . import reconcile as reconcile_mod
+    result = reconcile_mod.run_reconcile(store, dry_run=dry_run)
+    action = result.get("action")
+    if action == "halted":
+        print("[reconcile] STOP engaged — not sweeping.")
+        return result
+    if action == "dry_run":
+        rows = result.get("rows") or []
+        if not rows:
+            print("[reconcile] nothing to reconcile — no planned/executing operations.")
+        for r in rows:
+            print(f"  #{r['id']} [{r['kind']}] {r['idem_key']} — {r['status']}")
+        print(f"[reconcile] {len(rows)} row(s) would be examined (dry-run — nothing changed)")
+        return result
+    resolved = result.get("resolved") or []
+    unknown = result.get("unknown") or []
+    for r in resolved:
+        print(f"  #{r['id']} [{r['kind']}] -> {r['status']}: {r.get('detail', '')}")
+    for r in unknown:
+        print(f"  #{r['id']} [{r['kind']}] -> unknown: {r.get('detail', '')}")
+    print(f"[reconcile] examined {result.get('examined', 0)}, resolved {len(resolved)}, "
+          f"escalated {len(unknown)} unknown"
+          + (" — see `factory learn list --role factory` / the backlog for the escalation(s)"
+             if unknown else ""))
+    return result
+
+
+def cmd_db_restore(snapshot: str, *, yes: bool = False, db: Optional[str] = None,
+                   allow_default_target: bool = False) -> dict:
+    """`factory db-restore <snapshot> [--yes]` — the Component D restore drill's real
+    handle (design: docs/plans/2026-08-08-crash-consistency-design.md). Run OUTSIDE an
+    open store connection (it may replace the db file), exactly like `cmd_reset` — see
+    `orchestrator/db_restore.py` for the actual procedure (refuse unless STOP is engaged
+    and no runner is alive, integrity-check the snapshot, move the current db aside
+    timestamped — never delete, copy in, integrity-check the result, re-migrate, run the
+    reconciler, print a counts summary)."""
+    from . import db_restore
+    result = db_restore.restore(snapshot, db_path=db, yes=yes,
+                                allow_default_target=allow_default_target)
+    if not result.get("ok"):
+        reason = result.get("reason", "")
+        detail = result.get("detail", "")
+        print(f"[db-restore] REFUSED ({reason}): {detail}")
+        return result
+    for p in result.get("moved_aside") or []:
+        print(f"[db-restore] moved aside -> {p}")
+    if result.get("recovery"):
+        print(f"[db-restore] to undo: {result['recovery']}")
+    recon = result.get("reconcile") or {}
+    print(f"[db-restore] reconciler: examined {recon.get('examined', 0)}, "
+          f"resolved {len(recon.get('resolved') or [])}, "
+          f"escalated {len(recon.get('unknown') or [])} unknown")
+    counts = result.get("counts") or {}
+    print(f"[db-restore] restored — tasks: {counts.get('tasks_total', 0)} "
+          f"{counts.get('tasks_by_status', {})}, shifts: {counts.get('shifts_total', 0)}, "
+          f"operations: {counts.get('operations_total', 0)} "
+          f"{counts.get('operations_by_status', {})}")
+    print("[db-restore] cross-check against git, e.g.: "
+          "git -C <factory/auto worktree> log --oneline | wc -l")
+    return result
+
+
 def _factory_auto_head(root: str) -> Optional[str]:
     """The champion's current HEAD sha (the last accumulated merge on factory/auto)."""
     import subprocess
@@ -2283,6 +2351,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="skip the interactive confirm prompt (run-once) / required to "
                           "run at all (watch) — require_pin still applies either way")
     sub.add_parser("broker-receipts")       # FACTORY-side: ingest broker receipts, resolve approvals
+    rec = sub.add_parser("reconcile")       # crash-consistency sweep (design 2026-08-08)
+    rec.add_argument("--dry-run", action="store_true",
+                     help="preview the bounded planned/executing rows without resolving anything")
+    dbr = sub.add_parser("db-restore")      # safe DB restore (Component D, design 2026-08-08)
+    dbr.add_argument("snapshot", help="path to a sqlite3 .backup snapshot (see scripts/backup_blackboard.sh)")
+    dbr.add_argument("--db", default=None,
+                     help="target db to restore INTO (default: the real store). Give an "
+                          "explicit path to exercise/drill this tool safely.")
+    dbr.add_argument("--yes", action="store_true",
+                     help="skip the interactive confirm for an explicit --db target. It "
+                          "does NOT authorize overwriting the real store, and it does "
+                          "NOT skip the STOP-engaged / no-live-runner / snapshot-identity "
+                          "refusals.")
+    dbr.add_argument("--i-mean-the-real-store", dest="allow_default_target",
+                     action="store_true",
+                     help="required (or type the path when prompted) to overwrite the "
+                          "REAL store — STOP being engaged is not consent.")
     rbl = sub.add_parser("rebaseline")      # periodic full re-baseline: full suite vs the champion
     rbl.add_argument("--dry-run", action="store_true",
                      help="measure + report but store nothing and never auto-revert")
@@ -2419,6 +2504,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if a.cmd == "broker":
         cmd_broker(a.action, tip_sha=a.tip_sha, note=a.note, unattended=a.unattended)
         return 0
+    # db-restore may REPLACE the db file — handle before connecting, exactly like reset.
+    if a.cmd == "db-restore":
+        result = cmd_db_restore(a.snapshot, yes=a.yes, db=a.db,
+                                allow_default_target=a.allow_default_target)
+        return 0 if result.get("ok") else 1
 
     with Blackboard() as store:
         # Auto-apply the schema on open. It's all CREATE ... IF NOT EXISTS, so it's
@@ -2491,6 +2581,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             cmd_graduate(store, dry_run=a.dry_run)
         elif a.cmd == "broker-receipts":
             cmd_broker_receipts(store)
+        elif a.cmd == "reconcile":
+            cmd_reconcile(store, dry_run=a.dry_run)
         elif a.cmd == "rebaseline":
             cmd_rebaseline(store, dry_run=a.dry_run)
         elif a.cmd == "learn":

@@ -417,6 +417,36 @@ CREATE TABLE IF NOT EXISTS harness_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_harness_proposals_status ON harness_proposals(status);
 
+-- ===========================================================================
+-- Crash consistency: intent rows (design: docs/plans/2026-08-08-crash-consistency-
+-- design.md, Component A). SQLite cannot transact with git/GitHub — this table durably
+-- records that the factory is ABOUT to perform an external effect (a merge, a graduation
+-- push, a broker-armed graduation prepare, an issue-sync action) BEFORE it acts, so a
+-- crash mid-effect leaves a trace a reconciler (orchestrator/reconcile.py) can resolve
+-- against git/GitHub truth on the next startup, instead of silently losing the fact it
+-- happened or blindly repeating it. `idem_key` is the deterministic identity of the
+-- EFFECT itself (never a timestamp) — see the CRUD (common/store.py) for the exact
+-- shapes. New TABLE, so init_db's IF NOT EXISTS re-run is the whole migration for
+-- existing DBs — same precedent as task_evidence/gate_eval_results above.
+CREATE TABLE IF NOT EXISTS operations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,                 -- merge | graduate_push | graduate_prepare | issue_sync
+    idem_key     TEXT NOT NULL UNIQUE,           -- deterministic identity of the EFFECT, never a timestamp
+    status       TEXT NOT NULL DEFAULT 'planned'
+                   CHECK (status IN ('planned','executing','applied','reconciled','failed','unknown')),
+    target_ref   TEXT DEFAULT '',                -- branch / repo slug the effect touches
+    base_sha     TEXT DEFAULT '',
+    tip_sha      TEXT DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',     -- task_id / approval_id / issue numbers
+    receipt      TEXT DEFAULT '',                -- resulting sha or url, once known
+    detail       TEXT DEFAULT '',                -- why unknown/failed — operator-facing
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    shift_id     INTEGER,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_shift    ON tasks(shift_id);   -- find a dead shift's orphaned work
 CREATE INDEX IF NOT EXISTS idx_shifts_status  ON shifts(status);    -- find crashed 'running' shifts on resume

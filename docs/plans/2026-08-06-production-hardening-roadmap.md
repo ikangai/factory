@@ -124,7 +124,8 @@ actions are field-validated before ever reaching argv.
   shift close-out reports leases it released. Kills the dead-worker-holds-task-forever
   state.
 
-### Phase 2 — Crash consistency + canonical state
+### Phase 2 — Crash consistency + canonical state  *(SHIPPED — feat/crash-consistency,
+docs/plans/2026-08-08-crash-consistency-design.md, docs/runbooks/crash-recovery.md)*
 
 - **Intent rows.** A new `operations` table: idempotency key, operation kind
   (merge / graduate-push / issue-sync), input hashes + base sha,
@@ -141,6 +142,27 @@ actions are field-validated before ever reaching argv.
 - **Restore drill.** The backup daemon exists; add the documented, rehearsed restore path
   (runbook §: restore from snapshot, run reconciler, verify counts) — and run it once for
   real (drill 4).
+
+**Known open after Phase 2** (found by the phase's own adversarial review, fixed or
+deliberately deferred — recorded here so they are not rediscovered as surprises):
+
+- *Fixed in-phase:* the crash repair not firing in the wired order (the shift reaper
+  requeues first), `reconciled` conflating landed with not-landed (which suppressed a
+  never-executed push and reported it as approved), exit-128 being read as "not landed",
+  the publication path's orphan-envelope window, and nine `db-restore` defects including a
+  0-byte snapshot silently wiping the store and a move-aside that lost the WAL in exactly
+  the crashed-factory case it exists for.
+- *Deferred, still open:* `_resolve_graduate_prepare` resolves its operations row but does
+  not repair the paired approval, so a receipt whose `broker_nonce` link was already lost
+  still ages to `'stale'` even though the reconciler knew the answer. Every `unknown` of a
+  kind dedupes into ONE escalation task carrying only the first row's verify command, and
+  that task uses the graduation template, so a `merge` unknown is titled "graduation/
+  issue-sync failed". The `issue_sync` resolver has no producer (unarmed issue-sync is
+  unwrapped — its worst case is a duplicate comment). `operations` has no retention sweep,
+  and `unknown` rows are surfaced only via that escalation, not on the Queue tab. The
+  `factory/auto` worktree autodetect misses a linked worktree (`.git` is a file, not a
+  dir) and silently falls back to the target root — harmless while the branch ref is
+  shared. None of these can lose or repeat an effect; they degrade *reporting* about one.
 
 ### Phase 3 — Worker job-bundle isolation  *(own design doc when reached)*
 

@@ -294,9 +294,24 @@ Then, as needed:
 sudo -u factory -i
 cd "$HOME/fab/factory"
 git reset --hard <last-good-sha-on-deploy>
-# DB restore from a known-good snapshot:
-cp ~/factory-db-backups/blackboard-<STAMP>.db "$HOME/fab/factory/store/blackboard.db"
 ```
+
+**DB restore from a known-good snapshot: NEVER a bare `cp`** — a torn copy over a live
+(or WAL-sidecar-carrying) db can corrupt it outright, and a plain `cp` gives you no
+integrity check, no undo, and no reconciliation against what actually landed in git while
+the old db was live. Use the safe restore path instead (refuses unless STOP is engaged
+and no runner is alive, integrity-checks both the snapshot and the result, moves the
+current db aside timestamped — never deletes it, re-runs migrations, and runs the
+crash-consistency reconciler):
+
+```bash
+touch STOP   # if not already engaged
+factory db-restore ~/factory-db-backups/blackboard-<STAMP>.db --yes
+```
+
+Full procedure, drills, and the `factory reconcile` companion command:
+`docs/runbooks/crash-recovery.md`.
+
 then brake-cycle + kickstart as in §6/§7.
 
 ---

@@ -206,6 +206,14 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
     ref = f"approval-{approval_id}"
     root = config.get_adapter().entry()[0]
     base = config.target_config().get("base_branch") or "chore/extract-factory"
+
+    def _stamp_nonce(nonce: str) -> None:
+        """Crash consistency (Component B): stamp broker_nonce onto this row's payload
+        BEFORE the envelope is written to disk (issue_sync.graduate_and_prepare_
+        envelope's `on_nonce` hook) — closes the orphan-envelope window structurally.
+        The generic post-hoc stamp below (once `result` comes back) still runs too; it
+        is then a harmless re-write of the same value."""
+        store.update_approval_payload(approval_id, {**payload, "broker_nonce": nonce})
     # publication_broker (config.yaml-only, frozen via the autonomy. prefix, default OFF):
     # OFF reproduces today's push behavior byte-for-byte; ON diverts the real push into a
     # local-only prepare step (see the module docstring's 'broker-armed' outcome above).
@@ -277,7 +285,8 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     result = _run_prepare(prepare_fn, root=root, base=base, repo=repo,
                                           store=store, test_fn=test_fn,
                                           approval_id=approval_id,
-                                          spool_root=_broker_spool_root())
+                                          spool_root=_broker_spool_root(),
+                                          on_nonce=_stamp_nonce)
                 else:
                     result = graduate_fn(root=root, base=base, repo=repo, store=store,
                                          test_fn=test_fn)
@@ -315,10 +324,15 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     return {"ok": False, "error": "preview-stale", "fresh": fresh_payload}
                 if broker_on:
                     prepare_fn = prepare_promote_fn or issue_sync.promote_and_prepare_envelope
+                    # `store`/`on_nonce` mirror the graduation branch: without them the
+                    # publication path had no intent row and stamped broker_nonce only
+                    # AFTER the envelope hit disk, leaving the orphan-envelope window
+                    # fully open for kind='publication' (Phase 2 review, F6).
                     result = _run_prepare(prepare_fn, root=root, base=base, release=release,
                                           repo=config.target_repo_slug(),
                                           approval_id=approval_id,
-                                          spool_root=_broker_spool_root())
+                                          spool_root=_broker_spool_root(),
+                                          store=store, on_nonce=_stamp_nonce)
                 else:
                     promote_fn = promote_fn or issue_sync.promote_to_release
                     result = promote_fn(root=root, base=base, release=release)
@@ -418,9 +432,17 @@ def ingest_broker_receipts(store, *, receipts_dir: str = None, done_dir: str = N
             ref = f"approval-{match['id']}"
             if rstatus == "pushed":
                 note = f"broker pushed -> {(receipt.get('receipt_sha') or '')[:9]}"
+                # Crash-consistency ordering fix (Component B, docs/plans/2026-08-08-
+                # crash-consistency-design.md): the issue-sync ledger records BEFORE the
+                # approval row resolves — swapped from the prior order (resolve first,
+                # then record). A crash between the two now leaves the row 'executing'
+                # (the RECOVERABLE direction: the receipt is still findable/re-ingestible
+                # next startup) instead of 'approved' with the ledger never advanced (no
+                # re-ingestion path exists once a row is resolved — every later envelope
+                # would re-plan already-closed issues forever).
+                _record_synced_issues(store, receipt)
                 store.resolve_approval(match["id"], "approved", note=note)
                 store.record_operator_action("broker-pushed", ref, note)
-                _record_synced_issues(store, receipt)
             else:
                 note = f"broker {rstatus}: {receipt.get('detail', '')}"
                 # F5 (round-2 integration fix): mark the payload BEFORE resolving (payload
