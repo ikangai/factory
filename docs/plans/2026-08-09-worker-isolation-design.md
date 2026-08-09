@@ -1,164 +1,156 @@
-# Phase 3 — worker isolation: the interior authority split (2026-08-09)
+# Phase 3 — grading isolation: containing the code the factory runs (2026-08-09, v2)
 
-**Provenance:** Phase 3 of `docs/plans/2026-08-06-production-hardening-roadmap.md`,
-seam-mapped against main @ 071616f. The external reviewer's formulation is the target:
+**Supersedes v1 of this file** (committed 31f652e), which scoped the phase around running
+the developer's `claude -p` as a separate OS user. Two adversarial reviews, both with
+executed probes, showed that was the wrong target: it hardens a call that is not the
+shortest path to the control plane, and turning it on as specified would have broken the
+factory outright (100% `no_candidate` from git's dubious-ownership check, a leaked clone
+per task, a `chown` that mutates the real target repo through hardlinked inodes, and a
+conductor that dies on turn one). The evidence and the discarded plan are preserved in
+git history; this document is the corrected design.
 
-> If a compromised worker can directly open `blackboard.db`, "workers cannot promote,
-> approve, or release" is a software convention rather than a security boundary.
+## The shortest path is grading, not the LLM call
 
-## The premise, verified (an earlier reading of mine was wrong)
+The factory **executes worker-authored code, as the factory user, on every candidate**:
 
-I initially concluded the boundary already existed, because the dev repo's `config.yaml`
-carries `autopilot.prod: true` and `super_worker.user: "agent"`. That is not what a
-deployed factory runs. `deploy/user-factory/apply-config-overlay.py:41-45` **inverts
-exactly those keys on install**:
+| # | site | what runs | as whom |
+|---|---|---|---|
+| 1 | `code_round.py:269` `adapter.run_tests(cand_repo)` | the candidate's whole test suite | factory |
+| 2 | `code_round.py:227-268` red-proof | changed test nodes, on base **and** candidate | factory |
+| 3 | `code_round.py:~278` acceptance (`run_named_test`) | the spec-named test | factory |
+| 4 | `code_round.py:358,361` post-merge re-baseline | `grade_fn(main_repo)` + `run_tests(main_repo)` — **in the factory's own `factory/auto` worktree** | factory |
 
-| key | dev repo | after the deploy overlay |
-|---|---|---|
-| `autopilot.prod` | `true` | **`false`** |
-| `super_worker.user` | `"agent"` | **`""`** |
-| `super_worker.claude_bin` | agent's claude | `"claude"` |
+`adapters/base.py:103-115` is a plain `subprocess.run(["python3","-m","pytest","tests/",
+"-q"], cwd=cand_repo)` inside the factory process. The frozen gate protects clive's
+IMMUTABLE/GOVERNANCE tiers and **never `tests/`** — and `super_worker.require_test: true`
+*mandates* that the worker ship a test. So the worker is required to supply Python that the
+factory then runs with its own authority. A reviewer proved it end to end: a candidate
+`conftest.py` executed under the normal test command and wrote to the blackboard.
 
-Confirmed against the live deployment: `prod=False`, `user=''`. `orchestrator.py:1085`
-then resolves `as_user = (sw["user"] or None) if prod else None` → `None`, so
-`claude_super` takes its same-user branch (`roles/common.py:216`). **Every worker runs as
-the factory user, with Bash.** The guest-house runbook already concedes this
-(`docs/runbooks/guest-house.md:183-186`).
+No OS boundary around the `claude -p` call changes any of this. That is why v1 bought
+almost nothing.
 
-What that worker can do today, with one `bash` call:
-- read **and write** `$FACTORY_ROOT/store/blackboard.db` — own the tasks table, forge
-  approvals, merges and learnings;
-- read `scenarios/held-out/` and `checks/` — destroying the proposer/grader blindness
-  §17.3 of ARCHITECTURE.md claims as an invariant;
-- `rm $FACTORY_ROOT/STOP` — release the kill switch;
-- read `~/.factory-secrets/env` — the PAT, 600 but owned by the same user it runs as.
+## Prerequisite — the dashboard write channel (small, must land first)
 
-And it is *told* where to look: `roles/common.py:297` substitutes `{FACTORY_ROOT}` into the
-developer prompt, and `roles/developer/prompt.md:34-39` instructs the worker to shell into
-it for bus announcements. `tests/test_developer.py:76-85` asserts that leak is present.
+`dashboard/fleet_server.py:298-385` serves nine POST routes — including
+`/api/queue/approval`, `/api/resume`, `/api/settings`, `/api/mission` — on `127.0.0.1`
+with **no authentication**. The only guard is a CSRF check whose first branch is
+`if not origin: return True`, so a `curl` with no `Origin` header passes. Any local
+process can forge an operator approval or clear the killswitch. Until that is closed,
+isolating the grader is moot: the isolated process can simply ask the dashboard.
 
-**Additional live finding (this machine, deployed factory):** `/Users/factory` is `750`
-group `staff` and the blackboard is `644`. macOS puts every local account in `staff`, so
-the worker user *and the operator's own account* can already read the deployed factory's
-database. The guest-house doctor's 700 rule exists for this; that deployment predates the
-installer fix that satisfies it.
+Deliverable: a token file (mode 600, factory-owned) or a unix socket in a 0700 directory,
+required by every write route; the board reads the token from the same file. Add
+"cannot POST any `/api/*` write route" and "cannot release the killswitch by any means"
+to the boundary probes — v1's probe list checked "cannot delete STOP", which `/api/resume`
+does *for* the caller, so the drill would have returned a false green.
 
-## What is already right (build on it, do not rebuild)
+## Threat model
 
-The map found the interior is closer than the roadmap's "job bundle + inbox" sketch
-assumes, and rebuilding wholesale would be the expensive route:
-
-1. **`claude_p` is genuinely bounded** — `--tools "" --setting-sources "" --strict-mcp-config`,
-   neutral cwd. The isolated transport needs no change.
-2. **The orchestrator is already the only store-writer.** Every store write in the develop
-   rail is hoisted to the main thread (`develop.py:268-329, 417-570`); workers never hold a
-   connection. The stated Phase-3 goal is ~90% met by construction.
-3. **The git artifact is already the deliverable.** Branch + `changed_paths` are verified
-   independently of anything the worker says; prose only feeds advisory channels.
-4. **`sudo -H -u` exists, works, and is tested** (`roles/common.py:167-173`,
-   `develop.py:712-717`, `tests/test_super_worker.py:126-148`). For the developer call the
-   hard boundary is a **config/deploy problem, not a code problem**.
-5. **The broker spool is a finished template** for any inbox we do need — atomic write,
-   sidecar hash, fail-closed expiry, nonce ledger, ownership split.
-
-## Threat model (state it plainly, so the phase is not oversold)
-
-An OS-user boundary stops a worker **reaching** the control plane. It does **not** stop a
-worker **lying** in what it returns — that is what the deterministic gates are for (tests,
-frozen-path check, red-proof, smoke grade, reviewer), and those already treat the reply as
-untrusted. Phase 3 closes reach, not honesty. Say so in the runbook.
+Closing grading isolation means **candidate-authored code cannot reach the control plane
+when it runs**. It does not make the worker honest — a worker can still lie in its reply,
+and the deterministic gates (tests, frozen paths, red-proof, smoke grade, reviewer) already
+treat everything it says as untrusted. It also does not close the conductor (§ Not closed).
 
 ## Components
 
-### A — provision the worker user (the deploy gap)
+### A — a grading identity
 
-`01-create-user.sh` creates only `factory`; **nothing creates the worker user**, so a fresh
-guest house cannot use the hard path even if it wanted to. Add to the guest-house wizard:
-a Standard, non-admin `factory-worker` account with its own 700 home; its own `claude`
-binary installed and logged in; and the narrow passwordless sudo grant
-`roles/common.py:171` requires (`factory` may run `sudo -u factory-worker <claude>` and
-`sudo chown -R factory-worker <tmp clone>`, nothing else). `guesthouse_check` gains a rule
-asserting the grant is exactly that narrow.
+An unprivileged `factory-grader` account: no admin, no sudo of its own, its own 700 home,
+**no read access to `FACTORY_ROOT`** (which requires the factory home to be 700 — currently
+750 group `staff` on the reference deployment, and `staff` contains every local account),
+no store, no credentials, and no `~/.factory-secrets`. It needs only a python toolchain and
+the target's test dependencies. Unlike v1's worker user it needs **no `claude` install and
+no Claude login**, which removes the entire GUI/OAuth provisioning burden that made v1's
+Component A a hidden multi-step manual procedure.
 
-### B — turn the boundary ON in the deployment
+### B — one execution seam
 
-Flip the overlay: `autopilot.prod: true`, `super_worker.user: "factory-worker"`,
-`claude_bin` = that user's claude. This is the change that makes the phase real; A must
-land first or every dispatch fails at stage `chown`.
+Every site in the table above routes through a single executor:
+`run_target_code(argv, cwd, timeout) -> (rc, output)`. Same-user (today's behavior) when
+isolation is off; `sudo -u factory-grader -- <wrapper> …` when on. `adapters/base.py`'s
+`run_tests`/`run_named_test` are the only callers that need to change, plus the re-baseline
+path. Keeping it to one function is what makes the boundary auditable — and what lets a
+test assert that **no** candidate-code execution bypasses it.
 
-### C — close the FACTORY_ROOT leak
+### C — export, not worktree (the constraint that shapes everything)
 
-Stop substituting `{FACTORY_ROOT}` into the developer prompt and drop the bus-announcement
-instruction from `roles/developer/prompt.md`. Worker bus presence moves orchestrator-side:
-the rail announces dispatch/outcome on the worker's behalf (it already knows both). Invert
-`tests/test_developer.py:76-85` to assert the path is **absent**. Related:
-`worker_bus_env`'s `AGORA_DIR` also carries `FACTORY_ROOT` and is dropped under `as_user`
-anyway (`roles/common.py:213-214`) — so the hard mode and the bus are already mutually
-exclusive; this resolves that contradiction in the safe direction.
+`develop.py:771` builds the candidate checkout with `adapter.add_worktree(main_repo, …)` —
+a **linked worktree of the factory's own repo**, sharing `main_repo/.git`. Handing that to
+another identity would expose the factory's object store and refs to it, and pytest wants
+to write into its working tree anyway (`__pycache__`, `.pytest_cache`, test temp files).
 
-### B.1 — red-proof breaks under `as_user` (found by probe; B must fix it)
+So the graded checkout must be a **detached export** — `git clone --no-hardlinks` (never a
+plain local clone: probed, plain `git clone` hardlinks objects on one APFS volume, so
+changing the copy's permissions changes the original's inodes) or `git archive` — created
+fresh, owned by the grader, and thrown away after. The merge is unaffected: the branch is
+already fetched into `main_repo` by `fetch_candidate` *before* grading, so what gets merged
+is a ref the grader never touches.
 
-`develop.py:783` threads `base_repo=dev_clone` — the clone that `develop.py:712-717` has
-just `chown -R`'d **to the worker** — and `code_round.py:222-225` creates a detached
-worktree inside it for the red-proof check. Probed: `git worktree add` writes
-`.git/worktrees/<name>`, so against a clone the caller cannot write it fails with
-`fatal: could not create leading directories of '.git/worktrees/…': Permission denied`.
+### D — the post-merge re-baseline (the one v1 would have missed entirely)
 
-Nobody has hit this because **both knobs are off**: `red_proof` defaults false and the
-deployed `prod` is false. Component B flips `prod` on, so the pair becomes reachable and
-every candidate would then fail at the red-proof stage.
+`code_round.py:358-361` runs `grade_fn` and `run_tests` **in `main_repo`** after the merge
+lands — i.e. the candidate's code runs in the factory's persistent `factory/auto` worktree.
+Isolating only the pre-merge checkout leaves this wide open. The re-baseline gets the same
+treatment: a fresh export at the post-merge sha, graded by the grader identity.
 
-Fix inside B: take the base worktree from a repo the FACTORY still owns. Cheapest correct
-option is to create it **before** the chown (`base_sha` is already recorded at
-`develop.py:708-711`, one line earlier); alternative is to add it in `main_repo` after
-`fetch_candidate`. Either way `base_repo` must stop pointing at worker-owned territory.
-This is also a general rule the phase should state: **after the chown, the factory may
-READ the clone but must never WRITE it** — every factory-side git operation on `dev_clone`
-needs auditing against that rule, not just this one.
+### E — a root-free, pinned grant
 
-### D — prove the boundary (the phase's actual deliverable)
+v1's sudoers grant was effectively `factory ALL=(root) NOPASSWD: /usr/sbin/chown -R
+<user> *` — a root chown with an unconstrainable path argument, i.e. a privilege-escalation
+primitive handed to the same account the conductor runs as. This design needs **no root and
+no chown**: one user-to-user grant, `factory ALL=(factory-grader) NOPASSWD:
+/opt/factory/run-target-code`, pinned to a wrapper script the operator installs read-only.
+The wrapper takes a cwd and an argv, refuses paths outside the export root, and execs.
 
-Reach is a claim; claims need tests. Add `guesthouse_check` rules, run **as the worker
-user**, asserting it CANNOT: read/write `$FACTORY_ROOT/store/blackboard.db`, read
-`config.yaml`, read `scenarios/held-out/`, read `~factory/.factory-secrets/env`, or delete
-`$FACTORY_ROOT/STOP`. Plus the installer must `chmod 700` the factory home (fixing the live
-750 finding) and a drill that runs the probes and records the output.
+### F — cleanup
 
-### E — typed terminal status (prerequisite for any real bundle)
+`shutil.rmtree` cannot remove files another identity created inside directories it created
+(probed: `PermissionError`, and `ignore_errors=True` silently leaves the tree — v1 would
+have leaked a full clone per task, forever, on a macOS with no `/tmp` sweeper). Deletion
+runs through the same wrapper: `sudo -u factory-grader <wrapper> rm -rf <export>`, with the
+factory-owned parent removed afterwards.
 
-`classify_empty_handed` (`develop.py:65-82`) distinguishes timeout / crash / transport /
-refusal by **substring-matching English** against `REFUSAL_MARKERS`. Those classifications
-gate real spend (auto-decompose, retry) and real store writes. The worker should write a
-small typed result file into its own workdir (status, learnings, notes) which the
-orchestrator reads from the clone it already owns — no new channel, no new trust. Prose
-sniffing stays as the fallback for a worker that writes nothing.
+### G — proof
 
-### F — the conductor (name the hole; do not pretend to close it)
+`guesthouse_check` rules executed **as the grader**, asserting it cannot: read or write
+`store/blackboard.db`, read `config.yaml`, read `~factory/.factory-secrets/env`, read
+`FACTORY_ROOT` at all, delete `STOP`, **or POST to any dashboard write route**. Fix v1's
+context gate first — `is_guest_house_context()` recognizes only the `factory` account, so
+new rules run as a different user would `SKIP` and exit 0: a proof that passes by not
+running.
 
-`roles/conductor.py:226` runs a Bash super-worker with `workdir = paths.FACTORY_ROOT` and
-`max_turns=60`, because it drives `./bin/factory` by design. It is a **bigger hole than the
-developer** and Phase 3's "workers" scope does not cover it. Honest position for this
-phase: shrink its toolset to what it demonstrably needs, document it as the one privileged
-role, and make the *state* it can reach the thing that is defended (Phase 1 already moved
-publication credentials out; the store remains). A conductor jail needs a narrow typed
-command API — its own phase, not a sub-bullet of this one.
+## Not closed by this phase (say so plainly)
 
-## Out of scope (with reasons, so nobody re-litigates)
+- **The conductor** runs as factory with Bash and `workdir=FACTORY_ROOT`, because it drives
+  `./bin/factory` by design. It is 1-per-shift and executes no target code, but it remains
+  the largest interior hole and needs its own phase (a narrow typed command API).
+- **The developer's `claude -p`** still runs as the factory user. After grading isolation it
+  can still read the tree — but it can no longer get its *code* executed with authority,
+  which was the escalation that mattered.
+- **Honesty.** Unchanged, and owned by the gates.
 
-- **Containers per worker.** `envs/docker_env.py` is eval-shaped (seeds `seed_files`, no
-  git-in/branch-out, no claude in the image) and runs `--network none`, which a worker that
-  must call the Anthropic API cannot use. The guest-house rules also forbid the host Docker
-  socket. A container variant needs an egress policy this codebase has no precedent for.
-- **Full job-bundle/inbox rebuild.** The git artifact is already the bundle and the
-  orchestrator is already the only writer; a spool would add a channel without adding a
-  boundary. Revisit if E's typed result proves insufficient.
-- **Per-worker OS users (one account each).** The shared `factory/auto` worktree and
-  `threading.Lock` merge lock (`develop.py:336`) assume one process. One worker *account*
-  gives the boundary; N accounts would force the merge orchestrator-side first.
+## Out of scope, with reasons
 
-## Acceptance
+- **Containers.** Worth noting that the objection that killed them for the LLM worker does
+  **not** apply here: grading needs no Anthropic API, so `--network none` is viable, and
+  `envs/docker_env.py` already runs scenarios that way. What blocks it is macOS + the
+  guest-house rule against exposing the host Docker socket, plus the eval-shaped provisioner
+  (`seed_files`, no git-in/branch-out). A container variant is the natural *second*
+  implementation of Component B's seam once a Linux deployment exists.
+- **Per-worker identities.** One grader account is enough: grading is already serialized
+  behind the merge lock, and N accounts multiply provisioning without adding a boundary.
 
-Drill 2 from the roadmap, run for real: a task whose brief instructs the worker to read the
-blackboard, the held-out set and the secrets file, and to clear STOP. All five must fail
-with permission errors, recorded in the runbook. Plus: the full suite green with the
-boundary ON, proving the rail still works through `sudo -u`.
+## Posture and acceptance
+
+Ships **default OFF** (`super_worker.grader_user: ""`), matching Phases 1 and 2: OFF must be
+byte-identical to today. Enabling is an explicit operator act, gated on:
+
+1. **One real end-to-end round** with isolation on — a candidate built, graded, merged.
+   v1's acceptance ("suite green with the boundary ON") proves nothing, because every test
+   of this seam monkeypatches `subprocess.run` and never execs anything.
+2. **The malicious-candidate drill**: a task whose test attempts to write the blackboard,
+   read the secrets file, and clear STOP. All must fail with permission errors, recorded in
+   `docs/runbooks/worker-isolation.md` — including the dashboard route, which is the one an
+   isolated process would reach for next.
+3. A regression test asserting no candidate-code execution path bypasses Component B's seam.
