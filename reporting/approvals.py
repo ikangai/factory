@@ -324,10 +324,15 @@ def execute_approval(store, approval_id, *, graduate_fn=None, promote_fn=None,
                     return {"ok": False, "error": "preview-stale", "fresh": fresh_payload}
                 if broker_on:
                     prepare_fn = prepare_promote_fn or issue_sync.promote_and_prepare_envelope
+                    # `store`/`on_nonce` mirror the graduation branch: without them the
+                    # publication path had no intent row and stamped broker_nonce only
+                    # AFTER the envelope hit disk, leaving the orphan-envelope window
+                    # fully open for kind='publication' (Phase 2 review, F6).
                     result = _run_prepare(prepare_fn, root=root, base=base, release=release,
                                           repo=config.target_repo_slug(),
                                           approval_id=approval_id,
-                                          spool_root=_broker_spool_root())
+                                          spool_root=_broker_spool_root(),
+                                          store=store, on_nonce=_stamp_nonce)
                 else:
                     promote_fn = promote_fn or issue_sync.promote_to_release
                     result = promote_fn(root=root, base=base, release=release)

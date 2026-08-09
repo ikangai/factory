@@ -480,6 +480,88 @@ def test_execute_approval_stamps_broker_nonce_before_prepare_fn_writes(tmp_path,
         assert row["status"] == "executing"
 
 
+def test_execute_approval_stamps_broker_nonce_on_the_PUBLICATION_path_too(tmp_path, monkeypatch):
+    """F6 — Component B wrapped graduation only. The publication branch passed neither
+    `store` nor `on_nonce`, so `kind='publication'` kept the exact window the design
+    flagged as "NEW — not in the roadmap": the envelope reaches the outbox with no
+    `broker_nonce` on the row, the broker pushes it, and `ingest_broker_receipts` (which
+    matches only on `payload.broker_nonce`) can never claim the receipt — the row ages out
+    to 'stale' while the promotion actually SUCCEEDED."""
+    import types
+    from factory.common.store import Blackboard
+
+    monkeypatch.setattr(approvals.config, "target_repo_slug", lambda: "o/r")
+    monkeypatch.setattr(approvals.config, "get_adapter",
+                        lambda: types.SimpleNamespace(entry=lambda: ("/troot", "/troot/x")))
+    monkeypatch.setattr(approvals.config, "target_config",
+                        lambda: {"base_branch": "base", "release_branch": "main"})
+    monkeypatch.setattr(approvals.config, "load_config",
+                        lambda: {"autonomy": {"publication_broker": True}})
+
+    seen = {}
+
+    def lag_fn(**kw):
+        return {"ahead": 2, "release": "main"}
+
+    def prepare_promote(*, on_nonce=None, store=None, **kw):
+        seen["got_on_nonce"] = on_nonce is not None
+        seen["got_store"] = store is not None
+        if on_nonce:
+            on_nonce("pub-nonce-1")          # the REAL prepare fn calls this before writing
+        return {"action": "prepared", "nonce": "pub-nonce-1"}
+
+    with Blackboard(str(tmp_path / "f.db")) as s:
+        s.init_db()
+        aid = s.add_pending_approval("publication", {"ahead": 2, "release": "main"})
+        res = approvals.execute_approval(s, aid, lag_fn=lag_fn,
+                                         prepare_promote_fn=prepare_promote)
+        assert res["ok"] is True
+        assert seen == {"got_on_nonce": True, "got_store": True}
+        row = s.get_approval(aid)
+        assert row["payload"]["broker_nonce"] == "pub-nonce-1", (
+            "a publication envelope would be unmatchable to its receipt")
+        assert row["status"] == "executing"
+
+
+def test_promote_prepare_opens_an_intent_row_and_stamps_before_writing(store, tmp_path):
+    """F6, the producer half: the publication prepare path must open its own intent row
+    and stamp the nonce BEFORE the envelope file exists, exactly as the graduation path
+    does — otherwise a crash between write and stamp is unrecoverable by either
+    mechanism. Uses the injected `runner` (no real repo needed): git is only asked for
+    shas and exit codes here, and the ORDER of our own side effects is the subject."""
+    class _R:
+        def __init__(self, rc=0, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake_git(argv, **kw):
+        if "rev-parse" in argv:
+            return _R(0, "a" * 40)
+        if "rev-list" in argv:
+            return _R(0, "3")
+        return _R(0, "")
+
+    order = []
+    real_write = issue_sync.envelope_mod.write_envelope
+
+    def spy_write(env, outbox):
+        order.append("write")
+        return real_write(env, outbox)
+
+    issue_sync.envelope_mod.write_envelope = spy_write
+    try:
+        res = issue_sync.promote_and_prepare_envelope(
+            root=str(tmp_path / "root"), base="base", release="main", repo="o/r",
+            runner=fake_git, spool_root=str(tmp_path / "spool"), approval_id=7,
+            store=store, on_nonce=lambda _n: order.append("stamp"))
+    finally:
+        issue_sync.envelope_mod.write_envelope = real_write
+
+    assert res["action"] == "prepared"
+    assert order == ["stamp", "write"], "the nonce must be durable before the envelope is"
+    op = store.get_operation_by_key(f"gradprep:{res['nonce']}")
+    assert op is not None and op["status"] == "applied"
+
+
 # -- reporting/approvals.py: armed-ingestion write-order swap ----------------
 
 def test_ingest_records_synced_issues_before_resolving_the_approval(tmp_path, monkeypatch):

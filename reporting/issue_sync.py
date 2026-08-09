@@ -548,7 +548,8 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
                                  repo: str = "", runner=subprocess.run,
                                  spool_root: Optional[str] = None,
                                  approval_id: Optional[int] = None,
-                                 ttl_hours: float = 24.0, policy_hash: str = "") -> dict:
+                                 ttl_hours: float = 24.0, policy_hash: str = "",
+                                 store=None, on_nonce: Optional[callable] = None) -> dict:
     """BROKER-ARMED promotion: mirrors `graduate_and_prepare_envelope` for the
     base->release hop, including its F2 fetch fix (round-2 integration review): fetches
     origin/<base> AND origin/<release> read-only (fail closed, mirroring
@@ -616,8 +617,32 @@ def promote_and_prepare_envelope(*, root: str, base: str, release: str = "main",
             tip_sha=new_sha, range_=f"{release_ref}..{base_ref}", n_commits=n_commits,
             issue_actions=[], approval_id=approval_id or 0,
             policy_hash=policy_hash or envelope_mod.policy_hash(), ttl_hours=ttl_hours)
+        nonce = env["nonce"]
+
+        # Crash-consistency intent row + nonce pre-stamp, identical to
+        # `graduate_and_prepare_envelope`'s. This path was left unwrapped in Component B
+        # (Phase 2 review, F6), so the window the design called out as "NEW — not in the
+        # roadmap" stayed fully open for kind='publication': envelope on disk, no
+        # `broker_nonce` on the approval row, so the broker pushes it and
+        # `ingest_broker_receipts` (which matches only on `payload.broker_nonce`) can never
+        # claim the receipt — the row ages out to 'stale' while the promotion SUCCEEDED.
+        op = _op_begin(store, "graduate_prepare", f"gradprep:{nonce}",
+                       target_ref=release, base_sha=old_release_sha, tip_sha=new_sha,
+                       payload={"approval_id": approval_id, "repo": repo,
+                                "kind": "publication"})
+        op_id = ((op or {}).get("operation") or {}).get("id")
+
+        if on_nonce is not None:
+            # Stamp the payload BEFORE the envelope hits disk — closes the window
+            # structurally; the intent row is the belt to that suspender.
+            try:
+                on_nonce(nonce)
+            except Exception as e:  # noqa: BLE001 — fail-soft: never block the write
+                print(f"[reconcile] on_nonce callback failed (non-fatal): {e}", flush=True)
+
         envelope_mod.write_envelope(env, paths.broker_outbox_dir(spool))
-        return {"action": "prepared", "nonce": env["nonce"], "envelope": env,
+        _op_complete(store, op_id, nonce)
+        return {"action": "prepared", "nonce": nonce, "envelope": env,
                "sha": new_sha, "n_commits": n_commits}
     finally:
         git("worktree", "remove", "--force", wt)
