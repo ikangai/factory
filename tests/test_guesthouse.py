@@ -765,7 +765,7 @@ def test_run_all_backcompat_returns_just_the_rules(tmp_path):
                  run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "no not a member\n", ""))
     rules = gh.run_all(ctx)
     assert isinstance(rules, list)
-    assert len(rules) == 10
+    assert len(rules) == 11   # + shared-drop-hygiene (2026-08-09)
 
 
 # --- table renderer + audit()/main() ----------------------------------------------------------
@@ -830,7 +830,7 @@ def test_audit_end_to_end_never_touches_a_real_subprocess(tmp_path, capsys):
                      docker_socket=str(tmp_path / username / "no-docker.sock"),
                      run=fake_run)
         result = gh.audit(ctx)
-        assert len(result.rules) == 10
+        assert len(result.rules) == 11   # + shared-drop-hygiene
         table = gh.render_table(result.rules)
         assert "RULE" in table
 
@@ -1072,3 +1072,70 @@ def test_runbook_documents_the_distro_marker_reuse_rule():
 def test_runbook_documents_the_parameterized_invocation_form():
     text = _read(RUNBOOK)
     assert "scriptblock" in text.lower()
+
+
+# ==========================================================================================
+# shared-drop-hygiene — /Users/Shared is world-readable AND world-writable, so it is where
+# "temporary" hand-off artifacts accumulate. Found live 2026-08-09: a complete 643 KB copy
+# of the blackboard at 0644 plus credential-shaped files, months after they were consumed.
+# No other rule looks outside the account's own home.
+# ==========================================================================================
+def test_shared_drop_flags_a_world_readable_store_copy(tmp_path):
+    shared = tmp_path / "Shared"
+    (shared / "factory-seed").mkdir(parents=True)
+    snap = shared / "factory-seed" / "blackboard.db"
+    snap.write_bytes(b"x" * 64)
+    os.chmod(snap, 0o644)
+
+    ctx = gh.Ctx(shared_dir=str(shared),
+                               bare_repo_path=str(shared / "factory.git"))
+    rule = gh.rule_shared_drop_hygiene(ctx)
+    assert rule.status == gh.FAIL
+    assert "blackboard.db" in rule.detail
+
+
+def test_shared_drop_flags_credential_shaped_files(tmp_path):
+    shared = tmp_path / "Shared"
+    shared.mkdir()
+    for name in ("claude_oa_token.txt", "pat.txt", "fac_session.txt"):
+        f = shared / name
+        f.write_text("secret-shaped")
+        os.chmod(f, 0o644)
+
+    rule = gh.rule_shared_drop_hygiene(
+        gh.Ctx(shared_dir=str(shared),
+                             bare_repo_path=str(shared / "factory.git")))
+    assert rule.status == gh.FAIL
+    for name in ("claude_oa_token.txt", "pat.txt", "fac_session.txt"):
+        assert name in rule.detail
+
+
+def test_shared_drop_passes_when_everything_is_owner_only(tmp_path):
+    shared = tmp_path / "Shared"
+    shared.mkdir()
+    snap = shared / "blackboard.db"
+    snap.write_bytes(b"x")
+    os.chmod(snap, 0o600)
+    (shared / "harmless-notes.md").write_text("not sensitive")
+
+    rule = gh.rule_shared_drop_hygiene(
+        gh.Ctx(shared_dir=str(shared),
+                             bare_repo_path=str(shared / "factory.git")))
+    assert rule.status == gh.PASS
+
+
+def test_shared_drop_never_flags_the_public_transfer_repo(tmp_path):
+    """The bare repo carries the factory's own source — a PUBLIC repo (github.com/ikangai/
+    factory), including scenarios/held-out and checks/. Readable there is not a disclosure,
+    and flagging it would train the operator to ignore this rule."""
+    shared = tmp_path / "Shared"
+    bare = shared / "factory.git" / "objects"
+    bare.mkdir(parents=True)
+    obj = bare / "held-out-secret.db"
+    obj.write_bytes(b"x")
+    os.chmod(obj, 0o644)
+
+    rule = gh.rule_shared_drop_hygiene(
+        gh.Ctx(shared_dir=str(shared),
+                             bare_repo_path=str(shared / "factory.git")))
+    assert rule.status == gh.PASS

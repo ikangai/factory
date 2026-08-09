@@ -172,6 +172,15 @@ elif [ -f "$SNAPSHOT" ]; then
         exit 1
     fi
     echo "  seed OK (integrity check passed)"
+    # The seed has now served its ONLY purpose. It is a complete copy of the blackboard
+    # sitting in world-writable /Users/Shared; leaving it there is a standing disclosure of
+    # every task, learning and approval. This user cannot unlink it (the drop point is
+    # operator-owned 0700 + a read-only ACL for us — deliberately), so the removal is an
+    # operator action and this is the loudest place to ask for it.
+    echo ""
+    echo "  ACTION REQUIRED (operator, now): the seed is a FULL COPY of the store —"
+    echo "    rm $SNAPSHOT"
+    echo ""
 else
     echo "  no snapshot at $SNAPSHOT — starting with an EMPTY blackboard (no learnings/history)"
 fi

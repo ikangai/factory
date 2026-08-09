@@ -76,11 +76,25 @@ sudo -u "$INVOKER" git -C "$OPERATOR_REPO" push deploy main
 echo "[5/7] preparing the seed drop point /Users/Shared/factory-seed ..."
 # OPERATOR-owned (-o): the operator cp's the snapshot in as themselves; root ownership
 # here broke that with permission-denied (same class as the bare-repo ownership bug).
-install -d -m 755 -o "$INVOKER" /Users/Shared/factory-seed
+#
+# 0700, NOT 0755 (2026-08-09): /Users/Shared is world-readable AND world-writable
+# (drwxrwxrwt), and this drop point holds a COMPLETE COPY of the blackboard — every task,
+# learning, approval and budget row. At 0755 with a plain `cp` (umask 022 → 0644) that copy
+# was readable by every local account on the machine, indefinitely, long after bootstrap
+# consumed it. Found live on the reference deployment: 643 KB, 69 tasks, world-readable
+# since install day. The factory user still needs to READ it exactly once (step 8 of
+# 02-bootstrap), so it gets a targeted macOS ACL rather than a group bit — `staff` is not a
+# boundary here, every local account is in it.
+install -d -m 700 -o "$INVOKER" /Users/Shared/factory-seed
+chmod +a "user:$FUSER allow read,execute,list,search,readattr,readextattr,readsecurity" \
+    /Users/Shared/factory-seed 2>/dev/null || \
+    echo "  WARNING: could not set the ACL granting '$FUSER' read access to the seed dir"
 echo "  to carry over existing learnings/history into the deployment, run AS THE OPERATOR:"
 echo "    bash scripts/backup_blackboard.sh"
-echo "    cp \"\$(ls -t ~/factory-db-backups/blackboard-*.db | head -1)\" /Users/Shared/factory-seed/blackboard.db"
+echo "    install -m 600 \"\$(ls -t ~/factory-db-backups/blackboard-*.db | head -1)\" /Users/Shared/factory-seed/blackboard.db"
+echo "    chmod +a \"user:$FUSER allow read,readattr,readextattr,readsecurity\" /Users/Shared/factory-seed/blackboard.db"
 echo "  (optional — 02-bootstrap-as-factory.sh starts with an empty blackboard if you skip this)"
+echo "  DELETE IT once 02 reports 'seed OK' — it is a full copy of the store, not a backup."
 
 # --- 6. stage the deploy kit somewhere the factory user can read without operator access -
 echo "[6/7] staging the bootstrap kit at /Users/Shared/factory-kit ..."

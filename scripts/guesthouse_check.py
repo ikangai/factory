@@ -126,6 +126,7 @@ class Ctx:
     ssh_dir: Optional[str] = None
     docker_socket: str = "/var/run/docker.sock"
     bare_repo_path: str = "/Users/Shared/factory.git"
+    shared_dir: str = "/Users/Shared"
     factory_root: Optional[str] = None
     env_file_path: Optional[str] = None
     config_path: Optional[str] = None
@@ -450,6 +451,55 @@ def rule_wsl_hardening(ctx: Ctx) -> Rule:
     return Rule(rid, FAIL, f"{ctx.wsl_conf_path} missing: {', '.join(missing)}")
 
 
+
+# --- rule 11: nothing sensitive left world-readable in the shared drop area ------------------
+# /Users/Shared is world-readable AND world-writable (drwxrwxrwt) — it is the one place the
+# install flow has to use to hand files between two accounts, and therefore the one place
+# where "temporarily" world-readable artifacts accumulate. Found live on the reference
+# deployment (2026-08-09): a 643 KB COMPLETE COPY of the blackboard (69 tasks, learnings,
+# approvals) at mode 0644, plus credential-shaped drop files, months after they were
+# consumed. Nothing else in this doctor would have caught it — every other rule looks at the
+# account's own home.
+_SENSITIVE_SHARED_NAMES = ("blackboard", "token", "pat", "secret", "session", "credential")
+
+
+def _looks_sensitive(name: str) -> bool:
+    low = name.lower()
+    return low.endswith(".db") or any(t in low for t in _SENSITIVE_SHARED_NAMES)
+
+
+def rule_shared_drop_hygiene(ctx: Ctx) -> Rule:
+    rid = "shared-drop-hygiene"
+    if not ctx.is_posix:
+        return Rule(rid, SKIP, "no POSIX permission model on this platform")
+    if not os.path.isdir(ctx.shared_dir):
+        return Rule(rid, SKIP, f"{ctx.shared_dir} not present")
+    exposed = []
+    for root, dirs, files in os.walk(ctx.shared_dir):
+        # Never descend into the bare transfer repo: its contents are the factory's own
+        # source, which is a PUBLIC repo — readable there is not a disclosure.
+        dirs[:] = [d for d in dirs
+                   if os.path.join(root, d) != ctx.bare_repo_path and not d.startswith(".")]
+        for name in files:
+            if not _looks_sensitive(name):
+                continue
+            path = os.path.join(root, name)
+            try:
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+            except OSError:
+                continue
+            if mode & 0o077:                      # any group/other bit at all
+                exposed.append(f"{path} ({oct(mode)})")
+        if len(exposed) >= 10:
+            break
+    if exposed:
+        return Rule(rid, FAIL,
+                    "world/group-readable sensitive file(s) in the shared drop area — "
+                    "chmod 600 (or delete once consumed): " + "; ".join(exposed[:10]))
+    return Rule(rid, PASS,
+                f"no group/other-readable sensitive files under {ctx.shared_dir}")
+
+
 RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
     ("standard-user", rule_standard_user),
     ("no-passwordless-sudo", rule_no_sudo_grant),
@@ -461,6 +511,7 @@ RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
     ("brakes-engaged", rule_brakes_engaged),
     ("dashboard-localhost", rule_dashboard_localhost),
     ("wsl-hardening", rule_wsl_hardening),
+    ("shared-drop-hygiene", rule_shared_drop_hygiene),
 ]
 
 

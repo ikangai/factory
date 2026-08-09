@@ -96,6 +96,26 @@ the rail announces dispatch/outcome on the worker's behalf (it already knows bot
 anyway (`roles/common.py:213-214`) — so the hard mode and the bus are already mutually
 exclusive; this resolves that contradiction in the safe direction.
 
+### B.1 — red-proof breaks under `as_user` (found by probe; B must fix it)
+
+`develop.py:783` threads `base_repo=dev_clone` — the clone that `develop.py:712-717` has
+just `chown -R`'d **to the worker** — and `code_round.py:222-225` creates a detached
+worktree inside it for the red-proof check. Probed: `git worktree add` writes
+`.git/worktrees/<name>`, so against a clone the caller cannot write it fails with
+`fatal: could not create leading directories of '.git/worktrees/…': Permission denied`.
+
+Nobody has hit this because **both knobs are off**: `red_proof` defaults false and the
+deployed `prod` is false. Component B flips `prod` on, so the pair becomes reachable and
+every candidate would then fail at the red-proof stage.
+
+Fix inside B: take the base worktree from a repo the FACTORY still owns. Cheapest correct
+option is to create it **before** the chown (`base_sha` is already recorded at
+`develop.py:708-711`, one line earlier); alternative is to add it in `main_repo` after
+`fetch_candidate`. Either way `base_repo` must stop pointing at worker-owned territory.
+This is also a general rule the phase should state: **after the chown, the factory may
+READ the clone but must never WRITE it** — every factory-side git operation on `dev_clone`
+needs auditing against that rule, not just this one.
+
 ### D — prove the boundary (the phase's actual deliverable)
 
 Reach is a claim; claims need tests. Add `guesthouse_check` rules, run **as the worker
