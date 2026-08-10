@@ -228,7 +228,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                     # worktree still links back to base_repo's .git, and the grader runs
                     # pytest in here.
                     if target_exec.isolation_active():
-                        adapter.export_tree(base_repo, base_wt, base_sha)
+                        target_exec.prepare_export(adapter, base_repo, base_wt, base_sha)
                     else:
                         adapter.add_worktree_detached(base_repo, base_wt, base_sha)
                     to_check: list[str] = []
@@ -370,7 +370,7 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
             rebase_dir = tempfile.mkdtemp(prefix="cf-rebaseline-",
                                           dir=target_exec.export_root())
             try:
-                adapter.export_tree(main_repo, rebase_dir, "HEAD")
+                target_exec.prepare_export(adapter, main_repo, rebase_dir, "HEAD")
                 after_scores = grade_fn(rebase_dir)
                 after = {"working": after_scores["working"],
                          "held_out": after_scores.get("held_out", 0.0),

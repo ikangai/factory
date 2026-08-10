@@ -774,7 +774,7 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 # self-contained export has nothing to reach. Isolation OFF keeps the
                 # worktree exactly as before (cheaper, and nothing foreign runs in it).
                 if target_exec.isolation_active():
-                    adapter.export_tree(main_repo, cand_wt, branch)
+                    target_exec.prepare_export(adapter, main_repo, cand_wt, branch)
                 else:
                     adapter.add_worktree(main_repo, cand_wt, branch)
                 # GSD spec-bound acceptance gate. Threaded from the run entry (Task 6.1) so a

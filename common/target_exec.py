@@ -142,3 +142,39 @@ def remove_export(path: str) -> None:
         except (OSError, subprocess.SubprocessError):
             pass
     shutil.rmtree(path, ignore_errors=True)   # sweeps the factory-owned parent either way
+
+
+def grant_grader_access(path: str) -> None:
+    """Let the grading identity read/write inside ONE export, via a targeted macOS ACL.
+
+    A group bit is not usable here: on macOS every local account is in `staff`, so
+    group-readable means readable by the operator, the worker, and anything else on the
+    box — the opposite of what this phase is for. An ACL names exactly one user.
+
+    Needed because pytest writes into its working tree (`__pycache__`, `.pytest_cache`,
+    tmp files), and the export is created by the factory. No-op when isolation is off, and
+    best-effort otherwise: a filesystem without ACL support surfaces as the grading run
+    failing loudly (a red gate), never as a silent fallback to running unisolated."""
+    import subprocess
+    user = grader_user()
+    if not user or not path:
+        return
+    perms = ("read,write,execute,delete,append,readattr,writeattr,readextattr,"
+             "writeextattr,list,search,add_file,add_subdirectory,delete_child,"
+             "file_inherit,directory_inherit")
+    try:
+        subprocess.run(["chmod", "-R", "+a", f"user:{user} allow {perms}", path],
+                       capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def prepare_export(adapter, src_repo: str, dest: str, ref: str) -> str:
+    """Export `ref` out of `src_repo` into `dest` and hand it to the grader.
+
+    One call so the two halves cannot drift apart: an export nobody can enter fails every
+    grading run, and an export granted without being detached would hand the grader a
+    linked worktree into the factory's own git (Component C)."""
+    adapter.export_tree(src_repo, dest, ref)
+    grant_grader_access(dest)
+    return dest
