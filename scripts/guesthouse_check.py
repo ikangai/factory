@@ -127,6 +127,7 @@ class Ctx:
     docker_socket: str = "/var/run/docker.sock"
     bare_repo_path: str = "/Users/Shared/factory.git"
     shared_dir: str = "/Users/Shared"
+    dashboard_settings_url: str = "http://127.0.0.1:9788/api/settings"
     factory_root: Optional[str] = None
     env_file_path: Optional[str] = None
     config_path: Optional[str] = None
@@ -515,6 +516,141 @@ RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
 ]
 
 
+
+# ==========================================================================================
+# BOUNDARY PROBES (`--boundary`) — run AS THE GRADING IDENTITY, not as the factory user.
+#
+# Phase 3 (docs/plans/2026-08-09-worker-isolation-design.md) isolates every execution of
+# candidate-authored code behind common/target_exec.py. That is a CLAIM until something
+# stands in the grader's shoes and fails to reach the control plane. These rules are that
+# something, and they invert the usual polarity: PASS means "I could NOT do this".
+#
+# They deliberately bypass the account-scoped context gate above. That gate recognizes only
+# the `factory` account, so boundary rules run as a different identity would SKIP themselves
+# and exit 0 — a proof that passes by not running, which is worse than no proof at all.
+# ==========================================================================================
+
+def _cannot_read(path: str) -> Tuple[bool, str]:
+    """(unreadable, detail). Anything other than a permission refusal — including the file
+    simply being absent — is reported honestly rather than counted as containment."""
+    if not path:
+        return False, "no path configured"
+    if not os.path.exists(path):
+        return False, f"{path} does not exist (nothing proven)"
+    try:
+        with open(path, "rb") as fh:
+            fh.read(1)
+    except PermissionError:
+        return True, f"{path}: permission denied"
+    except OSError as e:
+        return True, f"{path}: {e}"
+    return False, f"{path} IS READABLE from here"
+
+
+def rule_boundary_blackboard(ctx: Ctx) -> Rule:
+    rid = "boundary-blackboard"
+    path = os.path.join(ctx.factory_root or "", "store", "blackboard.db")
+    ok, detail = _cannot_read(path)
+    return Rule(rid, PASS if ok else FAIL, detail)
+
+
+def rule_boundary_config(ctx: Ctx) -> Rule:
+    rid = "boundary-config"
+    ok, detail = _cannot_read(ctx.config_path or "")
+    return Rule(rid, PASS if ok else FAIL, detail)
+
+
+def rule_boundary_secrets(ctx: Ctx) -> Rule:
+    rid = "boundary-secrets"
+    ok, detail = _cannot_read(ctx.env_file_path or "")
+    return Rule(rid, PASS if ok else FAIL, detail)
+
+
+def rule_boundary_factory_root(ctx: Ctx) -> Rule:
+    """Listing the tree at all. A grader that can read FACTORY_ROOT can read the held-out
+    scenarios and the graders' own check modules — the blindness ARCHITECTURE claims."""
+    rid = "boundary-factory-root"
+    root = ctx.factory_root or ""
+    if not root or not os.path.exists(root):
+        return Rule(rid, SKIP, f"{root or '(unset)'} not present")
+    try:
+        os.listdir(root)
+    except PermissionError:
+        return Rule(rid, PASS, f"{root}: permission denied")
+    except OSError as e:
+        return Rule(rid, PASS, f"{root}: {e}")
+    return Rule(rid, FAIL, f"{root} IS LISTABLE from here")
+
+
+def rule_boundary_killswitch(ctx: Ctx) -> Rule:
+    """The single highest-value action an attacker takes. Checks UNLINK permission without
+    ever removing it: deletion needs write on the CONTAINING directory, so that is what is
+    tested — never `os.remove`, which would disarm the brake to prove it was armed."""
+    rid = "boundary-killswitch"
+    root = ctx.factory_root or ""
+    stop = os.path.join(root, "STOP")
+    if not os.path.exists(stop):
+        return Rule(rid, SKIP, "STOP not present — engage it, then re-run this probe")
+    if os.access(root, os.W_OK):
+        return Rule(rid, FAIL, f"{root} is writable from here — STOP can be unlinked")
+    return Rule(rid, PASS, f"{stop} cannot be unlinked (its directory is not writable)")
+
+
+def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
+    """The channel an isolated process reaches for NEXT: the board's write routes. Before
+    Phase 3's prerequisite these accepted any local POST, so a contained grader could simply
+    ask the dashboard to approve or resume.
+
+    THIS PROBE MUST NOT MUTATE. The first version posted to `/api/resume` — which, if the
+    boundary is broken, SUCCEEDS and clears the killswitch. It did exactly that against a
+    live board while this rule was being written: a safety probe that disarms the safety it
+    is testing. It now posts a deliberately INVALID `/api/settings` payload, so the outcomes
+    are: 403 (refused before the body is read — contained), 400 (validation reached, i.e.
+    NOT contained, but nothing was written because the key is bogus), 200 (impossible for an
+    unknown key, so treated as a failure). No branch changes any state."""
+    rid = "boundary-dashboard-write"
+    url = ctx.dashboard_settings_url
+    if not url:
+        return Rule(rid, SKIP, "no dashboard URL configured")
+    import urllib.error
+    import urllib.request
+    payload = json.dumps({"key": "__boundary_probe__", "value": "x"}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return Rule(rid, FAIL,
+                        f"{url} ACCEPTED an unauthenticated write ({resp.status})")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return Rule(rid, PASS, f"{url}: refused unauthenticated write ({e.code})")
+        if e.code == 400:
+            return Rule(rid, FAIL,
+                        f"{url}: reached VALIDATION unauthenticated (400) — the write gate "
+                        f"is open; nothing was written only because the probe key is bogus")
+        if e.code == 404:
+            return Rule(rid, SKIP, f"{url}: route not present on this board")
+        return Rule(rid, FAIL, f"{url}: unexpected status {e.code}")
+    except OSError:
+        return Rule(rid, SKIP, f"{url} not reachable (board not running?)")
+
+
+BOUNDARY_RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
+    ("boundary-blackboard", rule_boundary_blackboard),
+    ("boundary-config", rule_boundary_config),
+    ("boundary-secrets", rule_boundary_secrets),
+    ("boundary-factory-root", rule_boundary_factory_root),
+    ("boundary-killswitch", rule_boundary_killswitch),
+    ("boundary-dashboard-write", rule_boundary_dashboard_write),
+]
+
+
+def audit_boundary(ctx: Optional[Ctx] = None) -> AuditResult:
+    """Every boundary probe, with NO context gate — see the section comment."""
+    ctx = ctx or Ctx()
+    return AuditResult(rules=[fn(ctx) for _, fn in BOUNDARY_RULES], deployed=True)
+
+
 def audit(ctx: Optional[Ctx] = None) -> AuditResult:
     """Runs every rule under the context gate (module docstring) and returns both the rule
     results and whether this account was recognized as a deployed guest-house layout."""
@@ -554,9 +690,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Guest-house deterministic doctor — audits the guest-house isolation rules "
                      "(docs/runbooks/guest-house.md). Never mutates anything.")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of a table")
+    parser.add_argument("--boundary", action="store_true",
+                        help="run the Phase 3 BOUNDARY probes instead: execute this AS THE "
+                             "GRADING IDENTITY and every rule must report that it could NOT "
+                             "reach the control plane. No context gate — a proof that skips "
+                             "itself is worse than no proof.")
     args = parser.parse_args(argv)
 
-    result = audit()
+    result = audit_boundary() if args.boundary else audit()
     if args.json:
         print(json.dumps({"deployed": result.deployed,
                            "rules": [r._asdict() for r in result.rules]}, indent=2))
