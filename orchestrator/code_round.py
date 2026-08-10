@@ -222,13 +222,15 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         if red_proof and base_repo and base_sha:
             test_files = [p for p in changed if acceptance._is_test(p)]
             if test_files:
-                base_wt = tempfile.mkdtemp(prefix="cf-redproof-")
+                base_wt = (tempfile.mkdtemp(prefix="cf-redproof-")
+                           if not target_exec.isolation_active() else None)
                 try:
                     # Component C, same reasoning as the candidate checkout: a detached
                     # worktree still links back to base_repo's .git, and the grader runs
                     # pytest in here.
                     if target_exec.isolation_active():
-                        target_exec.prepare_export(adapter, base_repo, base_wt, base_sha)
+                        base_wt = target_exec.new_export(adapter, base_repo, base_sha,
+                                                         prefix="cf-redproof-")
                     else:
                         adapter.add_worktree_detached(base_repo, base_wt, base_sha)
                     to_check: list[str] = []
@@ -250,6 +252,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                         if status == "passed":
                             return {"action": "discarded", "stage": "no_test",
                                    "why": f"test passes on the pristine base: {ref}",
+                                   "tests_report": report}
+                        if status == "refused":
+                            # The isolation wrapper refused to run it. NOT a test result —
+                            # discard rather than let an infrastructure failure satisfy the
+                            # discriminating-test gate (which 'missing' legitimately does).
+                            return {"action": "discarded", "stage": "tests",
+                                   "why": f"grading isolation refused the red-proof run: {ref}",
                                    "tests_report": report}
                         if status == "missing":
                             missing += 1
@@ -367,10 +376,9 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         # the worker's code running there with full authority. With isolation on, re-baseline
         # a throwaway export of the merged tree instead.
         if target_exec.isolation_active():
-            rebase_dir = tempfile.mkdtemp(prefix="cf-rebaseline-",
-                                          dir=target_exec.export_root())
+            rebase_dir = target_exec.new_export(adapter, main_repo, "HEAD",
+                                                prefix="cf-rebaseline-")
             try:
-                target_exec.prepare_export(adapter, main_repo, rebase_dir, "HEAD")
                 after_scores = grade_fn(rebase_dir)
                 after = {"working": after_scores["working"],
                          "held_out": after_scores.get("held_out", 0.0),

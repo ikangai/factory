@@ -300,3 +300,42 @@ def test_remove_export_is_a_plain_rmtree_when_not_isolated(monkeypatch, tmp_path
 
     assert called == [], "OFF must not invoke sudo at all"
     assert not victim.exists()
+
+
+# ==========================================================================================
+# The ON wiring itself. A mutation that hardwired isolation_active() to False left the whole
+# suite green — nothing asserted that arming it changes anything, which is exactly why two
+# of three export sites shipped landing outside the root the wrapper confines to.
+# ==========================================================================================
+def test_new_export_always_lands_inside_the_export_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("FACTORY_EXPORT_ROOT", str(tmp_path / "grade"))
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "")   # skip the ACL call
+    src = _repo(str(tmp_path / "src"))
+
+    dest = target_exec.new_export(_Adapter(), src, "main")
+
+    root = os.path.realpath(target_exec.export_root())
+    assert os.path.realpath(dest).startswith(root + os.sep), (
+        "an export outside the root is refused by the wrapper — silently, in the red-proof "
+        "case, where a refusal would otherwise SATISFY the gate")
+    assert os.path.isdir(os.path.join(dest, ".git"))
+
+
+def test_a_wrapper_refusal_is_not_a_test_result():
+    """rc 126 must not fall through to 'missing': 'missing' satisfies the red-proof gate, so
+    an infrastructure refusal landing there turns the discriminating-test gate off while
+    reporting success."""
+    import factory.common.target_exec as te
+    assert te.WRAPPER_REFUSED == 126
+
+    class _RefusingAdapter(_Adapter):
+        pass
+
+    ad = _RefusingAdapter()
+    import unittest.mock as mock
+    with mock.patch.object(te, "run_target_code",
+                           return_value=te.ExecResult(126, "", "refusing cwd outside")):
+        status, report = ad.run_named_test("/anywhere", "tests/t.py::t")
+        assert status == "refused", "a refusal must be distinguishable from 'missing'"
+        ok, rep = ad.run_tests("/anywhere")
+        assert ok is False and "REFUSED" in rep

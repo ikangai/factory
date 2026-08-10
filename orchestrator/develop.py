@@ -774,7 +774,11 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 # self-contained export has nothing to reach. Isolation OFF keeps the
                 # worktree exactly as before (cheaper, and nothing foreign runs in it).
                 if target_exec.isolation_active():
-                    target_exec.prepare_export(adapter, main_repo, cand_wt, branch)
+                    # Allocated by target_exec so it lands INSIDE the root the wrapper
+                    # confines to — cand_wt under work/ (0700, and outside that root) was
+                    # refused for every candidate.
+                    cand_wt = target_exec.new_export(adapter, main_repo, branch,
+                                                     prefix="cf-cand-")
                 else:
                     adapter.add_worktree(main_repo, cand_wt, branch)
                 # GSD spec-bound acceptance gate. Threaded from the run entry (Task 6.1) so a
@@ -814,7 +818,9 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                 try:
                     # An export is a plain directory, not a registered worktree — asking
                     # git to remove it would error. rmtree(work) below sweeps it either way.
-                    if not target_exec.isolation_active():
+                    if target_exec.isolation_active():
+                        target_exec.remove_export(cand_wt)   # grader-owned files
+                    else:
                         adapter.remove_worktree(main_repo, cand_wt)
                 except Exception:  # noqa: BLE001
                     pass

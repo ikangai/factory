@@ -39,3 +39,8 @@ logs/fleet.html
 # point FACTORY_BROKER_SPOOL/autonomy.broker_spool_root at /Users/Shared/factory-broker
 # instead (outside any checkout), but the default must be safe too.
 state/
+
+# The board's write credential (dashboard/auth.py). Lives in FACTORY_ROOT so only the
+# factory user can read it — which is exactly why it must never be committed: this repo is
+# PUBLIC. Same class as the broker-spool entry above, and the same reason.
+.dashboard-token

@@ -211,6 +211,11 @@ super_worker:
   # code is contained must not be reachable from the dashboard's settings route or proposable
   # by the self-harness loop — a loop that can widen its own containment is not contained.
   # Enabling is an operator act, gated on the drill in docs/runbooks/worker-isolation.md.
+  # ⚠ NOT READY TO ARM (2026-08-10 security review). The export handover is being
+  # redesigned: the previous ACL-based grant let a candidate-committed symlink under tests/
+  # stamp grader-writable ACEs onto the credentials file, FACTORY_ROOT and the factory home
+  # — arming was strictly worse than leaving it off. The grant is disabled, so an armed
+  # grader currently cannot write its export and grading fails loudly. Leave this empty.
   grader_user: ""
   # The operator-installed, READ-ONLY wrapper the sudoers rule pins (argv: <cwd> <cmd...>).
   # Never derived from anything a worker can influence.

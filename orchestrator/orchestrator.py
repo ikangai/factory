@@ -1663,7 +1663,22 @@ def _graduation_test_fn():
     auton = config.load_config().get("autonomy", {}) or {}
     if not auton.get("graduation_retest", True):
         return None
-    return lambda root: config.get_adapter().run_tests(root)
+    def _retest(root: str):
+        """With grading isolated, this cannot run in the real target repo: the wrapper
+        confines the grader to the export root and would refuse (rc 126), blocking EVERY
+        graduation. The integrated tip is candidate code too — accumulated merges — so it
+        gets the same treatment as any other grading run: exported, graded, thrown away."""
+        from ..common import target_exec
+        adapter = config.get_adapter()
+        if not target_exec.isolation_active():
+            return adapter.run_tests(root)
+        export = target_exec.new_export(adapter, root, "HEAD", prefix="cf-graduate-")
+        try:
+            return adapter.run_tests(export)
+        finally:
+            target_exec.remove_export(export)
+
+    return _retest
 
 
 def _same_graduation(payload: dict, preview: dict) -> bool:

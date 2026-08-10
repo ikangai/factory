@@ -24,6 +24,7 @@ from typing import Any, Optional
 # so the seam is a pure indirection (YAGNI: no adapter-specific result type).
 from ..common.spec_applier import AppliedSpec
 from ..common.clive_invoke import CliveResult
+from ..common import target_exec
 
 
 class TargetAdapter(abc.ABC):
@@ -110,9 +111,11 @@ class TargetAdapter(abc.ABC):
         # Routed through target_exec: this is candidate-authored code, and require_test
         # MANDATES the worker ship some. Direct subprocess.run here ran it as the factory
         # user on every candidate (Phase 3). Never raises — see run_target_code.
-        from ..common import target_exec
         p = target_exec.run_target_code(cmd, cwd=cwd, timeout=timeout)
         report = (p.stdout + p.stderr).strip()
+        if p.returncode == target_exec.WRAPPER_REFUSED:
+            report = ("isolation wrapper REFUSED this run (not a test result) — "
+                      "check super_worker.export_root and the sudo grant:\n" + report)
         return (p.returncode == 0, report[-4000:])
 
     def run_named_test(self, cwd: str, ref: str, *, timeout: int = 300) -> tuple[str, str]:
@@ -151,9 +154,14 @@ class TargetAdapter(abc.ABC):
             named.append(ref)
         # Same seam as run_tests — the red-proof and acceptance paths execute candidate
         # code too, one node at a time.
-        from ..common import target_exec
         p = target_exec.run_target_code(named, cwd=cwd, timeout=timeout)
         report = (p.stdout + p.stderr).strip()[-4000:]
+        if p.returncode == target_exec.WRAPPER_REFUSED:
+            # The isolation wrapper refused to run this at all. That is an INFRASTRUCTURE
+            # failure, not a test result — and it must not fall through to 'missing', which
+            # SATISFIES the red-proof gate. A refusal that silently satisfies the
+            # discriminating-test gate would turn that gate off while reporting success.
+            return ("refused", report)
         if p.returncode == 0:
             return ("passed", report)
         if p.returncode in (4, 5):                     # 4 = not-found path/node-id, 5 = none collected

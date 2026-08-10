@@ -1,5 +1,30 @@
 # Worker isolation runbook — containing the code the factory runs
 
+> **STATUS 2026-08-10: DO NOT ARM.** An adversarial security review proved that arming
+> grading isolation, as currently built, is *worse* than leaving it off. Two independent
+> routes, both probe-demonstrated:
+>
+> 1. **The export handover stamped ACLs through candidate symlinks.** `chmod -R +a` acts on
+>    the target of every symlink it meets. A candidate commits `tests/x -> ~factory/
+>    .factory-secrets/env` (the frozen gate never covers `tests/`, and `require_test`
+>    MANDATES files there) and the factory grants the grader read/write on the credentials
+>    file, `add_file`/`delete_child` on FACTORY_ROOT — enough to unlink STOP or replace
+>    `config.yaml` — and `list`/`search` on the 0700 home. The ACEs outlive the export.
+>    The grant is now a **no-op**, so an armed grader cannot write its export and grading
+>    fails loudly. That is the correct failure direction while the handover is redesigned
+>    (the grader should materialize its own tree from a `git archive` stream rather than the
+>    factory walking candidate-controlled paths and stamping permissions on what it finds).
+> 2. **`grade_fn` is a fifth executor of candidate code and is not on the seam.** It runs
+>    the candidate's own program (`clive.py`) as the FACTORY user, in the export the grader
+>    just had write access to, and `grade.mode: smoke` is live. It also defeats the frozen
+>    gate, which validates the *diff* at step 1 while the grader can rewrite files on disk
+>    at step 2.
+>
+> The prerequisite in this branch — authenticating the board's write routes — **is** sound
+> and independently valuable. Everything below describes the intended end state; treat the
+> arming section as not-yet-available.
+
+
 Design: `docs/plans/2026-08-09-worker-isolation-design.md` (Phase 3 of the
 production-hardening roadmap). Read the threat model below before arming anything.
 

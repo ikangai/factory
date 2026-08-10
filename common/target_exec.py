@@ -11,9 +11,13 @@ An OS boundary around the developer's `claude -p` call does nothing about this, 
 why the first version of Phase 3 was scoped wrong. THIS is the shortest path from a worker
 to the control plane, and it is the one this module closes.
 
-THE SEAM: every execution of candidate-authored code goes through `run_target_code`.
-Keeping it to one function is what makes the boundary auditable — and what lets a test
-assert that no execution path bypasses it.
+THE SEAM: every execution of candidate code THROUGH THE ADAPTER'S TEST RUNNERS goes
+through `run_target_code`. That is narrower than "every execution of candidate-authored
+code", and the difference matters: `grade_fn` (grade.build_grade -> runner -> clive_invoke)
+spawns the candidate's OWN program as the factory user and is NOT on this seam. Do not
+restate the broader claim until that is routed here too — a 2026-08-10 review found the
+broader wording in this docstring, the design and the roadmap, and it was false in all
+three.
 
 - `grader_user` unset (the default): identical to the direct `subprocess.run` this
   replaced, byte for byte. Phase 3 ships OFF, like Phases 1 and 2.
@@ -145,28 +149,31 @@ def remove_export(path: str) -> None:
 
 
 def grant_grader_access(path: str) -> None:
-    """Let the grading identity read/write inside ONE export, via a targeted macOS ACL.
+    """DISABLED 2026-08-10 — this mechanism made ARMING isolation strictly worse than
+    leaving it off, which is the worst outcome a security control can have.
 
-    A group bit is not usable here: on macOS every local account is in `staff`, so
-    group-readable means readable by the operator, the worker, and anything else on the
-    box — the opposite of what this phase is for. An ACL names exactly one user.
+    It applied `chmod -R +a "user:<grader> allow …"` across the export. BSD `chmod -R` does
+    not descend THROUGH a symlink, but it does act on the TARGET of every symlink it meets.
+    A candidate commits a symlink under `tests/` — never covered by the frozen gate, and
+    `require_test` MANDATES the worker ship files there — and the factory then writes an
+    inheriting read/write ACE onto whatever it points at. Proven by probe:
 
-    Needed because pytest writes into its working tree (`__pycache__`, `.pytest_cache`,
-    tmp files), and the export is created by the factory. No-op when isolation is off, and
-    best-effort otherwise: a filesystem without ACL support surfaces as the grading run
-    failing loudly (a red gate), never as a silent fallback to running unisolated."""
-    import subprocess
-    user = grader_user()
-    if not user or not path:
-        return
-    perms = ("read,write,execute,delete,append,readattr,writeattr,readextattr,"
-             "writeextattr,list,search,add_file,add_subdirectory,delete_child,"
-             "file_inherit,directory_inherit")
-    try:
-        subprocess.run(["chmod", "-R", "+a", f"user:{user} allow {perms}", path],
-                       capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        tests/fixture_env  -> ~/.factory-secrets/env   => grader gains read,write
+        tests/fixture_dir  -> FACTORY_ROOT             => grader gains add_file,delete_child
+                                                          (i.e. unlink STOP, replace config)
+        tests/fixture_home -> the 0700 home            => grader gains list,search
+
+    The ACEs also SURVIVE the export's deletion — `remove_export` removes the tree, not the
+    ACLs it stamped elsewhere. Bounded only by "everything the factory user owns", which is
+    precisely the control plane.
+
+    Leaving it as a no-op keeps grading isolation OFF-by-default and safe; the export
+    handover has to be redesigned so the grader materializes its own tree (a `git archive`
+    stream extracted under the grader's own identity) instead of the factory walking
+    candidate-controlled paths and stamping permissions on what it finds. Until that lands,
+    an armed grader cannot write its export and grading fails LOUDLY — which is the correct
+    failure direction, and far better than the alternative this function created."""
+    return
 
 
 def prepare_export(adapter, src_repo: str, dest: str, ref: str) -> str:
@@ -178,3 +185,30 @@ def prepare_export(adapter, src_repo: str, dest: str, ref: str) -> str:
     adapter.export_tree(src_repo, dest, ref)
     grant_grader_access(dest)
     return dest
+
+
+# The wrapper's refusal code. Distinct from any pytest exit status on purpose: a refused
+# run is an INFRASTRUCTURE failure, and must never be mistaken for a test result. pytest's
+# 4/5 ("not found"/"none collected") map to a fail-open 'missing' in run_named_test, and
+# 'missing' SATISFIES the red-proof gate — so a refusal silently landing there would turn
+# the discriminating-test gate off while reporting success.
+WRAPPER_REFUSED = 126
+
+
+def new_export(adapter, src_repo: str, ref: str, *, prefix: str = "cf-export-") -> str:
+    """Allocate an export UNDER export_root() and hand it to the grader.
+
+    Allocation lives here, not at the call sites. When each site chose its own tempdir,
+    two of the three landed outside the root the wrapper confines to — so with isolation
+    armed the candidate export was refused (every candidate discarded) and the red-proof
+    export was refused *silently* (rc 126 -> 'missing' -> gate satisfied). The location and
+    the confinement have to come from the same place or they drift apart."""
+    import tempfile
+    dest = tempfile.mkdtemp(prefix=prefix, dir=export_root())
+    # mkdtemp is 0700; the grader must be able to traverse in.
+    try:
+        import os
+        os.chmod(dest, 0o755)
+    except OSError:
+        pass
+    return prepare_export(adapter, src_repo, dest, ref)
