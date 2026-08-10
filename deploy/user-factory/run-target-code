@@ -1,0 +1,49 @@
+#!/bin/bash
+# run-target-code — the ONLY command the factory user may run as the grading identity.
+#
+# Installed by the operator, READ-ONLY, and pinned by a single sudoers rule:
+#
+#   factory ALL=(factory-grader) NOPASSWD: /opt/factory/run-target-code
+#
+# That grant is user-to-user, never root. The first Phase 3 design instead needed
+# `sudo (root) chown -R <user> *` — a root chown with an unconstrainable path argument,
+# handed to the same account the conductor runs as, i.e. a privilege-escalation primitive.
+# Nothing here needs root, and nothing here takes a path it does not check.
+#
+# Contract:  run-target-code <cwd> <argv...>
+#   cwd    — MUST be inside an allowed export root (see ALLOWED_ROOTS). This is the whole
+#            security value of the wrapper: without it the grant would let the caller run
+#            ANY argv as the grader, anywhere, which is a lateral-movement primitive rather
+#            than a containment boundary.
+#   argv   — the target's own test command, executed with cwd as the working directory.
+#
+# Exit codes are the command's own, so the caller's existing gate semantics are unchanged
+# (pytest 0/1/4/5 in particular). Refusals use 126 — distinct from any pytest code.
+set -euo pipefail
+
+ALLOWED_ROOTS=("${FACTORY_EXPORT_ROOT:-/tmp/factory-grade}")
+
+die() { echo "run-target-code: $1" >&2; exit 126; }
+
+[ "$#" -ge 2 ] || die "usage: run-target-code <cwd> <argv...>"
+CWD="$1"; shift
+
+# Resolve symlinks before checking: a symlinked export dir pointing at, say, the factory's
+# home would otherwise pass a plain prefix test and hand the grader the tree we are
+# containing it away from.
+REAL_CWD="$(cd "$CWD" 2>/dev/null && pwd -P)" || die "cwd does not exist: $CWD"
+
+allowed=false
+for root in "${ALLOWED_ROOTS[@]}"; do
+    REAL_ROOT="$(cd "$root" 2>/dev/null && pwd -P)" || continue
+    case "$REAL_CWD/" in
+        "$REAL_ROOT"/*) allowed=true; break ;;
+    esac
+done
+[ "$allowed" = true ] || die "refusing cwd outside the export root(s): $REAL_CWD"
+
+# No `exec env -i`: the target's test suite legitimately needs PATH and a HOME, and sudo
+# has already reset the environment to the grader's own. What matters is the IDENTITY this
+# runs as, which sudo established before this script started.
+cd "$REAL_CWD"
+exec "$@"

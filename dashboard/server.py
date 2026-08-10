@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from ..common import config, paths, scoring
+from . import auth
 from ..common.store import Blackboard
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -165,6 +166,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "the only write action is /api/promote"})
         if not self._local_origin():
             return self._json(403, {"error": "cross-origin promotion refused (CSRF guard)"})
+        # Same gap, same fix as fleet_server: the CSRF guard allows a request that sends no
+        # Origin header (every curl), and localhost is not an identity boundary. Promoting a
+        # champion is a real state change, so it needs the board key too. See dashboard/auth.py.
+        token = self.headers.get(auth.HEADER) or (
+            parse_qs(urlparse(self.path).query).get(auth.QUERY_KEY) or [""])[0]
+        if not auth.verify(token):
+            return self._json(403, {"error": "promotion requires the board key — reopen the "
+                                             "board with the ?k=... URL printed at startup"})
         length = int(self.headers.get("Content-Length", 0) or 0)
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -186,6 +195,8 @@ def main() -> int:
     host, port = cfg.get("host", "127.0.0.1"), int(cfg.get("port", 8787))
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"clive-harness-factory board on http://{host}:{port}  (Ctrl-C to stop)")
+    # Mint the write credential before the first request is accepted (see fleet_server).
+    print(auth.startup_banner(host, port, auth.ensure_token()))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

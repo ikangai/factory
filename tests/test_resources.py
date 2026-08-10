@@ -7,7 +7,22 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from factory.reporting import resources
+import pytest
+from factory.dashboard import auth as dash_auth
 
+
+
+@pytest.fixture(autouse=True)
+def _board_key(tmp_path, monkeypatch):
+    """Every write route now requires the board key (dashboard/auth.py). Point it at a tmp
+    root — never the real FACTORY_ROOT — and mint one, so these tests exercise the
+    AUTHENTICATED path. Refusal of an unauthenticated write is covered by
+    tests/test_dashboard_auth.py."""
+    # Patch ONLY auth's own path resolution. Repointing the shared paths.FACTORY_ROOT
+    # would move every other consumer too (the static board page, logs, the store).
+    monkeypatch.setattr(dash_auth, "token_path",
+                        lambda root=None: str(tmp_path / ".dashboard-token"))
+    dash_auth.ensure_token()
 
 def test_resources_gathers_roles_profiles_caps(store):
     store.add_profile("python-dev", description="py", model="standard", overlay="x")
@@ -39,7 +54,8 @@ def _serve(monkeypatch=None):
 def _post(port, path, body):
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
                                  data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          dash_auth.HEADER: dash_auth.load_token()})
     try:
         return 200, json.loads(urllib.request.urlopen(req).read())
     except urllib.error.HTTPError as e:

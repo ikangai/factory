@@ -24,6 +24,7 @@ from typing import Any, Optional
 # so the seam is a pure indirection (YAGNI: no adapter-specific result type).
 from ..common.spec_applier import AppliedSpec
 from ..common.clive_invoke import CliveResult
+from ..common import target_exec
 
 
 class TargetAdapter(abc.ABC):
@@ -107,11 +108,14 @@ class TargetAdapter(abc.ABC):
         cmd = self.test_command()
         if not cmd:
             return (False, "no test_command configured for this target")
-        try:
-            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            return (False, f"test run failed: {e}")
-        report = ((p.stdout or "") + (p.stderr or "")).strip()
+        # Routed through target_exec: this is candidate-authored code, and require_test
+        # MANDATES the worker ship some. Direct subprocess.run here ran it as the factory
+        # user on every candidate (Phase 3). Never raises — see run_target_code.
+        p = target_exec.run_target_code(cmd, cwd=cwd, timeout=timeout)
+        report = (p.stdout + p.stderr).strip()
+        if p.returncode == target_exec.WRAPPER_REFUSED:
+            report = ("isolation wrapper REFUSED this run (not a test result) — "
+                      "check super_worker.export_root and the sudo grant:\n" + report)
         return (p.returncode == 0, report[-4000:])
 
     def run_named_test(self, cwd: str, ref: str, *, timeout: int = 300) -> tuple[str, str]:
@@ -148,11 +152,16 @@ class TargetAdapter(abc.ABC):
                 named.append(a)
         if not swapped:                                # no suite arg to swap → best-effort append
             named.append(ref)
-        try:
-            p = subprocess.run(named, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            return ("missing", f"named-test run failed: {e}")
-        report = ((p.stdout or "") + (p.stderr or "")).strip()[-4000:]
+        # Same seam as run_tests — the red-proof and acceptance paths execute candidate
+        # code too, one node at a time.
+        p = target_exec.run_target_code(named, cwd=cwd, timeout=timeout)
+        report = (p.stdout + p.stderr).strip()[-4000:]
+        if p.returncode == target_exec.WRAPPER_REFUSED:
+            # The isolation wrapper refused to run this at all. That is an INFRASTRUCTURE
+            # failure, not a test result — and it must not fall through to 'missing', which
+            # SATISFIES the red-proof gate. A refusal that silently satisfies the
+            # discriminating-test gate would turn that gate off while reporting success.
+            return ("refused", report)
         if p.returncode == 0:
             return ("passed", report)
         if p.returncode in (4, 5):                     # 4 = not-found path/node-id, 5 = none collected
@@ -160,6 +169,35 @@ class TargetAdapter(abc.ABC):
         if p.returncode == 1:                          # 1 = the test ran and FAILED (red)
             return ("failed", report)
         return ("missing", report)                     # 2/3/other (interrupt/internal) → skip, fail-open
+
+    def export_tree(self, src_repo: str, dest: str, ref: str) -> str:
+        """A SELF-CONTAINED working tree at `ref`, safe to hand to another identity.
+
+        `add_worktree` produces a LINKED worktree whose `.git` is a file pointing into
+        `src_repo/.git` — so anything that can write there reaches the factory's own object
+        store and refs, including the branch about to be merged. Grading must never receive
+        one (Phase 3, Component C).
+
+        `--no-hardlinks` is not optional: a plain local `git clone` hardlinks objects when
+        source and destination share a filesystem, so the copy's inodes ARE the original's
+        — changing a permission or an object on one changes the other. That is exactly how
+        the discarded v1 design would have mutated the real target repo.
+        """
+        import subprocess as _sp
+        _sp.run(["git", "clone", "--no-hardlinks", "-q", src_repo, dest],
+                check=True, capture_output=True, text=True)
+        _sp.run(["git", "-C", dest, "checkout", "-q", ref],
+                check=True, capture_output=True, text=True)
+        # Drop the back-pointer. `git clone` leaves an `origin` remote aimed at src_repo
+        # with BOTH fetch and push URLs, so an export handed to another identity ships with
+        # a ready-made route home: `git fetch origin <branch>` reads every branch the
+        # factory has, not just the candidate's (probed — it works). A 0700 factory home
+        # makes that path unreadable in a correct guest house, but "detached" must not
+        # depend on a permission bit somewhere else being right. Nothing fetches from an
+        # export; it exists only to be graded.
+        _sp.run(["git", "-C", dest, "remote", "remove", "origin"],
+                check=False, capture_output=True, text=True)
+        return dest
 
     def clone(self, dest: str) -> str:
         """A SELF-CONTAINED git clone of the target into `dest` (its own `.git`, so it

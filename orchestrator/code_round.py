@@ -26,7 +26,7 @@ import shutil
 import tempfile
 from typing import Callable, Optional
 
-from ..common import code_gate, frozen_source, killswitch
+from ..common import code_gate, target_exec, frozen_source, killswitch
 from ..common.textutil import clean_line
 
 # F6 (round-2 integration fix, Component E): a hard ceiling on individual pytest
@@ -222,9 +222,17 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         if red_proof and base_repo and base_sha:
             test_files = [p for p in changed if acceptance._is_test(p)]
             if test_files:
-                base_wt = tempfile.mkdtemp(prefix="cf-redproof-")
+                base_wt = (tempfile.mkdtemp(prefix="cf-redproof-")
+                           if not target_exec.isolation_active() else None)
                 try:
-                    adapter.add_worktree_detached(base_repo, base_wt, base_sha)
+                    # Component C, same reasoning as the candidate checkout: a detached
+                    # worktree still links back to base_repo's .git, and the grader runs
+                    # pytest in here.
+                    if target_exec.isolation_active():
+                        base_wt = target_exec.new_export(adapter, base_repo, base_sha,
+                                                         prefix="cf-redproof-")
+                    else:
+                        adapter.add_worktree_detached(base_repo, base_wt, base_sha)
                     to_check: list[str] = []
                     skipped: list[str] = []
                     for rel in test_files:
@@ -244,6 +252,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
                         if status == "passed":
                             return {"action": "discarded", "stage": "no_test",
                                    "why": f"test passes on the pristine base: {ref}",
+                                   "tests_report": report}
+                        if status == "refused":
+                            # The isolation wrapper refused to run it. NOT a test result —
+                            # discard rather than let an infrastructure failure satisfy the
+                            # discriminating-test gate (which 'missing' legitimately does).
+                            return {"action": "discarded", "stage": "tests",
+                                   "why": f"grading isolation refused the red-proof run: {ref}",
                                    "tests_report": report}
                         if status == "missing":
                             missing += 1
@@ -355,10 +370,26 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     # 5. re-baseline the NEW champion + self-heal. ANY failure here (a regression OR a
     #    grading crash) auto-reverts — never leave an ungraded merge in the repo.
     try:
-        after_scores = grade_fn(main_repo)
-        after = {"working": after_scores["working"],
-                 "held_out": after_scores.get("held_out", 0.0),
-                 "tests_passed": adapter.run_tests(main_repo)[0]}
+        # Component D — the site the FIRST Phase 3 design would have missed entirely: after
+        # the merge lands, the candidate's code is re-graded IN main_repo, the factory's own
+        # persistent factory/auto worktree. Isolating only the pre-merge checkout would leave
+        # the worker's code running there with full authority. With isolation on, re-baseline
+        # a throwaway export of the merged tree instead.
+        if target_exec.isolation_active():
+            rebase_dir = target_exec.new_export(adapter, main_repo, "HEAD",
+                                                prefix="cf-rebaseline-")
+            try:
+                after_scores = grade_fn(rebase_dir)
+                after = {"working": after_scores["working"],
+                         "held_out": after_scores.get("held_out", 0.0),
+                         "tests_passed": adapter.run_tests(rebase_dir)[0]}
+            finally:
+                target_exec.remove_export(rebase_dir)
+        else:
+            after_scores = grade_fn(main_repo)
+            after = {"working": after_scores["working"],
+                     "held_out": after_scores.get("held_out", 0.0),
+                     "tests_passed": adapter.run_tests(main_repo)[0]}
         reg = code_gate.regression_after_merge(before, after, tol=regression_tol)
     except Exception as e:  # noqa: BLE001 — a broken re-baseline is treated as a regression
         after_scores, reg = None, {"regressed": True, "why": [f"re-baseline failed: {e}"]}

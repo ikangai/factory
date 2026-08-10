@@ -3,7 +3,10 @@ factory's worker instances + activities. Hermetic — build_fleet_state + render
 are pure (the store is seeded; the live-worker list is injected, no pgrep)."""
 import os
 
+import pytest
+
 from factory.common.store import Blackboard
+from factory.dashboard import auth as dash_auth
 from factory.reporting import fleet_viz
 
 
@@ -11,6 +14,20 @@ def _store(tmp_path):
     s = Blackboard(str(tmp_path / "f.db"))
     s.init_db()
     return s
+
+
+
+@pytest.fixture(autouse=True)
+def _board_key(tmp_path, monkeypatch):
+    """Every write route now requires the board key (dashboard/auth.py). Point it at a tmp
+    root — never the real FACTORY_ROOT — and mint one, so these tests exercise the
+    AUTHENTICATED path. Refusal of an unauthenticated write is covered by
+    tests/test_dashboard_auth.py."""
+    # Patch ONLY auth's own path resolution. Repointing the shared paths.FACTORY_ROOT
+    # would move every other consumer too (the static board page, logs, the store).
+    monkeypatch.setattr(dash_auth, "token_path",
+                        lambda root=None: str(tmp_path / ".dashboard-token"))
+    dash_auth.ensure_token()
 
 
 def test_build_state_groups_tasks_by_shift_and_status(tmp_path):
@@ -249,7 +266,9 @@ def test_fleet_server_mode_toggle(monkeypatch, tmp_path):
     try:
         def post(body):
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/mode", data=body,
-                                         headers={"Content-Type": "application/json"}, method="POST")
+                                         headers={"Content-Type": "application/json",
+                                                  dash_auth.HEADER: dash_auth.load_token()},
+                                         method="POST")
             return urllib.request.urlopen(req)
 
         out = json.loads(post(b'{"mode":"auto"}').read())
@@ -398,7 +417,9 @@ def test_fleet_server_mission_editor(monkeypatch, tmp_path):
     try:
         def post(body):
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/mission", data=body,
-                                         headers={"Content-Type": "application/json"}, method="POST")
+                                         headers={"Content-Type": "application/json",
+                                                  dash_auth.HEADER: dash_auth.load_token()},
+                                         method="POST")
             return urllib.request.urlopen(req)
 
         out = json.loads(post(b'{"statement":"make clive bulletproof"}').read())

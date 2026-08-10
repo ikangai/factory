@@ -164,7 +164,32 @@ deliberately deferred — recorded here so they are not rediscovered as surprise
   dir) and silently falls back to the target root — harmless while the branch ref is
   shared. None of these can lose or repeat an effect; they degrade *reporting* about one.
 
-### Phase 3 — Worker job-bundle isolation  *(own design doc when reached)*
+### Phase 3 — Worker isolation  *(SHIPPED as GRADING isolation — feat/worker-isolation,
+docs/plans/2026-08-09-worker-isolation-design.md, docs/runbooks/worker-isolation.md)*
+
+**Re-scoped after review.** The phase as sketched below (job bundle + inbox, isolating the
+developer's `claude -p`) targeted the wrong call. Two probe-executed reviews showed the
+shortest path from a worker to the control plane is GRADING: the factory runs
+worker-authored code as itself on every candidate — the test suite, the red-proof nodes,
+the acceptance test, and the post-merge re-baseline inside its own `factory/auto` worktree
+— while `require_test` MANDATES the worker ship a test and the frozen gate never covers
+`tests/`. Isolating the LLM call would have left all four sites open, and the sketched
+design would additionally have broken the factory outright (100% `no_candidate` from git's
+dubious-ownership check, a leaked clone per task, a `chown` mutating the real target repo
+through hardlinked inodes, and a conductor unable to read the tree it must drive).
+
+Shipped instead: one seam for every execution of candidate code (`common/target_exec.py`),
+a grading identity with no `claude` and no login, exports rather than linked worktrees, the
+post-merge re-baseline isolated too, cleanup run as the grader, a root-free grant pinned to
+a read-only wrapper, and `guesthouse_check --boundary` to prove containment from the
+grader's side. Default OFF. Prerequisite closed in the same branch: the board's write
+routes were unauthenticated (any local `curl` could forge an approval or clear the brake).
+
+Still open, named rather than implied: the conductor (runs as the factory user with Bash
+and the factory root as cwd, by design — its own phase), and honesty, which the
+deterministic gates own.
+
+### Phase 3 (original sketch, superseded) — Worker job-bundle isolation
 
 The interior authority split — the biggest refactor, deliberately last of the structural
 phases: workers stop sharing the factory user's ambient authority. A worker receives a
