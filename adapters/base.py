@@ -180,6 +180,15 @@ class TargetAdapter(abc.ABC):
                 check=True, capture_output=True, text=True)
         _sp.run(["git", "-C", dest, "checkout", "-q", ref],
                 check=True, capture_output=True, text=True)
+        # Drop the back-pointer. `git clone` leaves an `origin` remote aimed at src_repo
+        # with BOTH fetch and push URLs, so an export handed to another identity ships with
+        # a ready-made route home: `git fetch origin <branch>` reads every branch the
+        # factory has, not just the candidate's (probed — it works). A 0700 factory home
+        # makes that path unreadable in a correct guest house, but "detached" must not
+        # depend on a permission bit somewhere else being right. Nothing fetches from an
+        # export; it exists only to be graded.
+        _sp.run(["git", "-C", dest, "remote", "remove", "origin"],
+                check=False, capture_output=True, text=True)
         return dest
 
     def clone(self, dest: str) -> str:

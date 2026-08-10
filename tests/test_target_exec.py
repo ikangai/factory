@@ -232,6 +232,34 @@ def test_export_tree_is_self_contained_and_shares_no_inodes(tmp_path):
         assert os.stat(p).st_nlink == 1, "export hardlinked the source's objects"
 
 
+def test_export_carries_no_route_back_to_the_factory_repo(tmp_path):
+    """`git clone` leaves an `origin` remote aimed at the source, with fetch AND push URLs
+    — so an export handed to another identity would ship with a ready-made route home:
+    `git fetch origin <branch>` reads every branch the factory has, not just the
+    candidate's (probed: it worked). A 0700 factory home makes that path unreadable in a
+    correct guest house, but "detached" must not depend on a permission bit elsewhere
+    being right."""
+    import subprocess as sp
+    src = _repo(str(tmp_path / "src"))
+    sp.run(["git", "-C", src, "checkout", "-qb", "other"], check=True)
+    with open(os.path.join(src, "other.txt"), "w") as fh:
+        fh.write("factory-only work")
+    sp.run(["git", "-C", src, "add", "-A"], check=True)
+    sp.run(["git", "-C", src, "commit", "-qm", "other"], check=True)
+    sp.run(["git", "-C", src, "checkout", "-q", "main"], check=True)
+
+    dest = str(tmp_path / "export")
+    _Adapter().export_tree(src, dest, "main")
+
+    remotes = sp.run(["git", "-C", dest, "remote", "-v"], capture_output=True, text=True)
+    assert remotes.stdout.strip() == "", "the export must carry no remote"
+    back = sp.run(["git", "-C", dest, "fetch", "origin", "other"],
+                  capture_output=True, text=True)
+    assert back.returncode != 0, "the export could still fetch the factory's other branches"
+    # and it is still a working repo, which is the point of exporting rather than archiving
+    assert sp.run(["git", "-C", dest, "log", "-1"], capture_output=True).returncode == 0
+
+
 def test_export_root_is_traverse_only(monkeypatch, tmp_path):
     """The grader enters its own export and cannot list what else is being graded."""
     monkeypatch.setenv("FACTORY_EXPORT_ROOT", str(tmp_path / "grade"))
