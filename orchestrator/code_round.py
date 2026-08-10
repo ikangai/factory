@@ -26,7 +26,7 @@ import shutil
 import tempfile
 from typing import Callable, Optional
 
-from ..common import code_gate, frozen_source, killswitch
+from ..common import code_gate, target_exec, frozen_source, killswitch
 from ..common.textutil import clean_line
 
 # F6 (round-2 integration fix, Component E): a hard ceiling on individual pytest
@@ -224,7 +224,13 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
             if test_files:
                 base_wt = tempfile.mkdtemp(prefix="cf-redproof-")
                 try:
-                    adapter.add_worktree_detached(base_repo, base_wt, base_sha)
+                    # Component C, same reasoning as the candidate checkout: a detached
+                    # worktree still links back to base_repo's .git, and the grader runs
+                    # pytest in here.
+                    if target_exec.isolation_active():
+                        adapter.export_tree(base_repo, base_wt, base_sha)
+                    else:
+                        adapter.add_worktree_detached(base_repo, base_wt, base_sha)
                     to_check: list[str] = []
                     skipped: list[str] = []
                     for rel in test_files:
@@ -355,10 +361,27 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
     # 5. re-baseline the NEW champion + self-heal. ANY failure here (a regression OR a
     #    grading crash) auto-reverts — never leave an ungraded merge in the repo.
     try:
-        after_scores = grade_fn(main_repo)
-        after = {"working": after_scores["working"],
-                 "held_out": after_scores.get("held_out", 0.0),
-                 "tests_passed": adapter.run_tests(main_repo)[0]}
+        # Component D — the site the FIRST Phase 3 design would have missed entirely: after
+        # the merge lands, the candidate's code is re-graded IN main_repo, the factory's own
+        # persistent factory/auto worktree. Isolating only the pre-merge checkout would leave
+        # the worker's code running there with full authority. With isolation on, re-baseline
+        # a throwaway export of the merged tree instead.
+        if target_exec.isolation_active():
+            rebase_dir = tempfile.mkdtemp(prefix="cf-rebaseline-",
+                                          dir=target_exec.export_root())
+            try:
+                adapter.export_tree(main_repo, rebase_dir, "HEAD")
+                after_scores = grade_fn(rebase_dir)
+                after = {"working": after_scores["working"],
+                         "held_out": after_scores.get("held_out", 0.0),
+                         "tests_passed": adapter.run_tests(rebase_dir)[0]}
+            finally:
+                target_exec.remove_export(rebase_dir)
+        else:
+            after_scores = grade_fn(main_repo)
+            after = {"working": after_scores["working"],
+                     "held_out": after_scores.get("held_out", 0.0),
+                     "tests_passed": adapter.run_tests(main_repo)[0]}
         reg = code_gate.regression_after_merge(before, after, tol=regression_tol)
     except Exception as e:  # noqa: BLE001 — a broken re-baseline is treated as a regression
         after_scores, reg = None, {"regressed": True, "why": [f"re-baseline failed: {e}"]}

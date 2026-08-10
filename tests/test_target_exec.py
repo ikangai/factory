@@ -194,3 +194,81 @@ def test_wrapper_refuses_a_symlink_that_escapes_the_export_root(tmp_path):
     refused = subprocess.run([WRAPPER, str(root / "sneaky"), "/bin/echo", "hi"],
                              capture_output=True, text=True, env=env)
     assert refused.returncode == 126
+
+
+# ==========================================================================================
+# Components C/D — what the grader is actually handed. These pin the two properties the
+# whole boundary rests on: the checkout must not link back to the factory's git, and the
+# POST-MERGE re-baseline (which v1 of this design missed entirely) must be isolated too.
+# ==========================================================================================
+def _repo(path, *, files=(("f.txt", "one"),)):
+    import subprocess as sp
+    os.makedirs(path, exist_ok=True)
+    sp.run(["git", "init", "-q", "-b", "main", path], check=True)
+    sp.run(["git", "-C", path, "config", "user.email", "t@e.c"], check=True)
+    sp.run(["git", "-C", path, "config", "user.name", "t"], check=True)
+    for name, body in files:
+        with open(os.path.join(path, name), "w") as fh:
+            fh.write(body)
+    sp.run(["git", "-C", path, "add", "-A"], check=True)
+    sp.run(["git", "-C", path, "commit", "-qm", "c1"], check=True)
+    return path
+
+
+def test_export_tree_is_self_contained_and_shares_no_inodes(tmp_path):
+    """A linked worktree's .git is a FILE pointing into the source's object store and refs —
+    including the branch about to be merged. And a plain local clone HARDLINKS objects when
+    both sides share a filesystem, so the copy's inodes are the original's: that is exactly
+    how the discarded v1 design would have mutated the real target repo."""
+    src = _repo(str(tmp_path / "src"))
+    dest = str(tmp_path / "export")
+    _Adapter().export_tree(src, dest, "main")
+
+    assert os.path.isdir(os.path.join(dest, ".git")), "must be its own repo, not a link"
+    src_objs = [os.path.join(r, f) for r, _, fs in os.walk(os.path.join(src, ".git", "objects"))
+                for f in fs]
+    assert src_objs, "fixture produced no objects"
+    for p in src_objs:
+        assert os.stat(p).st_nlink == 1, "export hardlinked the source's objects"
+
+
+def test_export_root_is_traverse_only(monkeypatch, tmp_path):
+    """The grader enters its own export and cannot list what else is being graded."""
+    monkeypatch.setenv("FACTORY_EXPORT_ROOT", str(tmp_path / "grade"))
+    root = target_exec.export_root()
+    assert os.path.isdir(root)
+    assert os.stat(root).st_mode & 0o777 == 0o711
+
+
+def test_remove_export_runs_as_the_grader_when_isolated(monkeypatch, tmp_path):
+    """The factory cannot unlink files another identity created in directories that
+    identity also created — probed: rmtree raises, and ignore_errors silently LEAVES the
+    tree, leaking a full checkout per candidate forever."""
+    victim = tmp_path / "export"
+    victim.mkdir()
+    (victim / "f").write_text("x")
+    calls = []
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "factory-grader")
+    monkeypatch.setattr(target_exec, "grader_wrapper", lambda: "/opt/factory/run-target-code")
+    monkeypatch.setattr(target_exec.subprocess, "run",
+                        lambda cmd, **kw: calls.append(list(cmd)))
+
+    target_exec.remove_export(str(victim))
+
+    assert calls, "isolated cleanup must go through the grader"
+    assert calls[0][:4] == ["sudo", "-n", "-u", "factory-grader"]
+    assert "/bin/rm" in calls[0] and str(victim) in calls[0]
+
+
+def test_remove_export_is_a_plain_rmtree_when_not_isolated(monkeypatch, tmp_path):
+    victim = tmp_path / "export"
+    victim.mkdir()
+    (victim / "f").write_text("x")
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "")
+    called = []
+    monkeypatch.setattr(target_exec.subprocess, "run", lambda *a, **k: called.append(a))
+
+    target_exec.remove_export(str(victim))
+
+    assert called == [], "OFF must not invoke sudo at all"
+    assert not victim.exists()

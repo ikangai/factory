@@ -102,3 +102,43 @@ def run_target_code(argv: Sequence[str], *, cwd: str, timeout: int,
         return ExecResult(124, "", f"timed out after {timeout}s: {e}")
     return ExecResult(getattr(p, "returncode", 1),
                       getattr(p, "stdout", "") or "", getattr(p, "stderr", "") or "")
+
+
+def export_root() -> str:
+    """Where graded exports live. The wrapper refuses any cwd outside this root, so it is
+    also the one directory the grader identity ever needs access to — keeping it OUT of the
+    factory's home is the point (that home is 0700 precisely so the grader cannot read it).
+    Created on demand, group-traversable so the grader can enter it."""
+    import os
+    from . import config
+    sw = config.load_config().get("super_worker", {}) or {}
+    root = str(sw.get("export_root") or os.environ.get("FACTORY_EXPORT_ROOT")
+               or "/tmp/factory-grade")
+    os.makedirs(root, exist_ok=True)
+    try:
+        os.chmod(root, 0o711)      # traverse-only: the grader enters its own export, and
+    except OSError:                # cannot list what other candidates are being graded
+        pass
+    return root
+
+
+def remove_export(path: str) -> None:
+    """Delete a graded export. When isolation is on, the grader owns files it created, and
+    the factory cannot unlink them from directories the grader also created — probed:
+    shutil.rmtree raises PermissionError, and ignore_errors=True silently LEAVES the tree,
+    which would leak a full checkout per candidate forever. So the removal runs as the same
+    identity that made the mess, through the same pinned wrapper."""
+    import os
+    import shutil
+    import subprocess
+    if not path or not os.path.isdir(path):
+        return
+    user = grader_user()
+    if user:
+        try:
+            subprocess.run(build_argv(["/bin/rm", "-rf", path], cwd=path,
+                                      user=user, wrapper=grader_wrapper()),
+                           capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    shutil.rmtree(path, ignore_errors=True)   # sweeps the factory-owned parent either way

@@ -162,6 +162,26 @@ class TargetAdapter(abc.ABC):
             return ("failed", report)
         return ("missing", report)                     # 2/3/other (interrupt/internal) → skip, fail-open
 
+    def export_tree(self, src_repo: str, dest: str, ref: str) -> str:
+        """A SELF-CONTAINED working tree at `ref`, safe to hand to another identity.
+
+        `add_worktree` produces a LINKED worktree whose `.git` is a file pointing into
+        `src_repo/.git` — so anything that can write there reaches the factory's own object
+        store and refs, including the branch about to be merged. Grading must never receive
+        one (Phase 3, Component C).
+
+        `--no-hardlinks` is not optional: a plain local `git clone` hardlinks objects when
+        source and destination share a filesystem, so the copy's inodes ARE the original's
+        — changing a permission or an object on one changes the other. That is exactly how
+        the discarded v1 design would have mutated the real target repo.
+        """
+        import subprocess as _sp
+        _sp.run(["git", "clone", "--no-hardlinks", "-q", src_repo, dest],
+                check=True, capture_output=True, text=True)
+        _sp.run(["git", "-C", dest, "checkout", "-q", ref],
+                check=True, capture_output=True, text=True)
+        return dest
+
     def clone(self, dest: str) -> str:
         """A SELF-CONTAINED git clone of the target into `dest` (its own `.git`, so it
         works when owned by a different OS user — the Guest-House boundary). Returns

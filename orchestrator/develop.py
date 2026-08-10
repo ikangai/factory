@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Callable, Optional
 
-from ..common import config, killswitch
+from ..common import config, target_exec, killswitch
 from . import code_round
 
 # Task 0.1 (P11): an EMPTY-HANDED worker (no candidate branch) is not always "brief too
@@ -768,7 +768,15 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
             cand_wt = os.path.join(work, "wt")
             try:
                 adapter.fetch_candidate(main_repo, dev_clone, branch)
-                adapter.add_worktree(main_repo, cand_wt, branch)
+                # Component C: with grading isolated, the checkout handed to the grader must
+                # NOT be a linked worktree — its `.git` is a file pointing into main_repo's
+                # object store and refs, i.e. into the branch we are about to merge. A
+                # self-contained export has nothing to reach. Isolation OFF keeps the
+                # worktree exactly as before (cheaper, and nothing foreign runs in it).
+                if target_exec.isolation_active():
+                    adapter.export_tree(main_repo, cand_wt, branch)
+                else:
+                    adapter.add_worktree(main_repo, cand_wt, branch)
                 # GSD spec-bound acceptance gate. Threaded from the run entry (Task 6.1) so a
                 # store override can retune it; None = fall back to config.yaml (unchanged default).
                 rt = require_test if require_test is not None else bool(
@@ -804,7 +812,10 @@ def develop_and_merge(*, adapter, main_repo: str, task: str, champion_scores: di
                         **evidence, **spend, **review_spend}
             finally:
                 try:
-                    adapter.remove_worktree(main_repo, cand_wt)
+                    # An export is a plain directory, not a registered worktree — asking
+                    # git to remove it would error. rmtree(work) below sweeps it either way.
+                    if not target_exec.isolation_active():
+                        adapter.remove_worktree(main_repo, cand_wt)
                 except Exception:  # noqa: BLE001
                     pass
     finally:
