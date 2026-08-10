@@ -107,11 +107,12 @@ class TargetAdapter(abc.ABC):
         cmd = self.test_command()
         if not cmd:
             return (False, "no test_command configured for this target")
-        try:
-            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            return (False, f"test run failed: {e}")
-        report = ((p.stdout or "") + (p.stderr or "")).strip()
+        # Routed through target_exec: this is candidate-authored code, and require_test
+        # MANDATES the worker ship some. Direct subprocess.run here ran it as the factory
+        # user on every candidate (Phase 3). Never raises — see run_target_code.
+        from ..common import target_exec
+        p = target_exec.run_target_code(cmd, cwd=cwd, timeout=timeout)
+        report = (p.stdout + p.stderr).strip()
         return (p.returncode == 0, report[-4000:])
 
     def run_named_test(self, cwd: str, ref: str, *, timeout: int = 300) -> tuple[str, str]:
@@ -148,11 +149,11 @@ class TargetAdapter(abc.ABC):
                 named.append(a)
         if not swapped:                                # no suite arg to swap → best-effort append
             named.append(ref)
-        try:
-            p = subprocess.run(named, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            return ("missing", f"named-test run failed: {e}")
-        report = ((p.stdout or "") + (p.stderr or "")).strip()[-4000:]
+        # Same seam as run_tests — the red-proof and acceptance paths execute candidate
+        # code too, one node at a time.
+        from ..common import target_exec
+        p = target_exec.run_target_code(named, cwd=cwd, timeout=timeout)
+        report = (p.stdout + p.stderr).strip()[-4000:]
         if p.returncode == 0:
             return ("passed", report)
         if p.returncode in (4, 5):                     # 4 = not-found path/node-id, 5 = none collected

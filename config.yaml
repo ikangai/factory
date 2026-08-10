@@ -198,6 +198,23 @@ super_worker:
   # ORG_BOOL_KEYS derives from the spec's bools, so listing it there would hand the organizer
   # control of its own trigger. `factory org plan|replan` (explicit human acts) work regardless.
   organizer: false
+  # --- grading isolation (Phase 3, docs/plans/2026-08-09-worker-isolation-design.md) -------
+  # The factory EXECUTES worker-authored code on every candidate: the test suite, the
+  # red-proof nodes, the acceptance test, and the post-merge re-baseline. require_test above
+  # MANDATES the worker ship a test, and the frozen gate never covers tests/ — so this is the
+  # documented contract, not an attack. Unset (default), that code runs as the factory user,
+  # i.e. with the blackboard, the credentials and the killswitch in reach.
+  # Set to an unprivileged account and every such execution goes through
+  # common/target_exec.py's single seam: `sudo -n -u <user> -- <grader_wrapper> <cwd> <argv>`.
+  # No root and no chown are involved.
+  # Config-ONLY and deliberately NOT in SETTINGS_SPEC: a knob that decides whether untrusted
+  # code is contained must not be reachable from the dashboard's settings route or proposable
+  # by the self-harness loop — a loop that can widen its own containment is not contained.
+  # Enabling is an operator act, gated on the drill in docs/runbooks/worker-isolation.md.
+  grader_user: ""
+  # The operator-installed, READ-ONLY wrapper the sudoers rule pins (argv: <cwd> <cmd...>).
+  # Never derived from anything a worker can influence.
+  grader_wrapper: "/opt/factory/run-target-code"
   # Self-harness loop (docs/plans/2026-08-05-self-harness-loop-design.md): the shift-END
   # HARNESS ENGINEER trigger. When true, AFTER a shift's outcomes are recorded, an evidence-
   # freshness gate checks whether >= MIN_NEW_EVIDENCE (10) new task_evidence rows have landed
