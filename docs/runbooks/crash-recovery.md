@@ -14,9 +14,17 @@ goal" section first — this runbook assumes it:
 Every external effect the factory takes (a merge, a graduation push, a broker-armed
 graduation prepare) gets a durable row in `operations` (`store/schema.sql`) BEFORE it
 happens and after it resolves. `status` moves `planned`/`executing` (the effect is in
-flight, or a crash interrupted it) → `applied`/`reconciled`/`failed` (a terminal, known
-outcome) → `unknown` only when nothing — not git, not a receipt, not the ledger — could
-answer the question honestly.
+flight, or a crash interrupted it) → `applied`/`reconciled`/`failed` (a known outcome) →
+`unknown` only when nothing — not git, not a receipt, not the ledger — could answer the
+question honestly.
+
+One subtlety, which is the whole of drill 1's finding (§4): **for a `merge`, `applied` is
+not terminal.** It is written the instant the merge lands, while the round still has its
+entire re-baseline — a full grade plus the target's suite — to run before keeping or
+auto-reverting that merge. A round that FINISHES now resolves its own row to `reconciled`,
+so a `merge` row left at `applied` whose task never closed out is by construction a crashed
+one, and the reconciler sweeps exactly those (`reconcile._crashed_applied_merges`). For
+every other kind `applied` IS terminal and is never swept.
 
 | `kind` | What it tracks | `idem_key` shape | Landed = | Not landed = |
 |---|---|---|---|---|
@@ -28,6 +36,11 @@ answer the question honestly.
 A row's `receipt` column carries the resulting sha/nonce once known; `detail` carries the
 operator-facing why (or the exact command to check by hand, for an `unknown`). `attempts`
 and `updated_at` are bookkeeping, not authority — git/receipts/the ledger are.
+
+The `merge` row's "landed" rule above is how an `executing` row is read. A crashed
+`applied` row is read from its **receipt** instead — the sha git itself returned from the
+merge — because the `Factory-Task:` trailer is written only when the task carries a ref,
+and reading its absence as "never landed" would flip a genuinely applied row to `failed`.
 
 ## 2. Reading `factory reconcile --dry-run`
 
@@ -165,6 +178,44 @@ Run it against a **throwaway** clone/dispatch, never a real graduation:
    - **Surfaced, never guessed**: a boundary the reconciler genuinely cannot resolve
      (no reachable worktree, no fetch credential, no receipt and no git evidence) must
      show up as `unknown` with a backlog task — never silently marked done or discarded.
+
+### Executed 2026-08-13 — the merge boundaries, 37/37
+
+**Harness.** A throwaway git repo (a `factory/auto` branch plus a candidate branch), a
+throwaway blackboard, and the REAL `run_code_round` driven with a `TargetAdapter` subclass:
+every git operation under test — `merge_branch`, `current_commit`, `revert_commit` — is the
+shipped base-class implementation, and only `frozen_paths`/`test_command` are stubbed, so
+the drill needs no `config.yaml` and no target repo. The crash is a real
+`os.kill(os.getpid(), SIGKILL)` inside `adapter.merge_branch` / `grade_fn`; every child
+process exited `-9`. Two deliberate monkeypatches, both outside what is being tested:
+`killswitch.is_halted` (this checkout keeps STOP engaged on purpose, and the brake is not
+the subject) and the kill hook itself. Nothing touched `store/blackboard.db`, the target
+repo, or any remote.
+
+| kill point | git afterwards | row after the crash | after `factory reconcile` |
+|---|---|---|---|
+| before `merge_branch` | no merge | `executing` | `failed` "not landed"; task → `open`; retry NOT suppressed |
+| after `merge_branch`, before the receipt | merge present | `executing`, no receipt | `reconciled` "landed: `<sha>`"; task repaired to `done`; identical retry skipped, a NEW candidate not skipped |
+| after the merge, worktree unreachable | merge present | `executing` | `unknown` + escalation carrying the exact `git log --grep` command |
+| mid-re-baseline | merge standing | `applied` | `unknown`, escalated as UNVERIFIED with a per-merge dedup ref; task never claimed `done` |
+| before the auto-revert of a REGRESSING merge | merge standing | `applied` | same — git shows the same thing whether the lost re-baseline would have kept or reverted it, so it escalates rather than guessing |
+| after the auto-revert | merge + revert | `applied` | `reconciled` "landed then auto-reverted"; task → `open`; no escalation |
+| no crash (control) | merge present | `reconciled` | nothing to examine |
+
+**What it found.** The first three rows behaved as designed — the runbook's three
+properties held wherever the row was still `executing`. The last three did not exist as
+behavior at all: `applied` was never swept, so a crash anywhere after the receipt left the
+merge's *fate* unresolved. The task was never repaired (the factory re-dispatches work it
+has already landed — the exact consequence the design's seam map attributed to this window)
+and a regressing merge could stay standing with nothing flagging it. Fixed in the same pass
+(`fix/crash-consistency-applied-merge`): the table above is the POST-fix behavior, and the
+last three rows are what the fix added. Regression tests live in
+`tests/test_reconcile.py` ("kind: merge, status 'applied'") and
+`tests/test_crash_consistency_wrap.py`.
+
+**Still unexercised.** Three of the five boundary pairs: the unarmed push, the armed
+envelope prepare, and the armed receipt ingestion. Each needs graduation/broker fixtures
+rather than the merge fixture above, so none of them is covered by this run.
 
 ## 5. Drill 4 — corrupt, restore, reconcile, verify
 
