@@ -407,4 +407,14 @@ def run_code_round(*, adapter, main_repo: str, cand_repo: str, branch: str,
         _op_set_status(db_path, op_id, "reconciled", f"auto-reverted -> {revert_sha}")
         return {"action": "auto_reverted", "merge_sha": merge_sha,
                 "revert_sha": revert_sha, "why": reg["why"], **extra}
+    # The round finished and the merge STOOD — its fate is now as fully known as the
+    # auto-revert branch above already records for itself, so the row closes the same way.
+    # Leaving it at 'applied' made 'applied' mean two different things ("merge landed, round
+    # done" and "merge landed, round crashed somewhere in the re-baseline"), and the
+    # reconciler — which sweeps only planned/executing — could not tell them apart or reach
+    # either. Drill 1 (2026-08-13) reproduced that at three real SIGKILL boundaries: a task
+    # never repaired (work re-dispatched after it had already landed), and a regressing merge
+    # left standing with nothing flagging it. See orchestrator/reconcile.py's
+    # `_crashed_applied_merges`, which now depends on this write to tell the two apart.
+    _op_set_status(db_path, op_id, "reconciled", f"merged, re-baselined: {merge_sha}")
     return {"action": "merged", "merge_sha": merge_sha, "scores": after_scores, **extra}

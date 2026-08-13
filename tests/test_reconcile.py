@@ -64,6 +64,122 @@ def test_resolve_merge_landed_reconciles_and_repairs_the_task(tmp_path, store):
     assert store.get_task("task-1")["result"] == merge_sha
 
 
+# -- kind: merge, status 'applied' — the round crashed AFTER the receipt ----------
+# Drill 1 (2026-08-13) found this half of the merge window unreconcilable: 'applied' is
+# written the instant the merge lands, but the round runs on through the whole re-baseline
+# before keeping or reverting it, and _UNRESOLVED_STATUSES never swept 'applied'.
+
+def _applied_merge(store, task_id, receipt, *, task_status="in_progress", kind="merge"):
+    store.add_task(task_id, "do the thing", source="human")
+    store.set_task_status(task_id, task_status)
+    op = store.begin_operation(kind, f"merge:{task_id}:CANDTIP", tip_sha="CANDTIP",
+                               payload={"task_id": task_id})["operation"]
+    store.complete_operation(op["id"], receipt=receipt)     # -> 'applied'
+    return op
+
+
+def test_applied_merge_still_standing_escalates_as_unverified(tmp_path, store):
+    """The re-baseline never ran, so nobody knows whether it would have kept or reverted
+    this merge. That is exactly what the crash destroyed — so escalate, never guess (binding
+    rule 2), and never mark the task done: that would claim verified work."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    merge_sha = _commit(repo, "b.txt", "2", message="factory: cand")   # no trailer at all
+    op = _applied_merge(store, "task-ap1", merge_sha)
+
+    result = reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    assert result["examined"] == 1
+    row = store.get_operation(op["id"])
+    assert row["status"] == "unknown"
+    assert "UNVERIFIED" in row["detail"] and merge_sha[:12] in row["detail"]
+    assert store.get_task("task-ap1")["status"] != "done"
+    # Escalated PER MERGE, not per kind: a second unverified merge must not be swallowed by
+    # the first one's backlog task, which would hide its sha.
+    escalations = [t for t in store.list_tasks(status="open")
+                   if t.get("source_ref") == f"reconcile:merge-unverified:{merge_sha[:12]}"]
+    assert len(escalations) == 1
+
+
+def test_applied_merge_that_was_reverted_reconciles_and_reopens_the_task(tmp_path, store):
+    """Both the merge and its `Factory-Revert:` trailer are in git, so the fate IS known —
+    resolve it and hand the task back for redispatch, with no escalation to read."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    merge_sha = _commit(repo, "b.txt", "2", message="factory: cand")
+    _commit(repo, "b.txt", "1", message=f"Revert cand\n\nFactory-Revert: {merge_sha}")
+    op = _applied_merge(store, "task-ap2", merge_sha)
+
+    reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    row = store.get_operation(op["id"])
+    assert row["status"] == "reconciled"
+    assert "auto-reverted" in row["detail"]
+    assert store.get_task("task-ap2")["status"] == "open"
+    assert not [t for t in store.list_tasks(status="open")
+                if "reconcile:" in (t.get("source_ref") or "")]
+
+
+def test_applied_merge_whose_task_is_done_is_never_swept(tmp_path, store):
+    """The no-migration guard. Rows written by CLEAN rounds before this fix sit at 'applied'
+    forever; their task closed out normally, and re-examining them would escalate history as
+    if it had crashed."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    merge_sha = _commit(repo, "b.txt", "2", message="factory: cand")
+    op = _applied_merge(store, "task-ap3", merge_sha, task_status="done")
+
+    result = reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    assert result["examined"] == 0
+    assert store.get_operation(op["id"])["status"] == "applied"
+
+
+def test_applied_merge_receipt_not_on_the_branch_escalates(tmp_path, store):
+    """The receipt is a real commit, just not on the auto branch — the branch moved under
+    it. A definite "no", and still not something to resolve in either direction."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    _git(repo, "checkout", "-q", "-b", "side")
+    elsewhere = _commit(repo, "c.txt", "3", message="on another branch")
+    _git(repo, "checkout", "-q", "main")
+    op = _applied_merge(store, "task-ap4", elsewhere)
+
+    reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    row = store.get_operation(op["id"])
+    assert row["status"] == "unknown"
+    assert "not on main" in row["detail"]
+
+
+def test_applied_merge_with_an_unresolvable_sha_escalates_as_git_failing(tmp_path, store):
+    """A sha git does not even have an object for makes `merge-base --is-ancestor` exit 128,
+    NOT 1 — git failing to answer, not answering "no". Both escalate, but only a genuine
+    exit 1 may be reported as a definite not-on-the-branch."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    op = _applied_merge(store, "task-ap4b", "0" * 40)
+
+    reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    row = store.get_operation(op["id"])
+    assert row["status"] == "unknown"
+    assert "could not confirm" in row["detail"]
+
+
+def test_applied_non_merge_rows_are_left_alone(tmp_path, store):
+    """'applied' is the TERMINAL success state for graduate_push (_resolve_graduate_push
+    sets it) — sweeping those would re-open settled publications."""
+    repo = _init(str(tmp_path / "auto"))
+    _commit(repo, "a.txt", "1", message="root")
+    op = _applied_merge(store, "task-ap5", _head(repo), kind="graduate_push")
+
+    result = reconcile.run_reconcile(store, merge_repo=repo, auto_branch="main", root=None)
+
+    assert result["examined"] == 0
+    assert store.get_operation(op["id"])["status"] == "applied"
+
+
 def test_resolve_merge_not_landed_returns_task_to_open(tmp_path, store):
     repo = _init(str(tmp_path / "auto"))
     _commit(repo, "a.txt", "1", message="root")   # no Factory-Task commit at all
