@@ -10,6 +10,12 @@ begin/complete calls did NOT get to close out, i.e. a crash-orphaned intent, nev
 normal in-flight one — this asks git (and, for the broker, receipts) what actually
 happened and resolves the row, or escalates `'unknown'` when it honestly cannot tell.
 
+Plus one row shape that is NOT identified by status alone: a `merge` row sitting at
+`'applied'` whose task never closed out. `'applied'` is written when the merge lands, but
+the round continues through the whole re-baseline before the merge is kept or reverted, so
+a crash in that stretch leaves a row that looks finished and is not — see
+`_crashed_applied_merges`.
+
 Binding rules this module holds itself to:
   1. NEVER probe GitHub for issue state (armed mode has no `gh` credential at all; a
      wrong close is unrecoverable while a duplicate comment is merely cosmetic).
@@ -55,14 +61,20 @@ def _unresolved_operations(store, limit: int) -> list:
     return rows[:limit]
 
 
-def _escalate(store, op: dict, detail: str) -> None:
+def _escalate(store, op: dict, detail: str, *, ref: Optional[str] = None) -> None:
     """The only path to 'unknown' — always paired with a durable, deduped escalation
     (reporting.factory_memory.record_graduation_failure's own pattern) carrying the
-    EXACT operator command to verify by hand."""
+    EXACT operator command to verify by hand.
+
+    `ref` overrides the per-KIND dedup marker. The default groups every unknown of a kind
+    into one backlog task, which is right for a repeated infrastructure failure but wrong
+    when each row names a DIFFERENT artifact the operator must look at by hand: the second
+    unverified merge would be swallowed by the first one's task and its sha never shown.
+    Callers in that situation pass a ref scoped to the artifact."""
     from ..reporting import factory_memory
     store.set_operation_status(op["id"], "unknown", detail[:2000])
     factory_memory.record_graduation_failure(
-        store, error=detail, ref=f"reconcile:{op['kind']}-unknown")
+        store, error=detail, ref=ref or f"reconcile:{op['kind']}-unknown")
 
 
 # -- kind: merge ---------------------------------------------------------------
@@ -127,6 +139,93 @@ def _resolve_merge(store, op: dict, *, merge_repo: Optional[str], auto_branch: s
         # that must not be silently reopened.
         if status in ("claimed", "in_progress"):
             store.set_task_status(task_id, "open")
+
+
+def _crashed_applied_merges(store, limit: int) -> list:
+    """`applied` merge rows whose ROUND never finished — the second half of the merge
+    crash window (drill 1, 2026-08-13).
+
+    `applied` is written the instant the merge lands (`code_round._op_complete`), but the
+    round runs on for the whole re-baseline — a full grade plus the target's own suite —
+    and only then keeps the merge or auto-reverts it. A crash anywhere in that stretch left
+    the row at `applied`, which `_UNRESOLVED_STATUSES` does not sweep, so the merge's FATE
+    was never resolved: the task was never repaired (the factory re-dispatched work it had
+    already landed — precisely the consequence the design's seam map attributed to this
+    window) and a REGRESSING merge could stay in the branch with nothing flagging it.
+
+    A completed round now resolves its own row to `reconciled`, so a row left at `applied`
+    is by construction a crashed one. The task-status predicate is what keeps rows written
+    BEFORE that change out of the sweep — their task closed out normally — so this needs no
+    migration and cannot retroactively escalate historical clean merges."""
+    rows = []
+    for row in store.operations(status="applied"):
+        if row.get("kind") != "merge":
+            continue          # 'applied' IS terminal for graduate_push — never sweep those
+        task_id = (row.get("payload") or {}).get("task_id") or ""
+        if not task_id:
+            continue          # nothing to repair, and no way to tell crashed from clean
+        task = store.get_task(task_id)
+        if task and task.get("status") == "done":
+            continue          # the round closed out; this row is history, not a crash
+        rows.append(row)
+    return rows[:limit]
+
+
+def _resolve_applied_merge(store, op: dict, *, merge_repo: Optional[str], auto_branch: str,
+                           runner) -> None:
+    """Resolve one crashed `applied` merge row.
+
+    The RECEIPT, not the `Factory-Task:` trailer, is the evidence here: it is the sha git
+    itself returned from the merge, so this stays correct for a merge whose task carried no
+    ref (`code_round` writes the trailer only when one is present) — reusing `_resolve_merge`
+    would read a missing trailer as "never landed" and flip a genuinely applied row to
+    'failed'.
+
+    One outcome is determinable and one is not:
+      - a `Factory-Revert: <receipt>` commit exists → the fate IS known (landed, then
+        reverted): resolve, and hand the task back for redispatch.
+      - the merge is still standing → it was never re-baselined. Whether that re-baseline
+        would have kept or reverted it is exactly what the crash destroyed, and this module
+        does not guess (binding rule 2): escalate. Never mark the task done — that would
+        claim verified work — and never revert, which is a decision, not a repair."""
+    receipt = (op.get("receipt") or "").strip()
+    task_id = (op.get("payload") or {}).get("task_id") or ""
+    verify = (f"git -C <factory/auto worktree> branch --contains {receipt[:12]}"
+              if receipt else f"git -C <factory/auto worktree> log {auto_branch}")
+    ref = f"reconcile:merge-unverified:{receipt[:12]}" if receipt else None
+
+    if not receipt or not merge_repo or not os.path.isdir(merge_repo):
+        _escalate(store, op, f"merge op #{op['id']} landed but its round never finished, and "
+                            f"no reachable factory/auto worktree can confirm the merge; "
+                            f"verify manually: {verify}", ref=ref)
+        return
+
+    res = _git(runner, merge_repo, "merge-base", "--is-ancestor", receipt, auto_branch)
+    rc = getattr(res, "returncode", None)
+    if rc not in (0, 1):   # 1 is a real "no"; anything else is git failing, not answering
+        _escalate(store, op, f"git could not confirm whether merge {receipt[:12]} is on "
+                            f"{auto_branch} for op #{op['id']}; verify manually: {verify}",
+                  ref=ref)
+        return
+    if rc == 1:
+        _escalate(store, op, f"merge op #{op['id']} recorded receipt {receipt[:12]}, but that "
+                            f"sha is not on {auto_branch} — the branch moved under it; "
+                            f"verify manually: {verify}", ref=ref)
+        return
+
+    reverted = _git(runner, merge_repo, "log", auto_branch, "--grep",
+                    f"Factory-Revert: {receipt}", "--fixed-strings", "--format=%H")
+    if _ok(reverted) and _lines(reverted):
+        store.set_operation_status(op["id"], "reconciled",
+                                   f"landed then auto-reverted: {receipt}")
+        if (store.get_task(task_id) or {}).get("status") in ("claimed", "in_progress"):
+            store.set_task_status(task_id, "open")
+        return
+
+    _escalate(store, op, f"merge {receipt[:12]} landed but its round crashed before the "
+                        f"re-baseline finished: the merge is UNVERIFIED — neither confirmed "
+                        f"nor reverted, and it is standing on {auto_branch} now. Re-baseline "
+                        f"or revert it by hand; verify manually: {verify}", ref=ref)
 
 
 # -- kind: graduate_push (unarmed) ---------------------------------------------
@@ -347,6 +446,9 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
         receipts_dir = paths.broker_receipts_dir(spool_root)
 
     rows = _unresolved_operations(store, limit)
+    # Plus the merge rows whose round crashed AFTER the receipt was written — invisible to
+    # the status sweep above, and the larger half of the merge crash window.
+    rows += _crashed_applied_merges(store, max(0, limit - len(rows)))
     if dry_run:
         return {"action": "dry_run", "examined": len(rows),
                "rows": [{"id": r["id"], "kind": r["kind"], "idem_key": r["idem_key"],
@@ -357,7 +459,10 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
         before = op["status"]
         kind = op.get("kind")
         try:
-            if kind == "merge":
+            if kind == "merge" and before == "applied":
+                _resolve_applied_merge(store, op, merge_repo=merge_repo,
+                                      auto_branch=auto_branch, runner=runner)
+            elif kind == "merge":
                 _resolve_merge(store, op, merge_repo=merge_repo, auto_branch=auto_branch,
                               runner=runner)
             elif kind == "graduate_push":

@@ -77,16 +77,29 @@ def _run(ad, grade_fn, store, *, task_id="task-1", diff=CLEAN_DIFF):
 
 # -- happy path: begin/complete tracked ---------------------------------------
 
-def test_successful_merge_records_an_applied_operation(store):
+def test_successful_merge_resolves_the_row_to_reconciled(store):
+    """A round that FINISHES resolves its own row — symmetric with the auto-revert path
+    below, which always did.
+
+    This used to stop at 'applied', which is written the moment the merge lands and so says
+    nothing about the re-baseline that runs after it. That made 'applied' mean two different
+    things — "finished, merge stood" and "crashed somewhere in the re-baseline" — and the
+    reconciler, which sweeps only planned/executing, could reach neither. Drill 1
+    (2026-08-13) reproduced the consequences at real SIGKILL boundaries: a task never
+    repaired (already-landed work re-dispatched), and a REGRESSING merge left standing with
+    nothing flagging it. `reconcile._crashed_applied_merges` now leans on this write, so a
+    merge row left at 'applied' means "crashed", full stop."""
     ad = FakeAdapter()
     res = _run(ad, _grade(g(0.85), g(0.85)), store)
     assert res["action"] == "merged" and res["merge_sha"] == "MERGESHA"
 
     op = store.get_operation_by_key("merge:task-1:CANDTIP")
     assert op is not None
-    assert op["status"] == "applied"
-    assert op["receipt"] == "MERGESHA"
+    assert op["status"] == "reconciled"
+    assert op["receipt"] == "MERGESHA"       # the receipt is still the merge sha
     assert op["kind"] == "merge"
+    # ...and the row still suppresses a literal re-merge of the same candidate.
+    assert store.begin_operation("merge", "merge:task-1:CANDTIP")["skip"] is True
 
 
 def test_auto_revert_moves_the_same_row_to_reconciled(store):
