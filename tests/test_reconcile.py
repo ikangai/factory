@@ -358,9 +358,22 @@ def test_resolve_graduate_prepare_no_receipt_but_landed_via_git(tmp_path, store)
     assert "confirmed via git" in op["detail"]
 
 
+def _spool_with_envelope(tmp_path, nonce):
+    """A live spool whose outbox actually holds `nonce`'s envelope — what "the broker
+    hasn't acted yet" MEANS. `receipts/` names the spool; the outbox is its sibling."""
+    outbox = tmp_path / "spool" / "outbox"
+    outbox.mkdir(parents=True)
+    (outbox / f"{nonce}.json").write_text("{}")
+    return str(tmp_path / "spool" / "receipts")
+
+
 def test_resolve_graduate_prepare_still_in_flight_is_left_alone(tmp_path, store):
-    """No receipt, git shows no landing, but the paired approval is still legitimately
-    'executing' (the broker hasn't acted yet) — not every unresolved row is an orphan."""
+    """No receipt, git shows no landing, the paired approval is still 'executing' AND its
+    envelope is sitting in the outbox — the broker simply hasn't acted yet. Not every
+    unresolved row is an orphan.
+
+    The envelope is what makes this in-flight rather than stuck: an 'executing' approval
+    with no envelope anywhere is the crashed-before-the-write state, resolved below."""
     origin = _init(str(tmp_path / "origin"))
     old_sha = _commit(origin, "a.txt", "1", message="root")
 
@@ -375,16 +388,76 @@ def test_resolve_graduate_prepare_still_in_flight_is_left_alone(tmp_path, store)
                                target_ref="main", base_sha=old_sha, tip_sha=tip_sha,
                                payload={"approval_id": aid})["operation"]
 
-    receipts_dir = str(tmp_path / "receipts")
     result = reconcile.run_reconcile(store, root=root, base="main",
-                                     receipts_dir=receipts_dir)
+                                     receipts_dir=_spool_with_envelope(tmp_path, "nonceD"))
     row = store.get_operation(op["id"])
     assert row["status"] == "executing"          # untouched — still legitimately in flight
     assert row not in result["resolved"] and row not in result["unknown"]
+    assert store.get_approval(aid)["status"] == "executing"
 
 
-def test_resolve_graduate_prepare_truly_orphaned_escalates_unknown(tmp_path, store):
-    """No receipt, git shows no landing, and no live approval to explain the wait."""
+def test_resolve_graduate_prepare_never_written_fails_and_frees_the_approval(tmp_path, store):
+    """The crash landed between the intent row and `write_envelope`, so no envelope exists
+    and the broker can never produce a receipt.
+
+    Drill 1 (2026-08-14): this used to be left alone by the in-flight guard, so the approval
+    sat 'executing' until the orphan reaper aged it out — and `propose_graduation` refuses
+    while one is 'executing', stalling graduation for up to the envelope TTL on a state that
+    was answerable immediately. 'failed', not 'reconciled': the prepare did NOT happen, so
+    the retry must not be suppressed by `begin_operation`'s skip."""
+    origin = _init(str(tmp_path / "origin"))
+    old_sha = _commit(origin, "a.txt", "1", message="root")
+    root = str(tmp_path / "root")
+    subprocess.run(["git", "clone", "-q", origin, root], check=True,
+                   capture_output=True, text=True)
+    tip_sha = _commit(root, "b.txt", "1", message="local only")
+
+    aid = store.add_pending_approval("graduation", {"n_commits": 1})
+    store.claim_approval(aid)
+    op = store.begin_operation("graduate_prepare", "gradprep:nonceF",
+                               target_ref="main", base_sha=old_sha, tip_sha=tip_sha,
+                               payload={"approval_id": aid})["operation"]
+
+    # A live spool (it exists — the prepare pushes to a bare repo inside it before the
+    # envelope is built) whose outbox holds nothing for this nonce.
+    (tmp_path / "spool").mkdir()
+    reconcile.run_reconcile(store, root=root, base="main",
+                            receipts_dir=str(tmp_path / "spool" / "receipts"))
+
+    row = store.get_operation(op["id"])
+    assert row["status"] == "failed"
+    assert "never completed" in row["detail"] and "nonceF" in row["detail"]
+    assert store.get_approval(aid)["status"] == "pending"     # graduation unblocked at once
+
+
+def test_resolve_graduate_prepare_absent_spool_root_concludes_nothing(tmp_path, store):
+    """A spool root that does not exist is a MISCONFIGURED root, not evidence that no
+    envelope was written — the F1 both-halves-same-root bug would otherwise read every
+    armed prepare as never-written and unclaim live approvals."""
+    origin = _init(str(tmp_path / "origin"))
+    old_sha = _commit(origin, "a.txt", "1", message="root")
+    root = str(tmp_path / "root")
+    subprocess.run(["git", "clone", "-q", origin, root], check=True,
+                   capture_output=True, text=True)
+    tip_sha = _commit(root, "b.txt", "1", message="local only")
+
+    aid = store.add_pending_approval("graduation", {"n_commits": 1})
+    store.claim_approval(aid)
+    op = store.begin_operation("graduate_prepare", "gradprep:nonceG",
+                               target_ref="main", base_sha=old_sha, tip_sha=tip_sha,
+                               payload={"approval_id": aid})["operation"]
+
+    reconcile.run_reconcile(store, root=root, base="main",
+                            receipts_dir=str(tmp_path / "nowhere" / "receipts"))
+
+    assert store.get_operation(op["id"])["status"] == "executing"   # nothing concluded
+    assert store.get_approval(aid)["status"] == "executing"
+
+
+def test_resolve_graduate_prepare_truly_orphaned_with_a_live_spool_fails(tmp_path, store):
+    """No receipt, no landing, no envelope and no approval to explain the wait. This used
+    to escalate 'unknown'; with the outbox consulted it is determinable — the prepare never
+    completed — so it resolves 'failed' (retryable) instead of asking a human to look."""
     origin = _init(str(tmp_path / "origin"))
     old_sha = _commit(origin, "a.txt", "1", message="root")
 
@@ -396,10 +469,30 @@ def test_resolve_graduate_prepare_truly_orphaned_escalates_unknown(tmp_path, sto
     store.begin_operation("graduate_prepare", "gradprep:nonceE",
                           target_ref="main", base_sha=old_sha, tip_sha=tip_sha,
                           payload={"approval_id": None})
-    receipts_dir = str(tmp_path / "receipts")
-    reconcile.run_reconcile(store, root=root, base="main", receipts_dir=receipts_dir)
+    (tmp_path / "spool").mkdir()
+    reconcile.run_reconcile(store, root=root, base="main",
+                            receipts_dir=str(tmp_path / "spool" / "receipts"))
     op = store.get_operation_by_key("gradprep:nonceE")
-    assert op["status"] == "unknown"
+    assert op["status"] == "failed"
+
+
+def test_resolve_graduate_prepare_orphaned_and_unprovable_still_escalates(tmp_path, store):
+    """The escalation path survives for the case that IS genuinely unanswerable: no
+    approval, and no spool to consult either."""
+    origin = _init(str(tmp_path / "origin"))
+    old_sha = _commit(origin, "a.txt", "1", message="root")
+
+    root = str(tmp_path / "root")
+    subprocess.run(["git", "clone", "-q", origin, root], check=True,
+                   capture_output=True, text=True)
+    tip_sha = _commit(root, "b.txt", "1", message="orphaned")
+
+    store.begin_operation("graduate_prepare", "gradprep:nonceH",
+                          target_ref="main", base_sha=old_sha, tip_sha=tip_sha,
+                          payload={"approval_id": None})
+    reconcile.run_reconcile(store, root=root, base="main",
+                            receipts_dir=str(tmp_path / "nowhere" / "receipts"))
+    assert store.get_operation_by_key("gradprep:nonceH")["status"] == "unknown"
 
 
 # -- kind: issue_sync ---------------------------------------------------------------

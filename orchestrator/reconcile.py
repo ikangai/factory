@@ -310,17 +310,20 @@ def _resolve_graduate_push(store, op: dict, *, root: Optional[str], base: str,
 # -- kind: graduate_prepare (armed) --------------------------------------------
 
 def _resolve_graduate_prepare(store, op: dict, *, root: Optional[str], base: str,
-                              remote: str, receipts_dir: Optional[str], runner) -> None:
+                              remote: str, receipts_dir: Optional[str], runner,
+                              outbox_dir: Optional[str] = None) -> None:
     """Receipt-first (the broker's own verdict is authoritative and needs no fetch), then
-    git as a fallback (the tip may have landed via some other path). A row that is
-    neither resolvable AND still legitimately in-flight (its paired approval is still
-    'executing', not yet past its own TTL) is left untouched — not every unresolved row
-    is an orphan; a broker that hasn't acted yet is normal, not a crash."""
+    git as a fallback (the tip may have landed via some other path), then the OUTBOX — was
+    the envelope this row is about ever written at all? Only a row that is none of those
+    AND still legitimately in-flight (its paired approval is still 'executing') is left
+    untouched: a broker that hasn't acted yet is normal, not a crash."""
     from ..reporting import envelope as envelope_mod
 
     idem_key = op.get("idem_key") or ""
     nonce = idem_key.split(":", 1)[1] if idem_key.startswith("gradprep:") else ""
     payload = op.get("payload") or {}
+    approval_id = payload.get("approval_id")
+    match = store.get_approval(approval_id) if approval_id else None
     cmd = (f"factory broker-receipts   # or inspect "
           f"{receipts_dir or '<receipts dir>'}/{nonce}.receipt.json")
 
@@ -357,9 +360,44 @@ def _resolve_graduate_prepare(store, op: dict, *, root: Optional[str], base: str
                 f"confirmed via git)")
             return
 
-    # Not resolvable yet — is it still a NORMAL in-flight wait, or a real orphan?
-    approval_id = payload.get("approval_id")
-    match = store.get_approval(approval_id) if approval_id else None
+    # No receipt and no landing. Before calling this a normal in-flight wait, ask the OUTBOX
+    # whether the envelope was ever written — the intent row opens the instant the nonce
+    # exists, which is BEFORE `write_envelope`, so a crash in that gap leaves a row (and an
+    # 'executing' approval) for an envelope that does not exist and never will. Drill 1
+    # (2026-08-14) measured the cost: the broker can never produce a receipt, so the approval
+    # sat 'executing' until the orphan reaper aged it out — and `propose_graduation` refuses
+    # while a graduation approval is 'executing', so graduation stalled for up to
+    # `autonomy.envelope_ttl_hours` on a state that was answerable immediately.
+    #
+    # Absence is safe evidence here, in this order only: the broker writes its receipt
+    # BEFORE archiving the envelope out of the outbox (orchestrator/broker.py `_finalize`),
+    # so a consumed envelope always leaves a receipt — which the check above would already
+    # have found. The one other envelope-less-looking state, an unpinned envelope waiting in
+    # unattended mode, leaves the envelope IN the outbox.
+    #
+    # The guard is on the SPOOL ROOT, not on `outbox/`. The outbox directory is created
+    # lazily by the first `write_envelope`, so in exactly the case this resolves — a crash
+    # BEFORE that write — it does not exist yet, and requiring it would make the state
+    # permanently unprovable (measured: the drill's prep-before case). The spool root does
+    # exist by then: the same prepare pushes the tip to the bare repo inside it several
+    # steps earlier. So a spool root that exists is proof we are looking at the live spool;
+    # one that does not is a misconfigured root (the F1 both-halves-same-root bug), where
+    # absence proves nothing at all.
+    spool_root = os.path.dirname(outbox_dir.rstrip(os.sep)) if outbox_dir else ""
+    if (nonce and outbox_dir and spool_root and os.path.isdir(spool_root)
+            and nonce not in envelope_mod.list_outbox(outbox_dir)):
+        store.set_operation_status(
+            op["id"], "failed",
+            f"prepare never completed: no envelope for nonce {nonce} in the outbox, and no "
+            f"receipt — the crash landed between the intent row and the envelope write")
+        if match and match.get("status") == "executing":
+            store.unclaim_approval(match["id"])
+            store.record_operator_action(
+                "reconcile-unclaimed", f"approval-{match['id']}",
+                "armed graduation crashed before its envelope was written — approval "
+                "returned to pending (reconciler sweep)")
+        return
+
     if match and match.get("status") == "executing":
         return   # legitimately in-flight — the broker/receipt lifecycle still owns this
 
@@ -400,6 +438,7 @@ def _resolve_issue_sync(store, op: dict) -> None:
 def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "factory/auto",
                   base: Optional[str] = None, remote: str = "origin",
                   merge_repo: Optional[str] = None, receipts_dir: Optional[str] = None,
+                  outbox_dir: Optional[str] = None,
                   runner=subprocess.run, limit: int = DEFAULT_LIMIT,
                   dry_run: bool = False, ignore_stop: bool = False) -> dict:
     """The reconciler sweep. Own STOP check (see the module docstring's binding rule 4).
@@ -436,14 +475,26 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
     if merge_repo is None and root:
         wt = root.rstrip("/") + ".factory-auto"
         merge_repo = wt if os.path.isdir(os.path.join(wt, ".git")) else root
-    if receipts_dir is None:
+    if receipts_dir is None or outbox_dir is None:
         from ..common import paths
         try:
             spool_root = (config.load_config().get("autonomy") or {}).get(
                 "broker_spool_root") or None
         except Exception:  # noqa: BLE001
             spool_root = None
-        receipts_dir = paths.broker_receipts_dir(spool_root)
+        # BOTH halves must resolve through the SAME root (the F1 lesson): reading receipts
+        # from one spool and the outbox from another would make every armed prepare look
+        # like an envelope that was never written.
+        if receipts_dir is None:
+            receipts_dir = paths.broker_receipts_dir(spool_root)
+        if outbox_dir is None:
+            # When the caller named a receipts dir, derive the outbox from IT rather than
+            # from config: config could name a different spool entirely, and reading
+            # receipts from one spool while judging "was an envelope ever written" against
+            # another is the F1 bug in its most damaging form — every armed prepare would
+            # look like an envelope that never existed.
+            outbox_dir = (os.path.join(os.path.dirname(receipts_dir.rstrip(os.sep)), "outbox")
+                          if receipts_dir else paths.broker_outbox_dir(spool_root))
 
     rows = _unresolved_operations(store, limit)
     # Plus the merge rows whose round crashed AFTER the receipt was written — invisible to
@@ -470,7 +521,8 @@ def run_reconcile(store, *, root: Optional[str] = None, auto_branch: str = "fact
                                       runner=runner)
             elif kind == "graduate_prepare":
                 _resolve_graduate_prepare(store, op, root=root, base=base, remote=remote,
-                                         receipts_dir=receipts_dir, runner=runner)
+                                         receipts_dir=receipts_dir, outbox_dir=outbox_dir,
+                                         runner=runner)
             elif kind == "issue_sync":
                 _resolve_issue_sync(store, op)
             else:

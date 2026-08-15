@@ -30,7 +30,7 @@ every other kind `applied` IS terminal and is never swept.
 |---|---|---|---|---|
 | `merge` | A super-worker's candidate merging into `factory/auto` (`orchestrator/code_round.py`) | `merge:<task_id>:<cand_tip_sha>` | a commit on the auto branch carries `Factory-Task: <task_id>` and nothing later carries a matching `Factory-Revert:` trailer | no such commit, or one exists but was auto-reverted |
 | `graduate_push` | The unarmed graduation push (`reporting/issue_sync.py graduate_and_push`) | `grad:<repo>:<base_sha>:<tip_sha>` | `tip_sha` is an ancestor of `origin/<base>` (a fresh `git fetch` + `merge-base --is-ancestor`) | it isn't |
-| `graduate_prepare` | The broker-armed prepare step (`graduate_and_prepare_envelope`) — writes an envelope for the operator's broker, never pushes origin itself | `gradprep:<nonce>` | the broker's own receipt says `pushed`, or (no receipt yet) git shows the tip landed anyway | a `rejected`/`expired` receipt, or nothing found and the paired approval is no longer in flight |
+| `graduate_prepare` | The broker-armed prepare step (`graduate_and_prepare_envelope`) — writes an envelope for the operator's broker, never pushes origin itself | `gradprep:<nonce>` | the broker's own receipt says `pushed`, or (no receipt yet) git shows the tip landed anyway | a `rejected`/`expired` receipt; or no envelope for the nonce in a readable outbox, which means the prepare never completed (§4, 2026-08-14); or nothing found at all and the paired approval is no longer in flight |
 | `issue_sync` | A GitHub issue comment/close action | `issue:<number>:<sha>` | the pair is present in the `issue_sync` ledger table | absent — **the reconciler never asks GitHub**; absent always resolves `unknown`, never "assumed not posted" |
 
 A row's `receipt` column carries the resulting sha/nonce once known; `detail` carries the
@@ -213,9 +213,49 @@ last three rows are what the fix added. Regression tests live in
 `tests/test_reconcile.py` ("kind: merge, status 'applied'") and
 `tests/test_crash_consistency_wrap.py`.
 
-**Still unexercised.** Three of the five boundary pairs: the unarmed push, the armed
+**Not covered by this run.** Three of the five boundary pairs: the unarmed push, the armed
 envelope prepare, and the armed receipt ingestion. Each needs graduation/broker fixtures
-rather than the merge fixture above, so none of them is covered by this run.
+rather than the merge fixture above. They were drilled separately — next section.
+
+### Executed 2026-08-14 — the publication boundaries
+
+**Harness.** The same method, with a publication fixture: a bare `origin.git`, a clone on
+`base` with `factory/auto` one commit ahead, a spool, and a throwaway store. The remote is
+a `file://` path, so **the push is a real push** and "did origin advance" is a real
+observation rather than a mocked one. The kill points use each function's own injected
+seams — the `runner` for the push, the `on_nonce` callback for the gap between the intent
+row and the envelope write, and a wrapped `_record_synced_issues` for the ingestion gap —
+so nothing about the code under test is stubbed. Recovery is the real path: the reconciler
+for the wrapped kinds, and re-ingestion for the receipt path, which the design deliberately
+leaves to ingestion rather than the reconciler.
+
+| kill point | world afterwards | row after the crash | after recovery |
+|---|---|---|---|
+| before the push | origin NOT advanced | `executing` | `failed` "not landed: not an ancestor of origin/base" — retryable |
+| after the push, before the receipt | origin **advanced** | `executing`, no receipt | `applied` "landed: ancestor of origin/base" |
+| armed prepare, before `write_envelope` | no envelope, approval `executing` | `executing` | `failed` "prepare never completed…", approval unclaimed to `pending` |
+| armed prepare, after `write_envelope` | envelope on disk, approval `executing` | `executing` | untouched — a broker that hasn't acted yet is in-flight, not a crash |
+| armed ingestion, between the ledger write and `resolve_approval` | ledger written, receipt still on disk | approval `executing` | re-ingestion resolves it `approved` and archives the receipt |
+
+**What it found.** The push pair and the ingestion boundary passed as designed — the
+ingestion result is the Component B ordering fix (record the ledger BEFORE resolving the
+approval) doing exactly its job, leaving the recoverable direction. The armed prepare's
+before-the-write boundary did not: the resolver's only in-flight test was "is the paired
+approval still `executing`", so it left the row alone forever, and because
+`propose_graduation` refuses while a graduation approval is `executing`, **all graduation
+stalled for up to `autonomy.envelope_ttl_hours`** until the orphan reaper aged it out. The
+resolver now consults the outbox as well; see `fix/reconcile-armed-prepare-outbox` and the
+"kind: graduate_prepare" tests. The table above is the post-fix behavior.
+
+**Two fixture lessons, recorded because both produced a false result first.** The initial
+run escalated all three prepare cases — because the fixture passed `approval_id=1` without
+ever creating that approval, so the in-flight guard could not fire. The code was right and
+the harness was wrong. Then the first cut of the fix still did not resolve the
+before-the-write case, because it guarded on `outbox/` existing; that directory is created
+lazily by the first `write_envelope`, so in the very case being resolved it is absent. The
+spool ROOT is the correct anchor — the prepare pushes to a bare repo inside it several
+steps earlier. Check the fixture before believing a finding, and check a fix against the
+boundary it was written for.
 
 ## 5. Drill 4 — corrupt, restore, reconcile, verify
 
