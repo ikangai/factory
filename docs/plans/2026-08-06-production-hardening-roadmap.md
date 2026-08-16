@@ -234,14 +234,19 @@ where Docker is acceptable (never the host Docker socket inside the guest house)
 Unattended-production sign-off = a guest-house install (Phase 0) passing all six, each
 drill run after its enabling phase:
 
-| # | Drill | Enabled by |
-|---|---|---|
-| 1 | Kill -9 immediately before/after merge, DB commit, approval, push, promotion, revert — no duplicated or lost action | Phase 2 |
-| 2 | Malicious repo attempts network, Keychain, process escape, symlinks, dependency substitution, host writes | Phase 0 (perimeter) → Phase 3 (interior) |
-| 3 | Change branch/candidate after approval — execution rejected | Phase 1 |
-| 4 | Corrupt + restore the DB; reconcile against git and published state | Phase 2 |
-| 5 | Many adaptively selected candidates — thresholds and hidden-set protections hold | Phase 4 |
-| 6 | Hostile instructions injected into task evidence / repo output — never become privileged memory or alter governance | Phase 4 (+ existing hygiene) |
+| # | Drill | Enabled by | Status |
+|---|---|---|---|
+| 1 | Kill -9 immediately before/after merge, DB commit, approval, push, promotion, revert — no duplicated or lost action | Phase 2 | **EXECUTED 2026-08-13/14** — `docs/runbooks/crash-recovery.md` §4 (merge boundaries 37/37, then the publication boundaries); two defects found + fixed |
+| 2 | Malicious repo attempts network, Keychain, process escape, symlinks, dependency substitution, host writes | Phase 0 (perimeter) → Phase 3 (interior) | open |
+| 3 | Change branch/candidate after approval — execution rejected | Phase 1 | **EXECUTED 2026-08-16** — `docs/runbooks/publication-broker.md` §Drill-3, re-runnable via `scripts/drill3_rehearse.py`; one defect found + fixed |
+| 4 | Corrupt + restore the DB; reconcile against git and published state | Phase 2 | **EXECUTED 2026-08-16** — `docs/runbooks/crash-recovery.md` §5; clean, two procedure corrections |
+| 5 | Many adaptively selected candidates — thresholds and hidden-set protections hold | Phase 4 | open (Phase 4 not started) |
+| 6 | Hostile instructions injected into task evidence / repo output — never become privileged memory or alter governance | Phase 4 (+ existing hygiene) | open (Phase 4 not started) |
+
+Each executed drill is recorded where its subsystem's runbook lives, with the evidence
+inline — a drill nobody can re-run on their own deployment is a claim, not a gate, so
+prefer the executable form (drill 3's `scripts/drill3_rehearse.py`, exercised by the suite)
+over prose steps where the boundary allows it.
 
 Windows: the same drills on a real Windows/WSL2 box before `install.ps1` drops its
 EXPERIMENTAL label.
