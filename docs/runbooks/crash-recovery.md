@@ -288,11 +288,14 @@ factory db-restore /tmp/drill-snap.db --db /tmp/drill-live.db --yes
   escalated N unknown`);
 - the counts summary matches the snapshot's preflight numbers.
 
-Then prove the safety net for real — open the moved-aside backup and confirm it still has
-its own content (this is the property that silently failed before the sidecar-naming fix):
+Then prove the safety net for real — the moved-aside file must be the displaced bytes,
+exactly (this is the property that silently failed before the sidecar-naming fix). Compare
+hashes rather than opening it: the original you displaced here is the CORRUPT one, so
+`PRAGMA integrity_check` on it correctly reports "file is not a database", which reads like
+a failure and is not one. Hash the corrupted db before step 3, then:
 
 ```bash
-sqlite3 /tmp/drill-live.db.bak-<STAMP> "PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;"
+shasum -a 256 /tmp/drill-live.db.bak-<STAMP>     # must equal the pre-restore hash
 ```
 
 **Refusal drills** (each should refuse and change nothing — the interesting half):
@@ -300,10 +303,50 @@ sqlite3 /tmp/drill-live.db.bak-<STAMP> "PRAGMA integrity_check; SELECT COUNT(*) 
 ```bash
 : > /tmp/empty.db
 factory db-restore /tmp/empty.db --db /tmp/drill-live.db --yes    # snapshot-not-a-blackboard
-rm STOP && factory db-restore /tmp/drill-snap.db --db /tmp/drill-live.db --yes   # stop-not-engaged
 ```
 
-Clean up with `rm -f /tmp/drill-*`; re-engage or clear STOP as you intend.
+The other two refusals — STOP-not-engaged, and "`--yes` must not authorize the real store" —
+are the ones worth having, and **neither should be drilled the obvious way.** `rm STOP` and
+"aim it at the real store and see what happens" test a guard by performing the act the guard
+exists to prevent: fine if it holds, unrecoverable if it doesn't, and this repo's standing
+rule is never to probe a boundary with something that acts on success. Drive them in a child
+process against a monkeypatched module instead — the guard runs for real, the live brake and
+the real store stay out of reach:
+
+```python
+from factory.common import killswitch, paths
+from factory.orchestrator import db_restore
+
+killswitch.is_halted = lambda *a, **k: False        # -> refuses 'stop-not-engaged'
+# or, for the real-store guard, make the THROWAWAY db look like the real one:
+paths.DB_PATH = db_restore.paths.DB_PATH = "/tmp/drill-live.db"   # -> refuses 'not-confirmed'
+print(db_restore.restore("/tmp/drill-snap.db", db_path="/tmp/drill-live.db", yes=True))
+```
+
+Clean up with `rm -f /tmp/drill-*`. Nothing above touches `STOP`, so there is no brake to
+re-engage afterwards — which is the point.
+
+### Executed 2026-08-16 — clean, no defects
+
+Run against a copy of `store/blackboard.db` and the 2026-07-08 snapshot from
+`~/factory-db-backups/`, in a scratchpad rather than `/tmp`.
+
+| check | result |
+|---|---|
+| preflight printed BEFORE any write | yes — `snapshot contains tasks=69 shifts=93 learnings=140`, and `current db has tasks=? shifts=? learnings=?`, honestly unreadable because the target was corrupt |
+| corruption was real | `integrity_check` → "file is not a database (26)" after overwriting the header |
+| move-aside + undo line | db, `-wal` and `-shm` all moved to `.bak-20260816T055008Z*`, `to undo:` printed |
+| moved-aside file is the displaced bytes | sha256 identical to the pre-restore hash of the corrupted db |
+| reconciler ran, not skipped for STOP | `examined 0, resolved 0, escalated 0 unknown` — 0 is correct: the snapshot predates the `operations` table |
+| migrations ran after the copy | the restored db HAS an `operations` table the snapshot never contained |
+| counts match the preflight | `tasks: 69 {done:54, dropped:2, blocked:4, open:9}, shifts: 93` |
+| refusal — non-blackboard snapshot | `snapshot-not-a-blackboard: missing table(s) tasks, shifts, learnings, budget_ledger (found 0 table(s))`; target unchanged |
+| refusal — STOP not engaged | `stop-not-engaged`; target unchanged; the real `STOP` still present afterwards |
+| refusal — real store with `--yes` | `not-confirmed` — it still demanded the typed path. `--yes` did NOT satisfy it, which is the exact technicality that reached the real store once before |
+| the real store afterwards | untouched: same size and mtime, `integrity_check` → ok |
+
+Nothing needed fixing. The two procedure corrections above — hash the moved-aside file
+instead of opening it, and drive the dangerous refusals inertly — came out of this run.
 
 ## 6. Canonicality matrix (Component E)
 
