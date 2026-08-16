@@ -206,6 +206,14 @@ before it's called unattended-production-ready.
 Run any time: `python3 scripts/guesthouse_check.py` (add `--json` for machine-readable
 output). It never mutates anything — every rule only reads.
 
+**Run it on the deployed account, not just on your own checkout.** Drill 2 found a real
+perimeter hole on a deployment nobody had ever pointed the doctor at (see
+`docs/runbooks/worker-isolation.md` §Drill 2, "Executed 2026-08-16" — the guest house's home
+was `0750` group `staff`, so any local account could read its blackboard, config and
+corpus). The eight account-scoped rules SKIP on an operator checkout by design, so a green
+run there says nothing whatever about the guest house:
+`sudo -u factory python3 <factory>/scripts/guesthouse_check.py`.
+
 **The context gate.** Seven of the ten rules below are *account-scoped* — they ask "is THIS
 ACCOUNT a safely isolated guest-house user". Run on an ordinary operator/developer account
 (not literally named `factory`, and neither `~/fab/factory` nor the unified WSL install root
@@ -228,6 +236,7 @@ operator checkout produced five-to-seven false FAILs — a real, demonstrated bu
 | `no-docker-socket` | account | `/var/run/docker.sock` absent, or present but not accessible to this user | this account can read/write the Docker socket (host-level container escape risk) | remove this account from the `docker` group, or don't run Docker on the guest-house machine |
 | `runtime-read-only` | account | the operator-owned bare repo (`/Users/Shared/factory.git`) is neither owned by nor WRITABLE by the current user (`os.access(..., W_OK)` — ownership alone doesn't prove permission bits actually deny writes) | this account owns and/or can write to its own "read-only" runtime source — the bare-repo split isn't in effect | re-run `deploy/user-factory/01-create-user.sh` as the operator (it sets the ownership) |
 | `credentials-hygiene` | account | the secrets env file (`~/.factory-secrets/env`) is mode 600 and owned by the current user | wrong permissions/ownership on the file holding the PAT | `chmod 600 ~/.factory-secrets/env`; verify ownership |
+| `deployment-not-peer-readable` | account | what a PEER local account can actually READ of this deployment: if the home grants group/other traverse, it checks whether the blackboard, `config.yaml`, `corpus/` or `state/` are group/other-readable *through* traversable ancestors | another local account can read your decision history, your config and your held-out corpus. Found on the operator's own deployment by drill 2 (2026-08-16): a `0750` home group `staff` — which every macOS account is in — over a `0755` tree of `0644` files | `chmod 700 ~` (fix the cause; it makes the modes inside irrelevant). This rule is the consequence-level companion to `home-dir-perms`: that one says the mode is wrong, this one says what it costs |
 | `brakes-engaged` | checkout | `STOP` file present in the factory dir AND mode is not `auto` | the deployment could run unattended right now | `touch STOP` and `bin/factory mode shift` (see `factory-user-deployment.md` §6, "the brake trap") |
 | `dashboard-localhost` | checkout | `config.yaml`'s `dashboard.host` is `127.0.0.1`/`localhost` | the board is bound to a non-localhost address (reachable off-box) | set `dashboard.host: "127.0.0.1"` in `config.yaml` |
 | `wsl-hardening` | platform (WSL only) | `/etc/wsl.conf` has `automount`/`interop` both disabled — detected via `/proc/version` containing "microsoft", NOT the `WSL_DISTRO_NAME`/`WSL_INTEROP` environment variables (those are stripped by `sudo` without `-E`, and `WSL_INTEROP` specifically disappears once interop hardening actually takes effect — exactly the scenario this rule most needs to detect correctly) | the distro can still see Windows drives or launch Windows programs | re-run `install.ps1`'s hardening step, or write `/etc/wsl.conf` by hand (see "What the wizard does" above) |
