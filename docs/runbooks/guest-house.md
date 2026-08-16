@@ -222,7 +222,10 @@ perimeter hole on a deployment nobody had ever pointed the doctor at (see
 was `0750` group `staff`, so any local account could read its blackboard, config and
 corpus). The eight account-scoped rules SKIP on an operator checkout by design, so a green
 run there says nothing whatever about the guest house:
-`sudo -u factory python3 <factory>/scripts/guesthouse_check.py`.
+`sudo -u factory -i python3 <factory>/scripts/guesthouse_check.py` — the `-i` gives the
+login shell a working directory and a `$HOME` in the target account; without it, a run
+launched from inside the operator's (0700) home dies in bash's startup with
+`getcwd: cannot access parent directories`.
 
 **The context gate.** Seven of the ten rules below are *account-scoped* — they ask "is THIS
 ACCOUNT a safely isolated guest-house user". Run on an ordinary operator/developer account

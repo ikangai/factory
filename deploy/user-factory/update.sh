@@ -2,7 +2,15 @@
 # Pulls the latest factory code (pushed by the operator via `git push deploy main`) into the
 # deployment's `deploy` branch, keeping the local-only config overlay intact.
 #
-# run (as factory): bash $HOME/fab/factory/deploy/user-factory/update.sh
+# run, from the operator's shell:
+#   sudo -u factory -i bash /Users/factory/fab/factory/deploy/user-factory/update.sh
+#
+# The `-i` matters, and so does not running it from a directory the factory user cannot
+# reach. Once the guest-house home is 0700 (as it must be — see docs/runbooks/guest-house.md),
+# a plain `sudo -u factory bash …` launched from inside the OPERATOR's home dies before this
+# script's first line, in bash's own startup:
+#   shell-init: error retrieving current directory: getcwd: cannot access parent directories
+# `-i` starts a login shell in the target account's home, which fixes both the cwd and $HOME.
 set -euo pipefail
 
 if [ "$(id -un)" != "factory" ]; then
@@ -10,7 +18,25 @@ if [ "$(id -un)" != "factory" ]; then
     exit 1
 fi
 
-cd "$HOME/fab/factory"
+# Locate the deployment from THIS SCRIPT's own path, never from $HOME. `sudo -u factory`
+# without -i/-H leaves HOME pointing at the INVOKING operator, so `cd "$HOME/fab/factory"`
+# either failed outright or — before the home was tightened — could have resolved into the
+# wrong tree entirely. Same class as the doctor auditing the wrong account because it trusted
+# an inherited $HOME (drill 2, 2026-08-16, docs/runbooks/worker-isolation.md §Drill 2).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+
+ACCOUNT_HOME="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -n "$ACCOUNT_HOME" ] && [ "${HOME:-}" != "$ACCOUNT_HOME" ]; then
+    echo "WARNING: \$HOME is ${HOME:-(unset)} but $(id -un)'s home is $ACCOUNT_HOME." >&2
+    echo "         You are probably running without 'sudo -i'. This script uses its own" >&2
+    echo "         location ($ROOT) and is unaffected, but anything it calls that reads" >&2
+    echo "         \$HOME would be pointed at the wrong account. Prefer:" >&2
+    echo "           sudo -u factory -i bash $ROOT/deploy/user-factory/update.sh" >&2
+    export HOME="$ACCOUNT_HOME"
+fi
+
+cd "$ROOT"
 echo "[update] fetching origin ..."
 git fetch origin
 git checkout deploy

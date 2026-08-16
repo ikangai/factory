@@ -89,7 +89,7 @@ from the address bar. Reads need no key.
 
 3. **Prove it, as the grader** — this is the deliverable, not the config change:
    ```bash
-   sudo -u factory-grader python3 <factory>/scripts/guesthouse_check.py --boundary
+   sudo -u factory-grader -i python3 <factory>/scripts/guesthouse_check.py --boundary
    ```
    Polarity is inverted: **PASS means "I could not do this"**. Every rule must pass. The
    probes bypass the account-scoped context gate on purpose — that gate only recognizes the
@@ -145,11 +145,11 @@ Two of those deserve their reasoning stated:
 
 ```bash
 # 1. the grading identity — the Phase 3 interior boundary (needs isolation armed)
-sudo -u factory-grader python3 <factory>/scripts/guesthouse_check.py --boundary
+sudo -u factory-grader -i python3 <factory>/scripts/guesthouse_check.py --boundary
 
 # 2. the guest-house account — the Phase 0 perimeter (can the factory reach the operator?)
-sudo -u factory python3 <factory>/scripts/guesthouse_check.py --boundary
-sudo -u factory python3 <factory>/scripts/guesthouse_check.py          # + the account rules
+sudo -u factory -i python3 <factory>/scripts/guesthouse_check.py --boundary
+sudo -u factory -i python3 <factory>/scripts/guesthouse_check.py       # + the account rules
 
 # 3. as the tree's OWNER — the negative control (see below)
 python3 scripts/guesthouse_check.py --boundary
@@ -263,7 +263,7 @@ probe's own output. Note the second-order effect, which is the containment worki
 than a regression: `deployment-not-peer-readable` evaluated from *another* account now
 reports `SKIP  no factory directory found`, because the tree is no longer traversable from
 outside. It is an account-scoped rule and from here on it can only be answered by the
-account it is about — `sudo -u factory python3 <factory>/scripts/guesthouse_check.py`,
+account it is about — `sudo -u factory -i python3 <factory>/scripts/guesthouse_check.py`,
 which is the run still owed for the perimeter half of this drill.
 
 A new rule, `deployment-not-peer-readable`, reports this class by consequence rather
@@ -313,15 +313,29 @@ drill, ship the current code to the deployment first:
 ```bash
 # operator: publish to the bare repo the deployment pulls from
 git push /Users/Shared/factory.git main
-# then, as the factory user:
-sudo -u factory bash /Users/factory/fab/factory/deploy/user-factory/update.sh
-sudo -u factory python3 /Users/factory/fab/factory/scripts/guesthouse_check.py
-sudo -u factory python3 /Users/factory/fab/factory/scripts/guesthouse_check.py --boundary
+# then, as the factory user — note the -i, see below
+sudo -u factory -i bash /Users/factory/fab/factory/deploy/user-factory/update.sh
+sudo -u factory -i python3 /Users/factory/fab/factory/scripts/guesthouse_check.py
+sudo -u factory -i python3 /Users/factory/fab/factory/scripts/guesthouse_check.py --boundary
 ```
 
 (The operator's own checkout is no longer readable by the factory user — that is the first
 finding's fix working — so running the doctor from `~martintreiber/…` as `factory` is not an
 option, by design.)
+
+**Use `-i`.** Without it, the first of those commands dies before the script's first line:
+
+```
+shell-init: error retrieving current directory: getcwd: cannot access parent directories
+```
+
+That is not a broken deployment. It is `bash` starting up in the operator's cwd, which the
+factory user can no longer traverse now that the home is 0700 — the first finding's fix,
+seen from the other side. `sudo -i` starts a login shell in the target account's home, which
+fixes both the working directory and `$HOME`. `update.sh` no longer depends on either (it
+locates the tree from its own path and warns if `$HOME` belongs to another account), and
+`02-bootstrap-as-factory.sh` now hard-refuses a foreign `$HOME` rather than writing the PAT
+env file into the wrong account — but the shell still has to start.
 
 ## Turning it off
 

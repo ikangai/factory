@@ -13,6 +13,22 @@ if [ "$(id -un)" != "factory" ]; then
     exit 1
 fi
 
+# Being the right USER is not the same as having the right HOME: `sudo -u factory` without
+# -i/-H keeps the INVOKING operator's $HOME, and everything below writes to $HOME — the PAT
+# env file, the zprofile line, the deployment tree. Run that way before the guest-house home
+# was tightened, this script would have created a factory-owned .factory-secrets INSIDE the
+# operator's home and told you it had bootstrapped the guest house. Hard-fail: a wrong
+# destination here is a credential in the wrong account. (Same class as the doctor auditing
+# the wrong account off $HOME — drill 2, 2026-08-16.)
+ACCOUNT_HOME="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -n "$ACCOUNT_HOME" ] && [ "${HOME:-}" != "$ACCOUNT_HOME" ]; then
+    echo "ERROR: \$HOME is ${HOME:-(unset)} but $(id -un)'s home is $ACCOUNT_HOME." >&2
+    echo "  Refusing: every path below is derived from \$HOME, including the PAT env file." >&2
+    echo "  Re-run with a login shell, which sets HOME (and the working directory):" >&2
+    echo "    sudo -u factory -i bash /Users/Shared/factory-kit/02-bootstrap-as-factory.sh" >&2
+    exit 1
+fi
+
 FAB="$HOME/fab"
 BARE=/Users/Shared/factory.git
 SNAPSHOT="${1:-/Users/Shared/factory-seed/blackboard.db}"
