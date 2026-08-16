@@ -1198,11 +1198,15 @@ def test_boundary_dashboard_probe_is_non_mutating_by_construction():
     import ast
     import inspect
     import textwrap
-    fn = ast.parse(textwrap.dedent(inspect.getsource(gh.rule_boundary_dashboard_write))).body[0]
-    if (fn.body and isinstance(fn.body[0], ast.Expr)
-            and isinstance(fn.body[0].value, ast.Constant)):
-        fn.body = fn.body[1:]          # drop the docstring: it MENTIONS /api/resume to
-    code = ast.unparse(ast.Module(body=fn.body, type_ignores=[]))   # explain the incident
+    code = ""
+    # The payload lives in the per-URL helper since the rule learned to probe more than one
+    # board; the contract is over the pair.
+    for target in (gh.rule_boundary_dashboard_write, gh._probe_write_route):
+        fn = ast.parse(textwrap.dedent(inspect.getsource(target))).body[0]
+        if (fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)):
+            fn.body = fn.body[1:]      # drop the docstring: it MENTIONS /api/resume to
+        code += ast.unparse(ast.Module(body=fn.body, type_ignores=[]))  # explain the incident
     assert "/api/resume" not in code, "the probe must not target a mutating route"
     assert "dashboard_settings_url" in code
     assert "__boundary_probe__" in code, "must use a key that cannot validate"
@@ -1340,12 +1344,15 @@ def test_process_escape_never_delivers_a_signal():
         assert lethal not in code
 
 
-def test_symlink_probe_says_nothing_proven_when_nothing_is_refused(tmp_path):
+def test_symlink_probe_says_nothing_proven_when_nothing_is_refused(tmp_path, monkeypatch):
     """With no refused path there is nothing a symlink could launder — reporting PASS there
     would credit containment that was never tested."""
     root = tmp_path / "factory"
     (root / "store").mkdir(parents=True)
     (root / "store" / "blackboard.db").write_bytes(b"x")     # readable
+    # Hermetic: the probe also anchors on other accounts' homes, which on a real machine are
+    # refused and would answer the question this test is asking about the tmp tree.
+    monkeypatch.setattr(gh, "_other_user_homes", lambda ctx: [])
     rule = gh.rule_boundary_symlink_escape(
         gh.Ctx(factory_root=str(root), env_file_path=str(tmp_path / "none"),
                config_path=str(tmp_path / "none")))
@@ -1590,3 +1597,62 @@ def test_json_output_names_the_account_it_audited(capsys, monkeypatch, tmp_path)
     assert doc["auditing"] == "factory"
     assert doc["home"] == str(tmp_path / "factory")
     assert "sudo" in (doc["home_env_mismatch"] or "")
+
+
+def test_dashboard_probe_targets_the_board_this_deployment_runs(tmp_path):
+    """It used to hold a literal `127.0.0.1:9788`. On the deployed guest house (board on
+    9787) and on this checkout (8787) that reported a clean 403 from a board belonging to
+    neither — a green row about something other than the thing under test, which is the
+    wrong-account audit's failure mode wearing a port number."""
+    root = tmp_path / "factory"
+    root.mkdir()
+    (root / "config.yaml").write_text("dashboard:\n  host: 127.0.0.1\n  port: 9787\n")
+    ctx = gh.Ctx(factory_root=str(root))
+    assert ctx.dashboard_settings_url == "http://127.0.0.1:9787/api/settings"
+    # ...and the second board (viz --serve), which no config field carries, is still probed
+    assert any(":9788/api/settings" in u for u in ctx.extra_dashboard_urls)
+
+
+def test_dashboard_probe_falls_back_when_the_config_is_unreadable(tmp_path):
+    """From a contained grading identity the config IS unreadable — the probe must still
+    have somewhere to aim, and its own SKIP path reports an unreachable board honestly."""
+    ctx = gh.Ctx(factory_root=str(tmp_path / "nothing-here"))
+    assert ctx.dashboard_settings_url == "http://127.0.0.1:9788/api/settings"
+
+
+def test_dashboard_probe_survives_a_config_that_is_not_a_mapping(tmp_path):
+    root = tmp_path / "factory"
+    root.mkdir()
+    (root / "config.yaml").write_text("just-a-scalar\n")
+    assert gh.Ctx(factory_root=str(root)).dashboard_settings_url.endswith("/api/settings")
+
+
+def test_dashboard_rule_fails_if_any_board_accepts(monkeypatch, tmp_path):
+    def fake_probe(url):
+        return (gh.FAIL, "ACCEPTED an unauthenticated write (200)") if "9788" in url \
+            else (gh.PASS, "refused unauthenticated write (403)")
+
+    monkeypatch.setattr(gh, "_probe_write_route", fake_probe)
+    rule = gh.rule_boundary_dashboard_write(
+        gh.Ctx(dashboard_settings_url="http://127.0.0.1:9787/api/settings",
+               extra_dashboard_urls=("http://127.0.0.1:9788/api/settings",)))
+    assert rule.status == gh.FAIL and "9788" in rule.detail
+
+
+def test_symlink_probe_can_anchor_on_a_refused_directory(tmp_path, monkeypatch):
+    """On a correctly closed deployment the other account's HOME is often the only refused
+    path visible — everything under it is invisible rather than refused. Without a directory
+    anchor the probe skipped itself exactly where containment was tightest (drill 2's
+    perimeter run said "nothing is refused to this identity" on an account that could not
+    enter the operator's home at all)."""
+    other = tmp_path / "someone"
+    other.mkdir()
+    os.chmod(other, 0o000)
+    monkeypatch.setattr(gh, "_other_user_homes", lambda ctx: [str(other)])
+    try:
+        rule = gh.rule_boundary_symlink_escape(
+            gh.Ctx(factory_root=str(tmp_path / "nofactory"),
+                   env_file_path=str(tmp_path / "none"), config_path=str(tmp_path / "none")))
+        assert rule.status == gh.PASS and str(other) in rule.detail
+    finally:
+        os.chmod(other, 0o700)

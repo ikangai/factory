@@ -210,6 +210,28 @@ def home_env_mismatch(ctx: "Ctx") -> Optional[str]:
             f"$HOME and silently audited the invoking user's account instead.")
 
 
+def _dashboard_url_from_config(ctx: "Ctx") -> str:
+    """`/api/settings` on the board THIS deployment actually runs, read from its own
+    config.yaml. Falls back to the historic literal when the config is unreadable — from a
+    contained grading identity it will be, and a probe that cannot find the board must say
+    so through its own SKIP path rather than silently target a stranger."""
+    host, port = "127.0.0.1", 9788
+    path = os.path.join(ctx.factory_root, "config.yaml") if ctx.factory_root else ""
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh)
+            # A config that isn't a mapping (truncated, half-written, or a stray scalar) is
+            # a malformed config, not a reason for the doctor to crash.
+            dash = doc.get("dashboard") if isinstance(doc, dict) else None
+            if isinstance(dash, dict):
+                host = str(dash.get("host") or host).strip() or host
+                port = int(dash.get("port") or port)
+        except (OSError, yaml.YAMLError, TypeError, ValueError):
+            pass
+    return f"http://{host}:{port}/api/settings"
+
+
 def _default_factory_root() -> str:
     # scripts/guesthouse_check.py -> factory/
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -239,7 +261,14 @@ class Ctx:
     docker_socket: str = "/var/run/docker.sock"
     bare_repo_path: str = "/Users/Shared/factory.git"
     shared_dir: str = "/Users/Shared"
-    dashboard_settings_url: str = "http://127.0.0.1:9788/api/settings"
+    # None => derived in __post_init__ from THIS deployment's config.yaml. A literal default
+    # meant the probe answered about whatever happened to be listening on the hardcoded port
+    # — on the deployed guest house (board on 9787, this checkout on 8787) it reported a
+    # clean 403 from a board belonging to neither. Same class as the wrong-account audit:
+    # a green row about something other than the thing under test. Found by drill 2's
+    # perimeter run, 2026-08-16.
+    dashboard_settings_url: Optional[str] = None
+    extra_dashboard_urls: Optional[Tuple[str, ...]] = None
     factory_root: Optional[str] = None
     env_file_path: Optional[str] = None
     config_path: Optional[str] = None
@@ -276,6 +305,15 @@ class Ctx:
             self.wsl_install_root = os.path.join(self.home, "factories", "guest-house", "factory")
         if self.git_credentials_path is None:
             self.git_credentials_path = os.path.join(self.home, ".git-credentials")
+        if self.dashboard_settings_url is None:
+            self.dashboard_settings_url = _dashboard_url_from_config(self)
+        if self.extra_dashboard_urls is None:
+            # The `viz --serve` board is a SECOND server with its own write routes (see
+            # docs/runbooks/worker-isolation.md, "the board's write channel") on its own
+            # port, which no config field carries. Probe its documented default too, unless
+            # that is already the config-derived one.
+            legacy = "http://127.0.0.1:9788/api/settings"
+            self.extra_dashboard_urls = () if legacy == self.dashboard_settings_url else (legacy,)
         if self.tcp_probe_fn is None:
             self.tcp_probe_fn = _tcp_probe
         if self.import_path_dirs_fn is None:
@@ -850,9 +888,23 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
     NOT contained, but nothing was written because the key is bogus), 200 (impossible for an
     unknown key, so treated as a failure). No branch changes any state."""
     rid = "boundary-dashboard-write"
-    url = ctx.dashboard_settings_url
-    if not url:
+    urls = [u for u in ([ctx.dashboard_settings_url] + list(ctx.extra_dashboard_urls or ()))
+            if u]
+    if not urls:
         return Rule(rid, SKIP, "no dashboard URL configured")
+    verdicts = [(url, _probe_write_route(url)) for url in urls]
+    bad = [f"{u}: {d}" for u, (s, d) in verdicts if s == FAIL]
+    if bad:
+        return Rule(rid, FAIL, "; ".join(bad))
+    good = [f"{u}: {d}" for u, (s, d) in verdicts if s == PASS]
+    if good:
+        skipped = [f"{u}: {d}" for u, (s, d) in verdicts if s == SKIP]
+        return Rule(rid, PASS, "; ".join(good + skipped))
+    return Rule(rid, SKIP, "; ".join(f"{u}: {d}" for u, (s, d) in verdicts))
+
+
+def _probe_write_route(url: str) -> Tuple[str, str]:
+    """One board's write gate. Deliberately INVALID payload — see the caller's docstring."""
     import urllib.error
     import urllib.request
     payload = json.dumps({"key": "__boundary_probe__", "value": "x"}).encode()
@@ -860,20 +912,18 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
-            return Rule(rid, FAIL,
-                        f"{url} ACCEPTED an unauthenticated write ({resp.status})")
+            return FAIL, f"ACCEPTED an unauthenticated write ({resp.status})"
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            return Rule(rid, PASS, f"{url}: refused unauthenticated write ({e.code})")
+            return PASS, f"refused unauthenticated write ({e.code})"
         if e.code == 400:
-            return Rule(rid, FAIL,
-                        f"{url}: reached VALIDATION unauthenticated (400) — the write gate "
-                        f"is open; nothing was written only because the probe key is bogus")
+            return FAIL, ("reached VALIDATION unauthenticated (400) — the write gate is "
+                          "open; nothing was written only because the probe key is bogus")
         if e.code == 404:
-            return Rule(rid, SKIP, f"{url}: route not present on this board")
-        return Rule(rid, FAIL, f"{url}: unexpected status {e.code}")
+            return SKIP, "route not present on this board"
+        return FAIL, f"unexpected status {e.code}"
     except OSError:
-        return Rule(rid, SKIP, f"{url} not reachable (board not running?)")
+        return SKIP, "not reachable (board not running?)"
 
 
 # ------------------------------------------------------------------------------------------
@@ -1096,16 +1146,31 @@ def rule_boundary_symlink_escape(ctx: Ctx) -> Rule:
     rid = "boundary-symlink-escape"
     candidates = [ctx.env_file_path or "",
                   os.path.join(ctx.factory_root or "", "store", "blackboard.db"),
-                  ctx.config_path or ""]
+                  _config_path(ctx)]
+    # Another identity's home, and the keychain inside it. The HOME ITSELF matters: on a
+    # correctly closed deployment it is often the ONLY refused path this identity can see —
+    # everything under it becomes invisible rather than refused — and without a directory
+    # anchor the probe skipped itself exactly where containment was tightest (drill 2's
+    # perimeter run: "nothing is refused to this identity in the first place", on an account
+    # that could not enter the operator's home at all).
     for home in _other_user_homes(ctx):
         candidates.append(os.path.join(home, "Library", "Keychains"))
-    refused = ""
+        candidates.append(home)
+    refused, is_dir = "", False
     for path in candidates:
-        if path and os.path.exists(path):
-            ok, _ = _cannot_read(path)
-            if ok:
-                refused = path
+        if not path or not os.path.exists(path):
+            continue
+        if os.path.isdir(path):
+            try:
+                os.listdir(path)
+            except OSError:
+                refused, is_dir = path, True
                 break
+            continue
+        ok, _ = _cannot_read(path)
+        if ok:
+            refused = path
+            break
     if not refused:
         return Rule(rid, SKIP,
                     "no path is refused to this identity in the first place, so there is "
@@ -1118,10 +1183,14 @@ def rule_boundary_symlink_escape(ctx: Ctx) -> Rule:
         except OSError as e:
             return Rule(rid, SKIP, f"cannot create a symlink to probe with ({e})")
         try:
-            with open(link, "rb") as fh:
-                fh.read(1)
+            if is_dir:
+                os.listdir(link)
+            else:
+                with open(link, "rb") as fh:
+                    fh.read(1)
         except OSError as e:
-            return Rule(rid, PASS, f"{refused} stays refused through a symlink ({e.__class__.__name__})")
+            return Rule(rid, PASS,
+                        f"{refused} stays refused through a symlink ({e.__class__.__name__})")
     return Rule(rid, FAIL, f"reading {refused} THROUGH a symlink succeeded — access laundered")
 
 

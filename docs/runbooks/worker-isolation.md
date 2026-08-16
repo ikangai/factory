@@ -218,8 +218,10 @@ currently **DO NOT ARM** (see this file's STATUS note).
 | `boundary-keychain` | SKIP — no other identity's keychain directory is even visible (their `~/Library` is 0700); consistent with containment, reported as "nothing proven" rather than a PASS |
 | `deployment-not-peer-readable`, evaluated against the deployed layout | **FAIL — the finding, below; fixed and re-verified the same day** |
 | the same rule against `/Users/agent` | PASS — no factory artifacts under that home |
-| the account rules as `factory` (operator ran it) | **INVALID for three rules — see "the wrong account" below.** Valid and green: `standard-user`, `no-passwordless-sudo`, `no-docker-socket`, `runtime-read-only` (bare repo owned by uid 501, not this account, and proven non-writable), plus the checkout-scoped `brakes-engaged` (STOP present, mode=shift), `dashboard-localhost` (127.0.0.1) and `shared-drop-hygiene` |
-| `--boundary` as `factory` / anything as `factory-grader` | **NOT RUN** — the grader needs isolation armed |
+| the account rules as `factory`, first attempt | **INVALID for three rules — see "the wrong account" below** |
+| the account rules as `factory`, after the fix | **11 pass, 0 fail, 1 skip — clean.** See below |
+| `--boundary` as `factory` | ran; two more probe defects found (below). No perimeter breach beyond `/Users/agent` |
+| anything as `factory-grader` | **NOT RUN** — the grader needs isolation armed, which is DO-NOT-ARM |
 | the malicious candidate, end-to-end through a real shift | **NOT RUN** — same reason |
 
 **The finding: the deployed guest house is readable by any local account.**
@@ -322,6 +324,55 @@ sudo -u factory -i python3 /Users/factory/fab/factory/scripts/guesthouse_check.p
 (The operator's own checkout is no longer readable by the factory user — that is the first
 finding's fix working — so running the doctor from `~martintreiber/…` as `factory` is not an
 option, by design.)
+
+### The perimeter run, as `factory` — what it established
+
+With the wrong-account defect fixed, `sudo -u factory -i python3 …/guesthouse_check.py`
+returns **11 pass, 0 fail, 1 skip** (the skip is `wsl-hardening`, not WSL). The three rows
+that had been reporting on the operator now report on the guest house and hold:
+`home-dir-perms  PASS /Users/factory mode 0o700`, `credentials-hygiene  PASS …/.factory-
+secrets/env is mode 0600 and owned by the current user`, `deployment-not-peer-readable
+PASS — no peer account can enter the deployment, whatever the modes inside it are`.
+
+`--boundary` as `factory` returns 3 pass, 8 fail, 3 skip, and reading it requires the
+banner's distinction:
+
+- **The FAILs on `boundary-blackboard` / `-config` / `-secrets` / `-factory-root` /
+  `-killswitch` are the account reading its OWN files.** Expected, and not containment
+  claims — the same negative control as running the suite as the operator. They become
+  meaningful only when run as the GRADER, which is the identity Phase 3 puts between
+  candidate code and this tree.
+- **`boundary-credential-reach  FAIL`** — `…/.factory-secrets/env` readable, `gh` holding a
+  usable token. Also expected TODAY, and it is the single most useful row in the table:
+  it is the precise measurement of what Phase 1 buys. `guest-house.md` says it in prose
+  ("Publication credentials still live INSIDE the guest house until Phase 1"); this is the
+  probe that flips to PASS the day the broker is armed and the factory user loses its push
+  credential.
+- **`boundary-host-writes  PASS`** and **`boundary-process-escape  PASS`** are real results:
+  the guest house cannot write `/Library/LaunchAgents`, `/Library/LaunchDaemons`,
+  `/usr/local/bin` or the bare repo it updates from, cannot `sudo`, and cannot signal
+  another identity's processes. No persistence outside itself, no escalation.
+- **`boundary-other-homes  FAIL: /Users/agent is listable`** — the one real finding. Not
+  the factory's own files: `/Users/agent` is `drwxr-x---` group `staff`, so the guest house
+  can enter and read another local account's home. Same class as the first finding, pointing
+  at a different account, and outside this project's control — that account belongs to
+  another agent. Remedy is identical (`chmod 700`), and the operator's call. Note what it
+  does NOT reach: `boundary-keychain` SKIPs because that account's `~/Library` is 0700.
+
+**Two more probe defects, both found by this run** (fixed):
+
+- `boundary-dashboard-write` held a hardcoded `127.0.0.1:9788`. The deployment's board is
+  9787 and this checkout's is 8787, so its clean `403` came from a board belonging to
+  neither — a green row about something other than the thing under test, which is the
+  wrong-account audit's failure mode wearing a port number. It now derives the URL from the
+  deployment's own `config.yaml` and additionally probes the `viz --serve` board (a second
+  server with its own write routes that no config field carries), reporting per board.
+- `boundary-symlink-escape` could only anchor on a refused FILE, so on a correctly closed
+  deployment it skipped itself with "nothing is refused to this identity in the first
+  place" — said by an account that could not enter the operator's home at all. Everything
+  under a 0700 home is *invisible* rather than refused, so the home itself is the anchor;
+  the probe now accepts a directory (via `listdir`) and reports `/Users/factory stays
+  refused through a symlink (PermissionError)`.
 
 **Use `-i`.** Without it, the first of those commands dies before the script's first line:
 
