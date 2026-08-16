@@ -341,12 +341,23 @@ def render_confirmation(env: dict, content: dict) -> str:
     return "\n".join(lines)
 
 
+class NoOperatorAvailable(Exception):
+    """No human could answer the prompt at all — stdin is not a terminal, or the piped
+    answers ran out mid-queue. Deliberately NOT the same as an explicit 'n' (drill 3,
+    2026-08-16): treating "nobody was there" as "the operator declined" spent the nonce
+    forever, archived the envelope, and resolved the factory-side approval 'rejected' with
+    the note "operator declined" — an audit statement no operator ever made. Same reasoning
+    `watch()` already refuses to run without `--unattended`: a context that cannot prompt a
+    human must not manufacture the human's answer."""
+
+
 def _default_confirm(prompt_text: str) -> bool:
     print(prompt_text)
     try:
         ans = input("Pin and publish this EXACT content? [y/N] ")
-    except EOFError:
-        return False
+    except EOFError as e:
+        raise NoOperatorAvailable(
+            "stdin is not interactive — no operator was there to answer") from e
     return ans.strip().lower() in ("y", "yes")
 
 
@@ -502,7 +513,10 @@ def run_once(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_p
       default a real terminal `input()`). Confirmed => pin the tip, re-verify (now passes
       the pin gate), execute. Declined => terminal 'rejected' ("operator declined"),
       ledgered as spent (the operator said no to THIS envelope; a genuine change of mind
-      needs a fresh approval/envelope, not a silent retry loop).
+      needs a fresh approval/envelope, not a silent retry loop). `confirm_fn` raising
+      `NoOperatorAvailable` (no tty at all, or piped answers exhausted mid-queue) is NOT a
+      decline — it degrades to the same soft 'pending' outcome as `unattended`, because
+      nobody was there to say no (drill 3, 2026-08-16).
     - Any other verification failure (tamper/expiry/replay/base-moved/etc.) => terminal,
       ledgered, archived, exactly as before.
 
@@ -544,7 +558,19 @@ def run_once(*, outbox_dir: str, receipts_dir: str, allowlist_path: str, spent_p
             content = derive_publish_content(entry["bare_path"], env.get("base_sha", ""),
                                              env.get("tip_sha", ""), runner=runner)
             text = render_confirmation(env, content)
-            if confirm_fn(text):
+            try:
+                confirmed = confirm_fn(text)
+            except NoOperatorAvailable as e:
+                # Drill 3: no tty (a script, a cron entry, ssh with stdin closed) or piped
+                # answers exhausted mid-queue. Fall back to the SAME soft outcome
+                # `--unattended` produces — queued, unspent, unarchived, retryable — rather
+                # than recording a decline nobody made. See NoOperatorAvailable.
+                results.append({"nonce": nonce, "status": "pending",
+                                "reason": f"{e} — left queued, NOT declined; rerun with a "
+                                          f"terminal, or `factory broker pin <tip>` then "
+                                          f"rerun with --unattended"})
+                continue
+            if confirmed:
                 pin_tip(pins_path, env["tip_sha"],
                        note=f"confirmed via broker run-once ({nonce[:8]})")
                 verdict2 = verify_envelope(env, filename_nonce=nonce, hash_path=hash_path,
