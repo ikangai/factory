@@ -30,6 +30,7 @@ Six groups:
   (d) README.md + the runbook — one-liners, cross-links, and the fixed system's documented
       contract (--yes semantics, STOP reality, doctor contexts, the marker/reuse rule).
 """
+import getpass
 import importlib.util
 import json
 import os
@@ -765,7 +766,8 @@ def test_run_all_backcompat_returns_just_the_rules(tmp_path):
                  run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "no not a member\n", ""))
     rules = gh.run_all(ctx)
     assert isinstance(rules, list)
-    assert len(rules) == 11   # + shared-drop-hygiene (2026-08-09)
+    assert len(rules) == 12   # + shared-drop-hygiene (2026-08-09),
+                              # + deployment-not-peer-readable (drill 2, 2026-08-16)
 
 
 # --- table renderer + audit()/main() ----------------------------------------------------------
@@ -830,7 +832,8 @@ def test_audit_end_to_end_never_touches_a_real_subprocess(tmp_path, capsys):
                      docker_socket=str(tmp_path / username / "no-docker.sock"),
                      run=fake_run)
         result = gh.audit(ctx)
-        assert len(result.rules) == 11   # + shared-drop-hygiene
+        assert len(result.rules) == 12   # + shared-drop-hygiene,
+                                         # + deployment-not-peer-readable
         table = gh.render_table(result.rules)
         assert "RULE" in table
 
@@ -1213,3 +1216,272 @@ def test_boundary_audit_has_no_context_gate():
     assert result.deployed is True
     assert len(result.rules) == len(gh.BOUNDARY_RULES)
     assert not any(r.detail == gh._CONTEXT_GATED_DETAIL for r in result.rules)
+
+
+# ==========================================================================================
+# Drill-2 probes (2026-08-16) — the five attack classes the original six probes never asked
+# about (network, Keychain, process escape, symlinks, dependency substitution) plus the
+# credential reach that gives the network class its meaning, and the deployment-exposure
+# rule the drill's own findings produced.
+# ==========================================================================================
+
+def test_every_drill2_attack_class_has_a_probe():
+    """The roadmap sentence names six classes. A drill that silently covers four of them and
+    reports green is the failure mode this whole file exists to prevent."""
+    ids = {rid for rid, _ in gh.BOUNDARY_RULES}
+    for expected in ("boundary-network-egress", "boundary-keychain", "boundary-other-homes",
+                     "boundary-process-escape", "boundary-symlink-escape",
+                     "boundary-dependency-substitution", "boundary-host-writes",
+                     "boundary-credential-reach"):
+        assert expected in ids, f"drill 2 lost its {expected} probe"
+
+
+def test_network_egress_is_reported_but_never_a_failure():
+    """Egress is not a containment claim — the deployment needs GitHub and the model API.
+    Scoring it FAIL would put a permanent red row in a correct deployment's table, which is
+    how operators learn to skim past red rows."""
+    ctx = gh.Ctx(tcp_probe_fn=lambda t: (True, "connected"))
+    rule = gh.rule_boundary_network_egress(ctx)
+    assert rule.status == gh.SKIP and "REACHABLE" in rule.detail
+    assert "not a containment claim" in rule.detail
+    blocked = gh.rule_boundary_network_egress(gh.Ctx(tcp_probe_fn=lambda t: (False, "refused")))
+    assert blocked.status == gh.SKIP
+
+
+def test_credential_reach_fails_on_a_readable_env_file(tmp_path):
+    env_file = tmp_path / "env"
+    env_file.write_text("GH_TOKEN=ghp_realsecret\n")
+    ctx = gh.Ctx(env_file_path=str(env_file), git_credentials_path=str(tmp_path / "none"),
+                 run=lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "not logged in"))
+    rule = gh.rule_boundary_credential_reach(ctx)
+    assert rule.status == gh.FAIL and str(env_file) in rule.detail
+
+
+def test_credential_reach_fails_when_gh_holds_a_token(tmp_path):
+    """`gh auth status` is read-only and never asked for the token itself (`--show-token`
+    would print a live credential into a drill log)."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "  ✓ Logged in to github.com")
+
+    ctx = gh.Ctx(env_file_path=str(tmp_path / "none"),
+                 git_credentials_path=str(tmp_path / "none"), run=fake_run)
+    rule = gh.rule_boundary_credential_reach(ctx)
+    assert rule.status == gh.FAIL and "github.com" in rule.detail
+    assert ["gh", "auth", "status"] in calls
+    assert not any("--show-token" in a for a in calls[0]), "must never print the token"
+
+
+def test_credential_reach_passes_when_nothing_can_publish(tmp_path):
+    ctx = gh.Ctx(env_file_path=str(tmp_path / "none"),
+                 git_credentials_path=str(tmp_path / "none"),
+                 run=lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "not logged in"))
+    assert gh.rule_boundary_credential_reach(ctx).status == gh.PASS
+
+
+def test_keychain_probe_reports_nothing_proven_rather_than_passing(tmp_path, monkeypatch):
+    """An empty search is not containment. This probe's first cut PASSed when no other
+    identity's keychain directory existed at all — the same decorative-green failure the
+    absent-path rule above was written for."""
+    monkeypatch.setattr(gh, "_other_user_homes", lambda ctx: [str(tmp_path / "someone")])
+    (tmp_path / "someone").mkdir()
+    rule = gh.rule_boundary_keychain(gh.Ctx(platform_name="Darwin"))
+    assert rule.status == gh.SKIP and "nothing proven" in rule.detail
+
+
+def test_keychain_probe_fails_when_another_identity_is_readable(tmp_path, monkeypatch):
+    home = tmp_path / "someone"
+    (home / "Library" / "Keychains").mkdir(parents=True)
+    (home / "Library" / "Keychains" / "login.keychain-db").write_bytes(b"x")
+    monkeypatch.setattr(gh, "_other_user_homes", lambda ctx: [str(home)])
+    rule = gh.rule_boundary_keychain(gh.Ctx(platform_name="Darwin"))
+    assert rule.status == gh.FAIL and "in reach" in rule.detail
+
+
+def test_process_escape_fails_on_a_sudo_grant_beyond_the_grading_wrapper():
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["sudo", "-n"]:
+            return subprocess.CompletedProcess(argv, 0, "    (ALL) NOPASSWD: ALL\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    ctx = gh.Ctx(run=fake_run, foreign_processes_fn=lambda c: [])
+    rule = gh.rule_boundary_process_escape(ctx)
+    assert rule.status == gh.FAIL and "beyond the grading wrapper" in rule.detail
+
+
+def test_process_escape_passes_on_exactly_the_grading_grant():
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["sudo", "-n"]:
+            return subprocess.CompletedProcess(
+                argv, 0, "    (factory-grader) NOPASSWD: /opt/factory/run-target-code\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    ctx = gh.Ctx(run=fake_run, foreign_processes_fn=lambda c: [])
+    rule = gh.rule_boundary_process_escape(ctx)
+    assert rule.status == gh.PASS and "exactly the grading grant" in rule.detail
+
+
+def test_process_escape_never_delivers_a_signal():
+    """`os.kill(pid, 0)` asks the kernel for permission and delivers nothing. A probe that
+    actually signalled a process to prove it could would be the /api/resume incident again."""
+    import ast
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(gh.rule_boundary_process_escape))
+    fn = ast.parse(src).body[0]
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)):
+        fn.body = fn.body[1:]
+    code = ast.unparse(ast.Module(body=fn.body, type_ignores=[]))
+    assert "os.kill(pid, 0)" in code, "must probe with signal 0 only"
+    for lethal in ("SIGKILL", "SIGTERM", "SIGSTOP"):
+        assert lethal not in code
+
+
+def test_symlink_probe_says_nothing_proven_when_nothing_is_refused(tmp_path):
+    """With no refused path there is nothing a symlink could launder — reporting PASS there
+    would credit containment that was never tested."""
+    root = tmp_path / "factory"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "blackboard.db").write_bytes(b"x")     # readable
+    rule = gh.rule_boundary_symlink_escape(
+        gh.Ctx(factory_root=str(root), env_file_path=str(tmp_path / "none"),
+               config_path=str(tmp_path / "none")))
+    assert rule.status == gh.SKIP and "nothing proven" in rule.detail
+
+
+def test_symlink_probe_passes_when_a_link_cannot_launder_access(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"x")
+    os.chmod(secret, 0o000)
+    rule = gh.rule_boundary_symlink_escape(
+        gh.Ctx(factory_root=str(tmp_path / "nofactory"), env_file_path=str(secret),
+               config_path=str(tmp_path / "none")))
+    assert rule.status == gh.PASS and "through a symlink" in rule.detail
+
+
+def test_dependency_substitution_fails_on_a_writable_import_dir(tmp_path):
+    root = tmp_path / "parent" / "factory"
+    root.mkdir(parents=True)
+    ctx = gh.Ctx(factory_root=str(root), import_path_dirs_fn=lambda: [], environ={})
+    rule = gh.rule_boundary_dependency_substitution(ctx)
+    assert rule.status == gh.FAIL and "import path" in rule.detail
+    assert str(tmp_path / "parent") in rule.detail, "the dir `python3 -m factory.*` resolves from"
+
+
+def test_dependency_substitution_flags_an_auto_imported_hook(tmp_path):
+    root = tmp_path / "parent" / "factory"
+    root.mkdir(parents=True)
+    (root / "sitecustomize.py").write_text("# imported with no import statement anywhere\n")
+    ctx = gh.Ctx(factory_root=str(root), import_path_dirs_fn=lambda: [], environ={})
+    assert "sitecustomize.py" in gh.rule_boundary_dependency_substitution(ctx).detail
+
+
+def test_dependency_substitution_passes_when_the_import_path_is_read_only(tmp_path):
+    parent = tmp_path / "ro"
+    root = parent / "factory"
+    root.mkdir(parents=True)
+    os.chmod(root, 0o500)
+    os.chmod(parent, 0o500)
+    try:
+        ctx = gh.Ctx(factory_root=str(root), import_path_dirs_fn=lambda: [], environ={})
+        rule = gh.rule_boundary_dependency_substitution(ctx)
+        assert rule.status == gh.PASS, rule.detail
+    finally:
+        os.chmod(parent, 0o700)
+        os.chmod(root, 0o700)
+
+
+def test_host_writes_reports_nothing_proven_when_no_host_path_exists(tmp_path):
+    ctx = gh.Ctx(host_write_paths=(str(tmp_path / "absent"),),
+                 grader_wrapper_path=str(tmp_path / "absent-wrapper"),
+                 home=str(tmp_path))
+    rule = gh.rule_boundary_host_writes(ctx)
+    assert rule.status == gh.SKIP and "nothing proven" in rule.detail
+
+
+def test_host_writes_fails_on_a_writable_grading_wrapper(tmp_path):
+    """The wrapper is root-owned for a reason: whoever can rewrite it decides what "run the
+    candidate's tests in a confined identity" means."""
+    wrapper = tmp_path / "run-target-code"
+    wrapper.write_text("#!/bin/sh\n")
+    ctx = gh.Ctx(host_write_paths=(), grader_wrapper_path=str(wrapper), home=str(tmp_path))
+    rule = gh.rule_boundary_host_writes(ctx)
+    assert rule.status == gh.FAIL and str(wrapper) in rule.detail
+
+
+# -- the finding drill 2 produced: a peer local account reading the deployment -------------
+def test_deployment_peer_readable_fails_on_the_shape_drill2_found(tmp_path):
+    """The operator's own deployed guest house, 2026-08-16: /Users/factory at 0750 group
+    `staff` (every macOS account is in `staff`) over a 0755 tree of 0644 files — so an
+    unrelated local account could read the blackboard and the config."""
+    home = tmp_path / "factory"
+    root = home / "fab" / "factory"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "blackboard.db").write_bytes(b"SQLite format 3\x00")
+    (root / "config.yaml").write_text("dashboard: {host: 127.0.0.1}\n")
+    os.chmod(home, 0o750)
+    rule = gh.rule_deployment_not_peer_readable(
+        gh.Ctx(home=str(home), factory_root=str(root), username="factory"))
+    assert rule.status == gh.FAIL
+    assert "store/blackboard.db" in rule.detail and "config.yaml" in rule.detail
+    assert f"chmod 700 {home}" in rule.detail
+
+
+def test_deployment_peer_readable_passes_on_a_closed_home(tmp_path):
+    home = tmp_path / "factory"
+    root = home / "fab" / "factory"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "blackboard.db").write_bytes(b"x")     # still 0644 inside
+    os.chmod(home, 0o700)
+    rule = gh.rule_deployment_not_peer_readable(
+        gh.Ctx(home=str(home), factory_root=str(root), username="factory"))
+    assert rule.status == gh.PASS and "no peer account can enter" in rule.detail
+
+
+def test_deployment_peer_readable_ignores_files_behind_a_closed_ancestor(tmp_path):
+    """A 0644 file under a 0700 directory is not exposed. Reporting it would bury the real
+    finding in noise the operator cannot act on."""
+    home = tmp_path / "factory"
+    root = home / "fab" / "factory"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "blackboard.db").write_bytes(b"x")
+    (root / "config.yaml").write_text("x\n")
+    os.chmod(home, 0o755)
+    os.chmod(root / "store", 0o700)
+    try:
+        rule = gh.rule_deployment_not_peer_readable(
+            gh.Ctx(home=str(home), factory_root=str(root), username="factory"))
+        assert "store/blackboard.db" not in rule.detail
+        assert rule.status == gh.FAIL and "config.yaml" in rule.detail   # this one IS exposed
+    finally:
+        os.chmod(root / "store", 0o700)
+
+
+def test_deployment_peer_readable_is_context_gated():
+    """On an ordinary developer checkout the question is wrong — an operator's own tree under
+    an operator's own home. It gates with the other account-scoped rules."""
+    assert "deployment-not-peer-readable" in gh.ACCOUNT_SCOPED_RULE_IDS
+
+
+def test_boundary_banner_names_the_identity_and_the_polarity(tmp_path):
+    """Run as the tree's owner the FAILs are correct, not defects. A table that cannot be
+    read without knowing which of those two situations you are in is a trap."""
+    root = tmp_path / "factory"
+    root.mkdir()
+    banner = gh.boundary_banner(gh.Ctx(factory_root=str(root), username=getpass.getuser()))
+    assert "PASS means" in banner and "could NOT" in banner
+    assert "negative control" in banner
+
+
+def test_boundary_config_probe_derives_its_path(tmp_path):
+    """It used to read ctx.config_path alone, which nothing defaults — so every real run
+    reported `FAIL no path configured`, a breach report caused by an unset field."""
+    root = tmp_path / "factory"
+    root.mkdir()
+    (root / "config.yaml").write_text("x\n")
+    rule = gh.rule_boundary_config(gh.Ctx(factory_root=str(root)))
+    assert "no path configured" not in rule.detail
+    assert str(root / "config.yaml") in rule.detail

@@ -76,6 +76,10 @@ _PRIVATE_KEY_HEADER_RE = re.compile(r"^-----BEGIN .*PRIVATE KEY-----")
 ACCOUNT_SCOPED_RULE_IDS = {
     "standard-user", "no-passwordless-sudo", "home-dir-perms", "no-ssh-access",
     "no-docker-socket", "runtime-read-only", "credentials-hygiene",
+    # asks what a PEER can read of THIS account's deployment — on a dev checkout that is the
+    # wrong question (an operator's own tree under an operator's own home), so it gates with
+    # the other account-scoped rules rather than emitting a FAIL nobody should act on.
+    "deployment-not-peer-readable",
 }
 
 NON_GUEST_HOUSE_BANNER = (
@@ -88,6 +92,57 @@ _CONTEXT_GATED_DETAIL = (
     "auditing a non-guest-house account — account-scoped rule skipped (not the deployed "
     "'factory' user, no ~/fab/factory or WSL install root found)"
 )
+
+
+def _tcp_probe(target: Tuple[str, int]) -> Tuple[bool, str]:
+    """Open a TCP connection and close it, writing NOTHING — the whole observation is
+    whether the handshake completes. Used only by the egress probe, which never FAILs (see
+    `rule_boundary_network_egress`)."""
+    import socket
+    try:
+        with socket.create_connection(target, timeout=3):
+            return True, f"connected to {target[0]}:{target[1]}"
+    except OSError as e:
+        return False, f"{target[0]}:{target[1]}: {e}"
+
+
+def _import_path_dirs() -> List[str]:
+    """site-packages + the user site dir of the interpreter running this probe — the rest of
+    the import path the dependency-substitution rule inspects comes from FACTORY_ROOT and
+    PYTHONPATH, which are Ctx fields."""
+    dirs: List[str] = []
+    try:
+        import site
+        dirs += list(getattr(site, "getsitepackages", lambda: [])() or [])
+        if getattr(site, "ENABLE_USER_SITE", False):
+            user = site.getusersitepackages()
+            dirs += [user] if isinstance(user, str) else list(user)
+    except Exception:  # noqa: BLE001 — a probe must never die on an odd interpreter layout
+        pass
+    return dirs
+
+
+def _foreign_processes(ctx: "Ctx") -> List[Tuple[int, str]]:
+    """(pid, owner) for processes owned by a PEER identity — another human/service account,
+    root excluded. Root is excluded deliberately: no unprivileged identity can signal root
+    on any correctly configured system, so including it would pad the probe with an answer
+    that proves nothing about the boundary drill 2 actually tests (grader vs factory,
+    factory vs operator). Read-only: `ps` output, no signals sent here —
+    `rule_boundary_process_escape` asks the kernel for permission with signal 0 and delivers
+    nothing."""
+    try:
+        r = ctx.run(["ps", "-axo", "pid=,user="], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for line in (getattr(r, "stdout", "") or "").splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, owner = int(parts[0]), parts[1]
+        if owner != ctx.username and owner != "root":
+            out.append((pid, owner))
+    return out
 
 
 def _default_username() -> str:
@@ -134,6 +189,17 @@ class Ctx:
     wsl_conf_path: str = "/etc/wsl.conf"
     proc_version_path: str = "/proc/version"
     wsl_install_root: Optional[str] = None
+    # -- drill-2 probe seams (2026-08-16). Same idiom as the fields above: a real-world
+    # default, overridden field-by-field in tests so no test needs another identity, a real
+    # keychain, or a network.
+    git_credentials_path: Optional[str] = None
+    grader_wrapper_path: str = "/opt/factory/run-target-code"
+    egress_probe_target: Tuple[str, int] = ("1.1.1.1", 443)
+    host_write_paths: Tuple[str, ...] = ("/Library/LaunchAgents", "/Library/LaunchDaemons",
+                                          "/usr/local/bin", "/Users/Shared/factory.git")
+    tcp_probe_fn: Optional[Callable[[Tuple[str, int]], Tuple[bool, str]]] = None
+    import_path_dirs_fn: Optional[Callable[[], List[str]]] = None
+    foreign_processes_fn: Optional[Callable[["Ctx"], List[Tuple[int, str]]]] = None
 
     def __post_init__(self):
         if self.ssh_dir is None:
@@ -151,6 +217,14 @@ class Ctx:
         if self.wsl_install_root is None:
             # the unified WSL guest-house layout install.sh --guest-house --wsl defaults to
             self.wsl_install_root = os.path.join(self.home, "factories", "guest-house", "factory")
+        if self.git_credentials_path is None:
+            self.git_credentials_path = os.path.join(self.home, ".git-credentials")
+        if self.tcp_probe_fn is None:
+            self.tcp_probe_fn = _tcp_probe
+        if self.import_path_dirs_fn is None:
+            self.import_path_dirs_fn = _import_path_dirs
+        if self.foreign_processes_fn is None:
+            self.foreign_processes_fn = _foreign_processes
 
 
 def is_guest_house_context(ctx: Ctx) -> bool:
@@ -374,6 +448,82 @@ def rule_credentials_hygiene(ctx: Ctx) -> Rule:
     return Rule(rid, PASS, f"{ctx.env_file_path} is mode 0600 and owned by the current user")
 
 
+# --- rule 7b: the deployment is not readable by a PEER local account ---------------------------
+# Added 2026-08-16, by drill 2, which found exactly this on the operator's own deployed guest
+# house: `/Users/factory` was mode 750 group `staff`, and the tree inside it 755/644 — so the
+# unrelated local account `agent` (in `staff`, like every macOS account by default) could read
+# the deployment's blackboard, its config, and its whole tree.
+#
+# `home-dir-perms` already asks whether the home mode is right. This rule asks the question
+# that mode is a proxy FOR — what a peer can actually read — and names the artifacts, because
+# "mode 750" reads as a nit while "any local account can read your held-out corpus and your
+# entire decision history" reads as what it is. The two are deliberately separate verdicts:
+# a deployment can fix the consequence (tighten the artifacts) or the cause (tighten the home),
+# and only the second makes the first irrelevant.
+PEER_READABLE_ARTIFACTS = (
+    ("store/blackboard.db", "the blackboard — every task, approval, learning and decision"),
+    ("config.yaml", "the deployment's configuration, including its knobs and target"),
+    ("corpus", "the scenario corpus, including the held-out partitions blindness rests on"),
+    ("state", "runtime state (broker spool, mode flag, dashboard snapshot)"),
+)
+
+
+def _peer_can_traverse(path: str, stop_at: str) -> bool:
+    """True iff every directory from `stop_at` down to `path`'s parent grants group OR other
+    execute — i.e. a peer account can actually reach `path` at all. Without this the rule
+    would report a 644 file as exposed even when a 700 ancestor makes it unreachable."""
+    bits = stat.S_IXGRP | stat.S_IXOTH
+    cur = os.path.dirname(os.path.abspath(path))
+    stop_at = os.path.abspath(stop_at)
+    while True:
+        try:
+            if not (os.stat(cur).st_mode & bits):
+                return False
+        except OSError:
+            return False
+        if cur == stop_at or cur == os.path.dirname(cur):
+            return True
+        cur = os.path.dirname(cur)
+
+
+def rule_deployment_not_peer_readable(ctx: Ctx) -> Rule:
+    rid = "deployment-not-peer-readable"
+    if not ctx.is_posix:
+        return Rule(rid, SKIP, "no POSIX permission model on this platform")
+    root = ctx.factory_root or ""
+    if not root or not os.path.isdir(root):
+        return Rule(rid, SKIP, "no factory directory found")
+    read_bits = stat.S_IRGRP | stat.S_IROTH
+    try:
+        home_mode = stat.S_IMODE(os.stat(ctx.home).st_mode)
+    except OSError as e:
+        return Rule(rid, SKIP, f"cannot stat {ctx.home}: {e}")
+    if not (home_mode & (read_bits | stat.S_IXGRP | stat.S_IXOTH)):
+        return Rule(rid, PASS,
+                    f"{ctx.home} is mode {oct(home_mode)} — no peer account can enter the "
+                    f"deployment, whatever the modes inside it are")
+    exposed = []
+    for rel, what in PEER_READABLE_ARTIFACTS:
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            continue
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            continue
+        if (mode & read_bits) and _peer_can_traverse(path, ctx.home):
+            exposed.append(f"{rel} (mode {oct(mode)}) — {what}")
+    if exposed:
+        return Rule(rid, FAIL,
+                    f"{ctx.home} is mode {oct(home_mode)}, so any local account in its group "
+                    f"(on macOS that is every account, via `staff`) can read: "
+                    + "; ".join(exposed)
+                    + f". Fix the cause: chmod 700 {ctx.home}")
+    return Rule(rid, PASS,
+                f"{ctx.home} is mode {oct(home_mode)} (peer-traversable), but no high-value "
+                f"artifact under {root} is group/other-readable")
+
+
 # --- rule 8: brakes engaged (STOP present, mode != auto) --------------------------------------
 def rule_brakes_engaged(ctx: Ctx) -> Rule:
     rid = "brakes-engaged"
@@ -401,12 +551,18 @@ def rule_brakes_engaged(ctx: Ctx) -> Rule:
     return Rule(rid, FAIL, "brakes not engaged: " + ", ".join(reasons))
 
 
+def _config_path(ctx: Ctx) -> str:
+    """`ctx.config_path`, or the checkout's own config.yaml. Nothing defaults the field, so
+    every consumer has to fall back the same way (see `rule_boundary_config`)."""
+    if ctx.config_path:
+        return ctx.config_path
+    return os.path.join(ctx.factory_root, "config.yaml") if ctx.factory_root else ""
+
+
 # --- rule 9: dashboard bound to localhost ------------------------------------------------------
 def rule_dashboard_localhost(ctx: Ctx) -> Rule:
     rid = "dashboard-localhost"
-    config_path = ctx.config_path
-    if config_path is None and ctx.factory_root:
-        config_path = os.path.join(ctx.factory_root, "config.yaml")
+    config_path = _config_path(ctx)
     if not config_path or not os.path.exists(config_path):
         return Rule(rid, SKIP, "config.yaml not found")
     try:
@@ -509,6 +665,7 @@ RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
     ("no-docker-socket", rule_no_docker_socket),
     ("runtime-read-only", rule_runtime_readonly),
     ("credentials-hygiene", rule_credentials_hygiene),
+    ("deployment-not-peer-readable", rule_deployment_not_peer_readable),
     ("brakes-engaged", rule_brakes_engaged),
     ("dashboard-localhost", rule_dashboard_localhost),
     ("wsl-hardening", rule_wsl_hardening),
@@ -555,8 +712,12 @@ def rule_boundary_blackboard(ctx: Ctx) -> Rule:
 
 
 def rule_boundary_config(ctx: Ctx) -> Rule:
+    """Derives the config path from FACTORY_ROOT exactly like `rule_dashboard_localhost`
+    does. It used to read `ctx.config_path` alone, which nothing defaults, so every real run
+    reported `FAIL  no path configured` — a probe that cries breach because it was never
+    told where to look trains an operator to skim past FAILs (found running drill 2)."""
     rid = "boundary-config"
-    ok, detail = _cannot_read(ctx.config_path or "")
+    ok, detail = _cannot_read(_config_path(ctx))
     return Rule(rid, PASS if ok else FAIL, detail)
 
 
@@ -635,6 +796,324 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
         return Rule(rid, SKIP, f"{url} not reachable (board not running?)")
 
 
+# ------------------------------------------------------------------------------------------
+# DRILL-2 PROBES (2026-08-16). The six probes above ask one question — can I reach the
+# CONTROL PLANE — which is drill 2's "host writes" class and nothing else. Drill 2
+# (roadmap Part 5) names six: network, Keychain, process escape, symlinks, dependency
+# substitution, host writes. The rules below cover the other five, plus the one that makes
+# the network class mean anything (a credential worth exfiltrating).
+#
+# Every one is INERT — reads, `access()` checks, `signal 0`, a read-only `sudo -n -l`, a
+# bare TCP connect that writes nothing, and one symlink inside a directory the probe makes
+# itself. Nothing here creates, deletes, or modifies a path outside its own temp dir, which
+# is what makes the suite safe to run against a LIVE deployment (the property the
+# `/api/resume` incident above cost us).
+#
+# "Nothing proven" is reported as such, never as a PASS: a probe that passes because the
+# path it looks for is absent is the same failure mode as a rule that skips itself.
+# ------------------------------------------------------------------------------------------
+
+def _writable(path: str) -> bool:
+    """Effective-uid write test where the platform supports it (`faccessat`); plain
+    `os.access` otherwise. Never writes — a create-then-unlink canary would be a probe that
+    ACTS when the boundary is broken, exactly what the section header forbids."""
+    try:
+        return os.access(path, os.W_OK, effective_ids=(os.access in os.supports_effective_ids))
+    except (TypeError, ValueError, OSError):
+        return os.access(path, os.W_OK)
+
+
+def _other_user_homes(ctx: Ctx) -> List[str]:
+    """Home directories belonging to identities OTHER than the one probing. On the guest
+    house this is how you ask "can I read the operator's account" — the deployment's whole
+    perimeter claim (guest-house.md rules table, CANNOT #1)."""
+    roots = ["/Users"] if ctx.platform_name == "Darwin" else ["/home"]
+    skip = {"Shared", "Guest", "root", os.path.basename(ctx.home.rstrip("/")), ctx.username}
+    homes = []
+    for root in roots:
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or name in skip:
+                continue
+            path = os.path.join(root, name)
+            if os.path.isdir(path) and os.path.realpath(path) != os.path.realpath(ctx.home):
+                homes.append(path)
+    return homes
+
+
+def rule_boundary_network_egress(ctx: Ctx) -> Rule:
+    """NOT a containment claim, and deliberately never a FAIL: the deployment needs egress
+    (GitHub, the model API, `claude` itself), and macOS gives no per-user egress filter. It
+    is reported because drill 2 names it, and because what egress is WORTH is a different
+    rule: `boundary-credential-reach` asks whether there is anything here worth exfiltrating.
+    The probe opens a TCP connection and writes nothing at all."""
+    rid = "boundary-network-egress"
+    reachable, detail = ctx.tcp_probe_fn(ctx.egress_probe_target)
+    return Rule(rid, SKIP,
+                f"egress {'REACHABLE' if reachable else 'not reachable'} ({detail}) — not a "
+                f"containment claim: the deployment needs the network. What bounds the damage "
+                f"is what a process here can READ (boundary-secrets, boundary-credential-reach) "
+                f"and the PAT's repo scope, not the socket.")
+
+
+def rule_boundary_credential_reach(ctx: Ctx) -> Rule:
+    """The question the network probe cannot answer: is there a usable publication credential
+    within reach of this identity? Each check is read-only — `gh auth status` prints whether a
+    token exists, never the token (no `--show-token`)."""
+    rid = "boundary-credential-reach"
+    found = []
+    env_file = ctx.env_file_path or ""
+    if env_file and os.path.exists(env_file):
+        try:
+            with open(env_file, "rb") as fh:
+                if fh.read(1):
+                    found.append(f"{env_file} is readable")
+        except OSError:
+            pass
+    creds = ctx.git_credentials_path or ""
+    if creds and os.path.exists(creds):
+        try:
+            with open(creds, "rb") as fh:
+                if fh.read(1):
+                    found.append(f"{creds} is readable")
+        except OSError:
+            pass
+    try:
+        r = ctx.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
+        blob = f"{getattr(r, 'stdout', '') or ''}{getattr(r, 'stderr', '') or ''}"
+        if getattr(r, "returncode", 1) == 0 and "ogged in" in blob:
+            hosts = sorted({ln.strip().split()[-1] for ln in blob.splitlines()
+                            if "ogged in to" in ln}) or ["(unnamed host)"]
+            found.append(f"`gh` holds a usable credential for {', '.join(hosts)}")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if found:
+        return Rule(rid, FAIL, "; ".join(found)
+                    + " — a process here can publish, or exfiltrate what publishes")
+    return Rule(rid, PASS,
+                "no readable env file, no git-credentials store, no logged-in `gh` — nothing "
+                "here can publish (when armed, the broker holds the only push credential)")
+
+
+def rule_boundary_keychain(ctx: Ctx) -> Rule:
+    """guest-house.md rules table, CANNOT #1. Probes only whether ANOTHER identity's keychain
+    is reachable — this identity's own keychain is explicitly allowed. Never dumps or unlocks
+    anything: `security dump-keychain` would print secrets on success, which is the shape of
+    probe this repo forbids."""
+    rid = "boundary-keychain"
+    if ctx.platform_name != "Darwin":
+        return Rule(rid, SKIP, f"no macOS Keychain on {ctx.platform_name}")
+    homes = _other_user_homes(ctx)
+    if not homes:
+        return Rule(rid, SKIP, "no other user's home on this machine (nothing proven)")
+    reached, seen = [], 0
+    for home in homes:
+        kc = os.path.join(home, "Library", "Keychains")
+        # os.path.isdir() is False both when the directory is absent AND when this identity
+        # cannot traverse the home to see it. Only the SECOND is containment, so count what
+        # was actually observable and refuse to call an empty search a PASS.
+        if not os.path.exists(kc) and not os.access(home, os.X_OK):
+            continue
+        if not os.path.isdir(kc):
+            continue
+        seen += 1
+        try:
+            entries = os.listdir(kc)
+        except OSError:
+            continue
+        reached.append(f"{kc} ({len(entries)} entr(y/ies) listable)")
+    if reached:
+        return Rule(rid, FAIL, "another identity's keychain is in reach: " + "; ".join(reached))
+    if not seen:
+        return Rule(rid, SKIP,
+                    f"no other identity's keychain directory was visible at all "
+                    f"({len(homes)} home(s) checked) — consistent with containment, but "
+                    f"nothing proven: the directory may simply not exist")
+    return Rule(rid, PASS,
+                f"{seen} other keychain director(y/ies) exist and none is listable")
+
+
+def rule_boundary_other_homes(ctx: Ctx) -> Rule:
+    """The rest of CANNOT #1 — the operator's home itself, not just the keychain inside it."""
+    rid = "boundary-other-homes"
+    homes = _other_user_homes(ctx)
+    if not homes:
+        return Rule(rid, SKIP, "no other user's home on this machine (nothing proven)")
+    listable = []
+    for home in homes:
+        try:
+            os.listdir(home)
+            listable.append(home)
+        except OSError:
+            continue
+    if listable:
+        return Rule(rid, FAIL, "another identity's home is listable: " + ", ".join(listable))
+    return Rule(rid, PASS, f"no other identity's home is listable (checked {len(homes)})")
+
+
+def rule_boundary_process_escape(ctx: Ctx) -> Rule:
+    """Two escapes, one verdict: becoming another identity (`sudo`), and reaching into another
+    identity's running processes. `sudo -n -l` never prompts and executes nothing; `signal 0`
+    asks the kernel for permission without delivering a signal.
+
+    A grading identity is ALLOWED exactly one grant — the root-owned `run-target-code`
+    wrapper the factory user invokes — so a grant naming only that is a PASS, and anything
+    else is not."""
+    rid = "boundary-process-escape"
+    problems, notes = [], []
+    try:
+        r = ctx.run(["sudo", "-n", "-l"], capture_output=True, text=True, timeout=15)
+        if getattr(r, "returncode", 1) == 0:
+            out = (getattr(r, "stdout", "") or "")
+            grants = [ln.strip() for ln in out.splitlines()
+                      if "NOPASSWD" in ln or ln.strip().startswith("(")]
+            unexpected = [g for g in grants if ctx.grader_wrapper_path not in g]
+            if not grants:
+                problems.append("passwordless sudo is available (no explicit grant listed)")
+            elif unexpected:
+                problems.append("sudo grants beyond the grading wrapper: "
+                                + " | ".join(unexpected)[:300])
+            else:
+                notes.append(f"exactly the grading grant ({ctx.grader_wrapper_path})")
+        else:
+            notes.append("no passwordless sudo")
+    except (OSError, subprocess.SubprocessError) as e:
+        notes.append(f"sudo unavailable ({e})")
+
+    signalled = []
+    for pid, owner in ctx.foreign_processes_fn(ctx):
+        try:
+            os.kill(pid, 0)                      # permission check; delivers nothing
+            signalled.append(f"{pid} ({owner})")
+        except (PermissionError, ProcessLookupError, OSError):
+            continue
+        if len(signalled) >= 3:
+            break
+    if signalled:
+        problems.append("can signal processes owned by another identity: "
+                        + ", ".join(signalled))
+    elif not ctx.foreign_processes_fn(ctx):
+        notes.append("no foreign-owned processes visible to compare against (nothing proven)")
+    else:
+        notes.append("cannot signal any foreign-owned process")
+    if problems:
+        return Rule(rid, FAIL, "; ".join(problems))
+    return Rule(rid, PASS, "; ".join(notes) or "no escape route found")
+
+
+def rule_boundary_symlink_escape(ctx: Ctx) -> Rule:
+    """A symlink must not launder access: reading a refused path THROUGH a link the probing
+    identity owns has to fail exactly as the direct read did. This is the class that already
+    bit this phase once from the other direction — `chmod -R +a` followed candidate symlinks
+    and stamped ACLs on their targets (worker-isolation.md, STATUS note), which is why the
+    export ACL grant is a no-op today.
+
+    Anchors on a path that is ALREADY refused from here; with no such path there is nothing
+    to launder and the probe says so rather than passing."""
+    rid = "boundary-symlink-escape"
+    candidates = [ctx.env_file_path or "",
+                  os.path.join(ctx.factory_root or "", "store", "blackboard.db"),
+                  ctx.config_path or ""]
+    for home in _other_user_homes(ctx):
+        candidates.append(os.path.join(home, "Library", "Keychains"))
+    refused = ""
+    for path in candidates:
+        if path and os.path.exists(path):
+            ok, _ = _cannot_read(path)
+            if ok:
+                refused = path
+                break
+    if not refused:
+        return Rule(rid, SKIP,
+                    "no path is refused to this identity in the first place, so there is "
+                    "nothing a symlink could launder (nothing proven — see the read probes)")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        link = os.path.join(tmp, "laundered")
+        try:
+            os.symlink(refused, link)
+        except OSError as e:
+            return Rule(rid, SKIP, f"cannot create a symlink to probe with ({e})")
+        try:
+            with open(link, "rb") as fh:
+                fh.read(1)
+        except OSError as e:
+            return Rule(rid, PASS, f"{refused} stays refused through a symlink ({e.__class__.__name__})")
+    return Rule(rid, FAIL, f"reading {refused} THROUGH a symlink succeeded — access laundered")
+
+
+def rule_boundary_dependency_substitution(ctx: Ctx) -> Rule:
+    """The quietest escape in drill 2's list: never touch the control plane directly, just
+    drop a module where the factory's own interpreter will import it. Any WRITABLE directory
+    on the import path is a full compromise of everything the factory later runs — no
+    permission on the blackboard required, because the factory opens it for you.
+
+    Checks the import path the factory actually resolves from (`python3 -m factory.*` runs
+    from FACTORY_ROOT's parent) plus PYTHONPATH, site-packages and the user site dir, and
+    flags an existing sitecustomize/usercustomize, which Python imports with no import
+    statement anywhere."""
+    rid = "boundary-dependency-substitution"
+    root = ctx.factory_root or ""
+    dirs = []
+    if root:
+        dirs += [os.path.dirname(root.rstrip("/")), root]
+    dirs += [p for p in (ctx.environ.get("PYTHONPATH", "").split(os.pathsep)) if p]
+    dirs += ctx.import_path_dirs_fn()
+    seen, writable, hooks = set(), [], []
+    for d in dirs:
+        d = os.path.abspath(d) if d else ""
+        if not d or d in seen or not os.path.isdir(d):
+            continue
+        seen.add(d)
+        if _writable(d):
+            writable.append(d)
+        for hook in ("sitecustomize.py", "usercustomize.py"):
+            p = os.path.join(d, hook)
+            if os.path.isfile(p):
+                hooks.append(p + (" (WRITABLE)" if _writable(p) else ""))
+    if not seen:
+        return Rule(rid, SKIP, "no import-path directory resolved (nothing proven)")
+    if writable or hooks:
+        detail = ""
+        if writable:
+            detail += ("writable on the factory's import path: " + ", ".join(writable[:6])
+                       + (f" (+{len(writable) - 6} more)" if len(writable) > 6 else ""))
+        if hooks:
+            detail += ("; " if detail else "") + "auto-imported hook present: " + ", ".join(hooks)
+        return Rule(rid, FAIL, detail + " — a module dropped here is imported by the factory itself")
+    return Rule(rid, PASS,
+                f"no writable directory on the factory's import path ({len(seen)} checked), "
+                f"no sitecustomize/usercustomize hook")
+
+
+def rule_boundary_host_writes(ctx: Ctx) -> Rule:
+    """Persistence and authority paths OUTSIDE the factory tree: the root-owned grading
+    wrapper (writable ⇒ the confinement is forgeable), machine- and other-user launchd
+    directories (writable ⇒ code that outlives the drill), the operator-owned bare repo the
+    deployment updates from, and the usual `/usr/local/bin` shim path."""
+    rid = "boundary-host-writes"
+    targets = list(ctx.host_write_paths)
+    targets.append(ctx.grader_wrapper_path)
+    for home in _other_user_homes(ctx):
+        targets.append(os.path.join(home, "Library", "LaunchAgents"))
+    checked, writable = 0, []
+    for path in targets:
+        if not path or not os.path.exists(path):
+            continue
+        checked += 1
+        if _writable(path):
+            writable.append(path)
+    if not checked:
+        return Rule(rid, SKIP, "none of the host paths exist on this machine (nothing proven)")
+    if writable:
+        return Rule(rid, FAIL, f"writable from here: {', '.join(writable)} "
+                               f"({checked} host path(s) checked)")
+    return Rule(rid, PASS, f"no host path is writable from here ({checked} checked)")
+
+
 BOUNDARY_RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
     ("boundary-blackboard", rule_boundary_blackboard),
     ("boundary-config", rule_boundary_config),
@@ -642,6 +1121,15 @@ BOUNDARY_RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
     ("boundary-factory-root", rule_boundary_factory_root),
     ("boundary-killswitch", rule_boundary_killswitch),
     ("boundary-dashboard-write", rule_boundary_dashboard_write),
+    # drill 2's remaining classes (2026-08-16)
+    ("boundary-network-egress", rule_boundary_network_egress),
+    ("boundary-credential-reach", rule_boundary_credential_reach),
+    ("boundary-keychain", rule_boundary_keychain),
+    ("boundary-other-homes", rule_boundary_other_homes),
+    ("boundary-process-escape", rule_boundary_process_escape),
+    ("boundary-symlink-escape", rule_boundary_symlink_escape),
+    ("boundary-dependency-substitution", rule_boundary_dependency_substitution),
+    ("boundary-host-writes", rule_boundary_host_writes),
 ]
 
 
@@ -649,6 +1137,41 @@ def audit_boundary(ctx: Optional[Ctx] = None) -> AuditResult:
     """Every boundary probe, with NO context gate — see the section comment."""
     ctx = ctx or Ctx()
     return AuditResult(rules=[fn(ctx) for _, fn in BOUNDARY_RULES], deployed=True)
+
+
+def boundary_banner(ctx: Optional[Ctx] = None) -> str:
+    """Who is probing, and what a FAIL here means. Without this the table is ambiguous in
+    the one way that matters: run AS THE GRADER, a FAIL is a broken boundary; run as the
+    identity that owns the tree (an operator checking the probes themselves), the FAILs are
+    the CORRECT answer — there is no boundary between you and your own files, and a probe
+    suite that reported PASS in that situation would be the broken thing."""
+    ctx = ctx or Ctx()
+    root = ctx.factory_root or "(unset)"
+    try:
+        owner_uid = os.stat(root).st_uid
+        try:
+            import pwd
+            owner = pwd.getpwuid(owner_uid).pw_name
+        except Exception:  # noqa: BLE001
+            owner = str(owner_uid)
+    except OSError:
+        owner = "(unknown)"
+    self_probe = owner in (ctx.username, "(unknown)")
+    lines = [
+        "BOUNDARY PROBES — polarity is INVERTED: PASS means \"I could NOT do this\".",
+        f"  probing as : {ctx.username}",
+        f"  FACTORY_ROOT: {root} (owned by {owner})",
+    ]
+    if self_probe:
+        lines.append(
+            "  NOTE: you are probing as the identity that OWNS the tree, so most rules "
+            "SHOULD fail — there is no boundary between an account and its own files. That "
+            "is the negative control, not a defect. For the real proof run this as the "
+            "grading identity: sudo -u factory-grader python3 scripts/guesthouse_check.py "
+            "--boundary")
+    else:
+        lines.append("  every rule must PASS; a FAIL is a reachable control-plane path.")
+    return "\n".join(lines)
 
 
 def audit(ctx: Optional[Ctx] = None) -> AuditResult:
@@ -702,7 +1225,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"deployed": result.deployed,
                            "rules": [r._asdict() for r in result.rules]}, indent=2))
     else:
-        if not result.deployed:
+        if args.boundary:
+            print(boundary_banner())
+            print()
+        elif not result.deployed:
             print(NON_GUEST_HOUSE_BANNER)
             print()
         print(render_table(result.rules))
