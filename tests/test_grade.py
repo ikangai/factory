@@ -201,3 +201,46 @@ def test_grade_fn_survives_being_called_from_a_worker_thread(tmp_path):
         result = ex.submit(gf, "/repo").result()             # runs in a DIFFERENT thread than `main`
     assert result["working"] == 1.0                          # no cross-thread SQLite error
     main.close()
+
+
+# ==========================================================================================
+# The one config combination that would quietly undo grading isolation (2026-08-16).
+# `grade_fn` runs the CANDIDATE's own program (grade -> run_smoke -> run_one ->
+# clive_invoke.run) through a plain subprocess.run, as the FACTORY user. It is a fifth
+# executor of candidate code and it is NOT on the common/target_exec.py seam. Arming
+# isolation with the real grade on would contain four executors and leave the fifth
+# uncontained — while the config, the design and the runbook all read as though isolation
+# were fully on. A containment control believed to be on is worse than one known to be off.
+# ==========================================================================================
+
+def _cfg(*, grader="", mode="stub"):
+    return {"super_worker": {"grader_user": grader}, "grade": {"mode": mode}}
+
+
+def test_predicate_true_only_for_armed_isolation_plus_the_real_grade():
+    assert grade.grade_escapes_isolation(_cfg(grader="factory-grader", mode="smoke")) is True
+    assert grade.grade_escapes_isolation(_cfg(grader="", mode="smoke")) is False
+    assert grade.grade_escapes_isolation(_cfg(grader="factory-grader", mode="stub")) is False
+    assert grade.grade_escapes_isolation(_cfg()) is False
+    assert grade.grade_escapes_isolation({}) is False
+
+
+def test_predicate_ignores_a_whitespace_only_grader_user():
+    """`grader_user: "  "` is not armed — target_exec.grader_user() strips, and a guard that
+    disagreed with the thing it guards would refuse a config that runs uncontained."""
+    assert grade.grade_escapes_isolation(_cfg(grader="   ", mode="smoke")) is False
+
+
+def test_build_grade_refuses_the_contradiction_instead_of_degrading_quietly():
+    """Refuse, never fall back to the stub: a silent degrade would leave the operator
+    believing both the behavioral grade and isolation were in effect."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError) as e:
+        grade.build_grade(None, cfg=_cfg(grader="factory-grader", mode="smoke"))
+    msg = str(e.value)
+    assert "grade.mode" in msg and "grader_user" in msg
+    assert "worker-isolation.md" in msg
+
+
+def test_build_grade_still_returns_the_stub_default_when_isolation_is_armed_alone():
+    assert grade.build_grade(None, cfg=_cfg(grader="factory-grader", mode="stub")) == (None, None)

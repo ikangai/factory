@@ -1,28 +1,43 @@
 # Worker isolation runbook — containing the code the factory runs
 
-> **STATUS 2026-08-10: DO NOT ARM.** An adversarial security review proved that arming
-> grading isolation, as currently built, is *worse* than leaving it off. Two independent
-> routes, both probe-demonstrated:
+> **STATUS 2026-08-16: ARMABLE FOR A DRILL, NOT YET PROVEN.** The two routes that made
+> arming *worse than leaving it off* are closed. What remains is unproven, which is a
+> different thing from unsafe — read all four points before arming anything.
 >
-> 1. **The export handover stamped ACLs through candidate symlinks.** `chmod -R +a` acts on
->    the target of every symlink it meets. A candidate commits `tests/x -> ~factory/
+> 1. **The export handover no longer walks the exported tree. CLOSED.** It used to apply
+>    `chmod -R +a "user:<grader> allow …"` across the export, and BSD `chmod -R` acts on the
+>    TARGET of every symlink it meets. A candidate commits `tests/x -> ~factory/
 >    .factory-secrets/env` (the frozen gate never covers `tests/`, and `require_test`
->    MANDATES files there) and the factory grants the grader read/write on the credentials
->    file, `add_file`/`delete_child` on FACTORY_ROOT — enough to unlink STOP or replace
->    `config.yaml` — and `list`/`search` on the 0700 home. The ACEs outlive the export.
->    The grant is now a **no-op**, so an armed grader cannot write its export and grading
->    fails loudly. That is the correct failure direction while the handover is redesigned
->    (the grader should materialize its own tree from a `git archive` stream rather than the
->    factory walking candidate-controlled paths and stamping permissions on what it finds).
-> 2. **`grade_fn` is a fifth executor of candidate code and is not on the seam.** It runs
->    the candidate's own program (`clive.py`) as the FACTORY user, in the export the grader
->    just had write access to, and `grade.mode: smoke` is live. It also defeats the frozen
->    gate, which validates the *diff* at step 1 while the grader can rewrite files on disk
->    at step 2.
+>    MANDATES files there) and the factory stamped the grader read/write onto its own
+>    credentials, `add_file`/`delete_child` on FACTORY_ROOT — enough to unlink STOP or
+>    replace `config.yaml` — and `list`/`search` on the 0700 home, with ACEs that outlived
+>    the export. Replaced by a stream handover: the factory creates ONE empty directory,
+>    sets the shared grading group and the setgid bit on it, and pipes `git archive` to the
+>    grader, which materializes its own tree inside it. One permission call, on one empty
+>    directory the factory just made, before any candidate content exists. The export also
+>    now carries no `.git` at all — no object store, no other candidates' branches, no route
+>    home (the old clone shipped all three).
+> 2. **`grade_fn` is still a fifth executor of candidate code and still not on the seam —
+>    now REFUSED rather than silent.** It runs the candidate's own program (`clive.py`) as
+>    the FACTORY user through a plain `subprocess.run`. `grade.mode: smoke` together with
+>    `super_worker.grader_user` now raises at rail startup with both knob names in the
+>    message, because containing four executors while believing you contain five is the same
+>    failure class as the ACL grant. **Arm isolation with `grade.mode: stub`** (the default —
+>    it executes no candidate code at all). Routing the grade path through the seam is open
+>    work: `sudo` strips the environment, so it needs an answer for the model credential the
+>    candidate program requires, and that is a design decision rather than an implementation
+>    detail.
+> 3. **Nothing here has been run end to end.** Step 4 of "Arming it" — one real candidate
+>    through `factory develop-once` with isolation armed — has never been done, and every
+>    test of this seam injects a fake runner and execs nothing. Treat a green suite as
+>    evidence about the code, not about the deployment.
+> 4. **Re-provision before arming.** Both halves changed: `deploy/user-factory/
+>    05-create-grader-user.sh` now creates the shared `factory-grade` group (and the wrapper
+>    gained its `--materialize` mode), so an installation from before 2026-08-16 will fail
+>    the handover. Re-run it; it is idempotent.
 >
 > The prerequisite in this branch — authenticating the board's write routes — **is** sound
-> and independently valuable. Everything below describes the intended end state; treat the
-> arming section as not-yet-available.
+> and independently valuable.
 
 
 Design: `docs/plans/2026-08-09-worker-isolation-design.md` (Phase 3 of the
@@ -78,14 +93,25 @@ from the address bar. Reads need no key.
    The grader needs **no `claude` install and no Claude login**. It only runs the target's
    test command.
 
+   Creates the shared **`factory-grade` group** too, with both identities in it. That group
+   is the whole handover: the factory creates an empty export directory, `chgrp`s it to the
+   group and sets `2770` (setgid), and the grader extracts `git archive` into it under
+   `umask 007` — so every file is grader-OWNED (it can write the caches grading needs) and
+   group-READABLE (the factory can still diff test files out of it, which the red-proof gate
+   needs), and unreadable to anyone else. Nothing walks a candidate-authored path.
+
 2. **Arm it** in the factory's own `config.yaml` (on the branch it actually runs):
    ```yaml
    super_worker:
      grader_user: "factory-grader"
+   grade:
+     mode: "stub"        # REQUIRED while grade_fn is off the seam — see the STATUS note
    ```
    Config-only and deliberately absent from `SETTINGS_SPEC`: a knob that decides whether
    untrusted code is contained must not be reachable from the board's settings route or
-   proposable by the self-harness loop.
+   proposable by the self-harness loop. `grade.mode: smoke` alongside it now raises at rail
+   startup rather than running the candidate's own program as the factory user while the
+   config reads as contained.
 
 3. **Prove it, as the grader** — this is the deliverable, not the config change:
    ```bash
@@ -406,5 +432,8 @@ To remove the machinery entirely: `sudo bash deploy/user-factory/05-create-grade
 |---|---|
 | Every candidate fails grading with `sudo: a password is required` | `grader_user` armed but `05-create-grader-user.sh` never ran. Deliberate: a missing grant must fail loudly, never fall back to running untrusted code as the factory user. |
 | `refusing cwd outside the export root` (exit 126) | The wrapper's confinement working. Check `super_worker.export_root` matches the root the provisioning script created. |
-| Grading fails with permission errors inside the export | The per-export ACL did not apply (a filesystem without ACL support). The grader must be able to write its own working tree — pytest caches into it. |
+| `cannot hand <dir> to the grading group 'factory-grade'` | The shared group is missing, or the factory user is not in it. Re-run `05-create-grader-user.sh` (it creates the group and adds both identities). Group membership changes need a fresh login session for the factory user's daemons to pick up. |
+| `export handover failed (wrapper rc=126 …)` | The wrapper refused the materialize: the target is outside `super_worker.export_root`, is not empty, or does not exist. All three are refusals by design — the export directory is created by the factory and filled exactly once. |
+| Grading fails with permission errors inside the export | The setgid bit or the group did not survive on the export directory (some filesystems drop setgid). The grader must be able to write its own working tree — pytest caches into it — and the factory must be able to read it back for the red-proof diff. |
+| Grading fails with `no such file or directory: .git` inside the export | An isolated export is a `git archive` of one ref: no history, no branches, no `.git`. A target whose test command needs git cannot be graded isolated — that is the trade for not shipping untrusted code the factory's whole object store. |
 | `--boundary` reports `nothing proven` | The path it probed does not exist. That is not containment, and is reported honestly rather than as a PASS. |

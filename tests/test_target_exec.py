@@ -339,3 +339,184 @@ def test_a_wrapper_refusal_is_not_a_test_result():
         assert status == "refused", "a refusal must be distinguishable from 'missing'"
         ok, rep = ad.run_tests("/anywhere")
         assert ok is False and "REFUSED" in rep
+
+
+# ==========================================================================================
+# The export handover, redesigned 2026-08-16. What it replaces: the factory ran
+# `chmod -R +a "user:<grader> allow …"` over the exported tree. BSD chmod -R acts on the
+# TARGET of every symlink it meets, and `require_test` MANDATES the worker ship files under
+# tests/, which the frozen gate never covers — so a committed `tests/x -> ~/.factory-secrets/
+# env` made the factory stamp a read/write ACE onto its own credentials, outliving the
+# export. Arming isolation was strictly worse than leaving it off.
+#
+# Now: the factory creates ONE empty directory and hands over a `git archive` STREAM; the
+# grader materializes its own tree inside it. Nothing walks candidate-controlled paths.
+# ==========================================================================================
+
+def _executable_source(module) -> str:
+    """The module's CODE, with every docstring dropped. The docstrings here deliberately
+    quote the mechanism that was removed, so a plain source grep would match the
+    explanation and never the regression."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", [])
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+def test_the_handover_never_walks_the_exported_tree():
+    """The property as a contract over the executable source: no ACL syntax, no recursive
+    permission call, no walk. This is the regression that would silently re-open the hole —
+    a helpful-looking `chmod -R` added back to 'fix' a permissions bug."""
+    code = _executable_source(target_exec)
+    assert "+a" not in code, "ACL syntax is what stamped the credentials file"
+    assert "chmod -R" not in code and "-R" not in code
+    assert "os.walk" not in code
+    assert "git archive" in code, "the handover is a stream, and that is the whole design"
+
+
+def test_prepare_export_unisolated_is_unchanged(tmp_path, monkeypatch):
+    """Phase 3 ships OFF: with no grader configured the handover must still be exactly
+    `adapter.export_tree`, byte for byte."""
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "")
+    calls = []
+
+    class _Ad(_Adapter):
+        def export_tree(self, src, dest, ref):
+            calls.append((src, dest, ref))
+            os.makedirs(dest, exist_ok=True)
+            return dest
+
+    dest = str(tmp_path / "export")
+    assert target_exec.prepare_export(_Ad(), "/src", dest, "main") == dest
+    assert calls == [("/src", dest, "main")]
+
+
+def test_isolated_handover_streams_an_archive_and_never_clones(tmp_path, monkeypatch):
+    """`git archive` rather than `git clone`: the grader gets the tree at one ref and no
+    `.git` at all — no object store, no other candidates' branches, no route home. The old
+    clone copied the factory's ENTIRE object store for the target and had to explicitly drop
+    the origin remote to be safe."""
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "grader")
+    monkeypatch.setattr(target_exec, "grader_wrapper", lambda: "/opt/factory/run-target-code")
+    monkeypatch.setattr(target_exec, "export_group", lambda: "staff")   # a group we're in
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        pipe = kw.get("stdin")
+        seen["had_stdin"] = pipe is not None
+        # Drain it like a real consumer would: leaving the pipe unread kills `git archive`
+        # with SIGPIPE, which the handover correctly treats as a failed handover.
+        seen["stream"] = pipe.read() if pipe is not None else b""
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    dest = str(tmp_path / "export")
+    src = str(tmp_path / "src")
+    _repo(src)
+    target_exec.materialize_as_grader(src, dest, "main", user="grader", runner=fake_run)
+    assert seen["cmd"][:4] == ["sudo", "-n", "-u", "grader"]
+    assert seen["cmd"][-2:] == ["--materialize", dest]
+    assert seen["had_stdin"], "the archive must arrive as a stream, not a path"
+    assert b"f.txt" in seen["stream"], "the stream must carry the tree"
+
+
+def test_isolated_handover_raises_when_the_wrapper_refuses(tmp_path):
+    """A failed handover has to be loud. Silently continuing would grade an EMPTY tree —
+    every candidate scoring zero, for a reason nothing reports."""
+    src = str(tmp_path / "src")
+    _repo(src)
+
+    def refusing(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 126, "", "run-target-code: refusing ...")
+
+    with pytest.raises(RuntimeError) as e:
+        target_exec.materialize_as_grader(src, str(tmp_path / "d"), "main",
+                                          user="grader", runner=refusing)
+    assert "126" in str(e.value)
+
+
+def test_isolated_handover_explains_a_missing_grading_group(tmp_path, monkeypatch):
+    """The one setup step that is easy to miss (05-create-grader-user.sh creates the group).
+    Failing with a raw chown error would send the operator looking in the wrong place."""
+    monkeypatch.setattr(target_exec, "grader_user", lambda: "grader")
+    monkeypatch.setattr(target_exec, "export_group", lambda: "no-such-group-xyz")
+    with pytest.raises(RuntimeError) as e:
+        target_exec.prepare_export(_Adapter(), "/src", str(tmp_path / "d"), "main")
+    assert "05-create-grader-user.sh" in str(e.value)
+
+
+@pytest.mark.skipif(not os.path.exists(WRAPPER), reason="wrapper not installed in-tree")
+def test_wrapper_materializes_a_stream_into_an_empty_export(tmp_path):
+    """End to end through the REAL wrapper (as this user, no sudo): a `git archive` stream
+    becomes a tree, and it carries no `.git`."""
+    root = tmp_path / "root"
+    dest = root / "exp"
+    dest.mkdir(parents=True)
+    src = str(tmp_path / "src")
+    _repo(src)
+    os.makedirs(os.path.join(src, "tests"))
+    with open(os.path.join(src, "tests", "t_x.py"), "w") as fh:
+        fh.write("def test_x(): pass\n")
+    subprocess.run(["git", "-C", src, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", src, "-c", "user.email=t@e.c", "-c", "user.name=t",
+                    "commit", "-qm", "tests"], check=True, capture_output=True)
+    env = {**os.environ, "FACTORY_EXPORT_ROOT": str(root)}
+    archive = subprocess.run(["git", "-C", src, "archive", "--format=tar", "main"],
+                             capture_output=True)
+    p = subprocess.run([WRAPPER, "--materialize", str(dest)], input=archive.stdout,
+                       capture_output=True, env=env)
+    assert p.returncode == 0, p.stderr
+    assert (dest / "f.txt").exists() and (dest / "tests" / "t_x.py").exists()
+    assert not (dest / ".git").exists(), "the grader must receive no git at all"
+
+
+@pytest.mark.skipif(not os.path.exists(WRAPPER), reason="wrapper not installed in-tree")
+def test_wrapper_refuses_to_materialize_outside_the_root_or_over_a_tree(tmp_path):
+    root = tmp_path / "root"
+    (root / "exp").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    env = {**os.environ, "FACTORY_EXPORT_ROOT": str(root)}
+
+    out = subprocess.run([WRAPPER, "--materialize", str(outside)], input=b"",
+                         capture_output=True, env=env)
+    assert out.returncode == 126 and b"outside the export root" in out.stderr
+
+    (root / "exp" / "already-here").write_text("x")
+    over = subprocess.run([WRAPPER, "--materialize", str(root / "exp")], input=b"",
+                          capture_output=True, env=env)
+    assert over.returncode == 126 and b"non-empty" in over.stderr
+
+    missing = subprocess.run([WRAPPER, "--materialize", str(root / "never-made")], input=b"",
+                             capture_output=True, env=env)
+    assert missing.returncode == 126 and b"does not exist" in missing.stderr
+
+
+@pytest.mark.skipif(not os.path.exists(WRAPPER), reason="wrapper not installed in-tree")
+def test_wrapper_materialize_refuses_a_path_traversing_stream(tmp_path):
+    """`git archive` cannot emit `..`, but the extraction must not depend on the producer
+    being honest — the stream is the one input the factory hands over verbatim."""
+    root = tmp_path / "root"
+    dest = root / "exp"
+    dest.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original")
+    staging = tmp_path / "staging"
+    (staging / "sub").mkdir(parents=True)
+    (staging / "sub" / "payload").write_text("owned")
+    evil = subprocess.run(["tar", "-cf", "-", "-C", str(staging), "sub/../../victim.txt"],
+                          capture_output=True, cwd=str(tmp_path))
+    if evil.returncode != 0:                       # bsdtar may refuse to CREATE it either
+        evil = subprocess.run(["tar", "-cf", "-", "-C", str(staging), "sub/payload"],
+                              capture_output=True)
+    env = {**os.environ, "FACTORY_EXPORT_ROOT": str(root)}
+    subprocess.run([WRAPPER, "--materialize", str(dest)], input=evil.stdout,
+                   capture_output=True, env=env)
+    assert victim.read_text() == "original", "extraction escaped the export directory"

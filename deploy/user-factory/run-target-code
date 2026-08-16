@@ -17,6 +17,22 @@
 #            than a containment boundary.
 #   argv   — the target's own test command, executed with cwd as the working directory.
 #
+#            run-target-code --materialize <dest>
+#   dest   — an EMPTY directory inside an allowed export root, which the factory has just
+#            created with the shared grading group and the setgid bit. Reads a tar stream
+#            (`git archive`) on stdin and extracts it AS THE GRADER, so every file in the
+#            export is owned by the identity that will run it.
+#
+# Why the extraction lives here (2026-08-16): the previous handover had the FACTORY walk the
+# exported tree applying `chmod -R +a` to grant the grader access. BSD chmod -R acts on the
+# TARGET of every symlink it meets, and a candidate is REQUIRED to ship files under tests/,
+# which the frozen gate never covers — so `tests/x -> ~/.factory-secrets/env` made the
+# factory stamp a read/write ACE onto its own credentials, and the ACE outlived the export.
+# Arming isolation was strictly worse than leaving it off. Nothing walks candidate-controlled
+# paths any more: the factory creates ONE empty directory and hands over a stream; the
+# grader materializes its own tree inside it. A symlink in that stream is just a symlink,
+# owned by an identity that cannot read anything worth pointing at.
+#
 # Exit codes are the command's own, so the caller's existing gate semantics are unchanged
 # (pytest 0/1/4/5 in particular). Refusals use 126 — distinct from any pytest code.
 set -euo pipefail
@@ -24,6 +40,40 @@ set -euo pipefail
 ALLOWED_ROOTS=("${FACTORY_EXPORT_ROOT:-/tmp/factory-grade}")
 
 die() { echo "run-target-code: $1" >&2; exit 126; }
+
+inside_a_root() {
+    # Resolves symlinks first: a symlinked path pointing at, say, the factory's home would
+    # otherwise pass a plain prefix test.
+    local real="$1" root real_root
+    for root in "${ALLOWED_ROOTS[@]}"; do
+        real_root="$(cd "$root" 2>/dev/null && pwd -P)" || continue
+        case "$real/" in
+            "$real_root"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+if [ "${1:-}" = "--materialize" ]; then
+    [ "$#" -eq 2 ] || die "usage: run-target-code --materialize <dest>   (tar stream on stdin)"
+    DEST="$2"
+    REAL_DEST="$(cd "$DEST" 2>/dev/null && pwd -P)" \
+        || die "materialize target does not exist (the factory creates it): $DEST"
+    inside_a_root "$REAL_DEST" || die "refusing to materialize outside the export root(s): $REAL_DEST"
+    [ -d "$REAL_DEST" ] || die "materialize target is not a directory: $REAL_DEST"
+    # Never extract over an existing tree: that is how one export would clobber another, and
+    # how a second stream could overwrite a tree already validated by whatever ran first.
+    [ -z "$(ls -A "$REAL_DEST" 2>/dev/null)" ] || die "refusing to materialize into a non-empty directory: $REAL_DEST"
+    # 007: the factory must be able to READ what the grader extracts (it diffs test files out
+    # of the export), and nobody outside the shared group may read it at all. The setgid bit
+    # the factory set on DEST is what puts the group on every extracted file.
+    umask 007
+    cd "$REAL_DEST"
+    # No -P: default bsdtar/GNU tar behavior REFUSES entries containing `..` and strips a
+    # leading `/`. `git archive` cannot emit either, but the extraction must not depend on
+    # the producer being honest.
+    exec tar -xf -
+fi
 
 [ "$#" -ge 2 ] || die "usage: run-target-code <cwd> <argv...>"
 CWD="$1"; shift
@@ -33,14 +83,7 @@ CWD="$1"; shift
 # containing it away from.
 REAL_CWD="$(cd "$CWD" 2>/dev/null && pwd -P)" || die "cwd does not exist: $CWD"
 
-allowed=false
-for root in "${ALLOWED_ROOTS[@]}"; do
-    REAL_ROOT="$(cd "$root" 2>/dev/null && pwd -P)" || continue
-    case "$REAL_CWD/" in
-        "$REAL_ROOT"/*) allowed=true; break ;;
-    esac
-done
-[ "$allowed" = true ] || die "refusing cwd outside the export root(s): $REAL_CWD"
+inside_a_root "$REAL_CWD" || die "refusing cwd outside the export root(s): $REAL_CWD"
 
 # No `exec env -i`: the target's test suite legitimately needs PATH and a HOME, and sudo
 # has already reset the environment to the grader's own. What matters is the IDENTITY this
