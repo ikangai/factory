@@ -1485,3 +1485,108 @@ def test_boundary_config_probe_derives_its_path(tmp_path):
     rule = gh.rule_boundary_config(gh.Ctx(factory_root=str(root)))
     assert "no path configured" not in rule.detail
     assert str(root / "config.yaml") in rule.detail
+
+
+# ==========================================================================================
+# The wrong-account audit (drill 2's perimeter run, 2026-08-16). `sudo -u factory` rewrites
+# USER/LOGNAME but NOT $HOME, so the doctor reported "'factory' is a standard user" in the
+# same table where home-dir-perms measured /Users/martintreiber — and passed, because the
+# operator's own home is well-formed. A green table certifying the wrong account is exactly
+# what the context gate exists to prevent, re-entering through the environment.
+# ==========================================================================================
+
+def test_home_comes_from_the_passwd_entry_not_from_env(monkeypatch, tmp_path):
+    real_home = tmp_path / "factory-home"
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setattr(gh, "_default_username", lambda: "factory")
+    monkeypatch.setattr(gh, "_account_home",
+                        lambda name: str(real_home) if name == "factory" else None)
+    assert gh._default_home() == str(real_home)
+    assert gh.Ctx().home == str(real_home)
+
+
+def test_home_falls_back_to_env_when_passwd_has_no_entry(monkeypatch, tmp_path):
+    """A container/WSL layout where the account isn't in the local passwd db must still
+    audit something rather than crash."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(gh, "_default_username", lambda: "nosuchuser")
+    monkeypatch.setattr(gh, "_account_home", lambda name: None)
+    assert gh._default_home() == str(tmp_path)
+
+
+def test_home_env_mismatch_names_the_sudo_cause():
+    ctx = gh.Ctx(username="factory", home="/Users/factory",
+                 environ={"HOME": "/Users/martintreiber"})
+    msg = gh.home_env_mismatch(ctx)
+    assert msg and "sudo" in msg and "-H" in msg
+    assert "/Users/factory" in msg and "/Users/martintreiber" in msg
+
+
+def test_home_env_mismatch_is_silent_when_they_agree():
+    ctx = gh.Ctx(username="factory", home="/Users/factory",
+                 environ={"HOME": "/Users/factory"})
+    assert gh.home_env_mismatch(ctx) is None
+
+
+def test_home_dir_perms_measures_the_audited_account(tmp_path, monkeypatch):
+    """The regression in one assertion: the rule must report on the account named in the
+    table, whatever the invoking shell's HOME says."""
+    audited = tmp_path / "factory"
+    audited.mkdir()
+    os.chmod(audited, 0o750)                       # the shape drill 2 found
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    monkeypatch.setattr(gh, "_default_username", lambda: "factory")
+    monkeypatch.setattr(gh, "_account_home", lambda name: str(audited))
+    rule = gh.rule_home_dir_perms(gh.Ctx())
+    assert rule.status == gh.FAIL and str(audited) in rule.detail
+
+
+def test_ssh_agent_half_is_not_answered_by_another_accounts_agent(tmp_path, monkeypatch):
+    """Same class as the $HOME leak: sudo carries SSH_AUTH_SOCK across, so `ssh-add -l`
+    would describe the invoking user's agent under the audited account's name."""
+    sock = tmp_path / "agent.sock"
+    sock.write_bytes(b"")
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "256 SHA256:xxx operator@mac (ED25519)\n", "")
+
+    monkeypatch.setattr(gh, "_account_uid", lambda name: os.getuid() + 1)   # not this uid
+    rule = gh.rule_no_ssh_access(gh.Ctx(username="factory", ssh_dir=str(ssh_dir),
+                                        environ={"SSH_AUTH_SOCK": str(sock)}, run=fake_run))
+    assert not calls, "must not ask an agent that belongs to another account"
+    assert rule.status == gh.SKIP and "agent check skipped" in rule.detail
+    assert "no private key material" in rule.detail    # the half that DID hold, stated
+
+
+def test_ssh_agent_half_still_runs_for_your_own_agent(tmp_path, monkeypatch):
+    sock = tmp_path / "agent.sock"
+    sock.write_bytes(b"")
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir()
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "256 SHA256:xxx me@mac (ED25519)\n", "")
+
+    monkeypatch.setattr(gh, "_account_uid", lambda name: os.getuid())
+    rule = gh.rule_no_ssh_access(gh.Ctx(username=getpass.getuser(), ssh_dir=str(ssh_dir),
+                                        environ={"SSH_AUTH_SOCK": str(sock)}, run=fake_run))
+    assert rule.status == gh.FAIL and "loaded identities" in rule.detail
+
+
+def test_json_output_names_the_account_it_audited(capsys, monkeypatch, tmp_path):
+    """Machine-readable consumers need to be able to catch a wrong-account audit too — the
+    account and home the run actually used are part of the result, not just the banner."""
+    monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+    monkeypatch.setattr(gh, "_default_username", lambda: "factory")
+    monkeypatch.setattr(gh, "_account_home", lambda name: str(tmp_path / "factory"))
+    (tmp_path / "factory").mkdir()
+    gh.main(["--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["auditing"] == "factory"
+    assert doc["home"] == str(tmp_path / "factory")
+    assert "sudo" in (doc["home_env_mismatch"] or "")

@@ -206,6 +206,16 @@ before it's called unattended-production-ready.
 Run any time: `python3 scripts/guesthouse_check.py` (add `--json` for machine-readable
 output). It never mutates anything — every rule only reads.
 
+**The account it audits is the account it says it audits — since 2026-08-16.** `sudo -u
+factory` rewrites `USER`/`LOGNAME` but not `$HOME`, and the doctor used to take its home
+from `$HOME`: it reported `standard-user PASS 'factory'` in the same table as
+`home-dir-perms PASS /Users/martintreiber`, and `credentials-hygiene SKIP … not present` for
+a PAT file that exists. It now resolves the audited account's home from the passwd database
+and prints a banner when `$HOME` disagrees (`--json` carries `auditing`, `home` and
+`home_env_mismatch`). The ssh-agent check had the same leak via `SSH_AUTH_SOCK` and now
+SKIPs, with the reason, rather than answering for another account's agent. Found by drill 2
+— see `docs/runbooks/worker-isolation.md` §Drill 2, "the doctor audited the wrong account".
+
 **Run it on the deployed account, not just on your own checkout.** Drill 2 found a real
 perimeter hole on a deployment nobody had ever pointed the doctor at (see
 `docs/runbooks/worker-isolation.md` §Drill 2, "Executed 2026-08-16" — the guest house's home

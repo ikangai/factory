@@ -157,6 +157,59 @@ def _default_username() -> str:
         return "unknown"
 
 
+def _account_home(username: str) -> Optional[str]:
+    """The home directory the PASSWD DATABASE gives for `username`, or None."""
+    try:
+        import pwd
+        return pwd.getpwnam(username).pw_dir
+    except (KeyError, ImportError, AttributeError, OSError):
+        return None
+
+
+def _account_uid(username: str) -> Optional[int]:
+    try:
+        import pwd
+        return pwd.getpwnam(username).pw_uid
+    except (KeyError, ImportError, AttributeError, OSError):
+        return None
+
+
+def _default_home() -> str:
+    """The home of the account being AUDITED, resolved from the passwd database — NOT from
+    `$HOME`.
+
+    Found by drill 2's perimeter run (2026-08-16), and it had defeated the doctor's entire
+    headline use: `sudo -u factory python3 …/guesthouse_check.py` leaves `$HOME` pointing at
+    the INVOKING user (sudo only rewrites HOME with `-H`, or with `always_set_home` in
+    sudoers, which macOS's default does not set) while rewriting `USER`/`LOGNAME` to the
+    target. So `standard-user` correctly said "'factory' is a standard user" in the same
+    table where `home-dir-perms` reported on `/Users/martintreiber` — and PASSed, because
+    the operator's own home is well-formed. `credentials-hygiene` SKIPped "not present" for
+    an env file that exists, under the audited account's real home, holding the PAT.
+
+    A green table certifying the wrong account is the exact failure the context gate was
+    built to prevent, re-entering through the environment instead of through the account
+    name. The passwd entry is the account's home by definition; `$HOME` is whatever the
+    calling shell happened to be carrying."""
+    name = _default_username()
+    return _account_home(name) or os.path.expanduser("~")
+
+
+def home_env_mismatch(ctx: "Ctx") -> Optional[str]:
+    """A one-line warning when `$HOME` disagrees with the audited account's real home — the
+    fingerprint of `sudo` without `-H`. The audit uses the passwd home regardless; this
+    exists so the operator can see WHY a table just changed under them."""
+    env_home = ctx.environ.get("HOME")
+    if not env_home or not ctx.home:
+        return None
+    if os.path.realpath(env_home) == os.path.realpath(ctx.home):
+        return None
+    return (f"NOTE: $HOME is {env_home} but {ctx.username}'s home is {ctx.home} — you are "
+            f"probably running under `sudo` without `-H`. The audit uses {ctx.home} (the "
+            f"passwd entry), which is the account's real home; before 2026-08-16 it followed "
+            f"$HOME and silently audited the invoking user's account instead.")
+
+
 def _default_factory_root() -> str:
     # scripts/guesthouse_check.py -> factory/
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -167,8 +220,12 @@ class Ctx:
     """Every external dependency a probe needs, with a real-world default. Tests override
     fields directly instead of monkeypatching os/subprocess globally."""
     platform_name: str = field(default_factory=platform.system)
-    username: str = field(default_factory=_default_username)
-    home: str = field(default_factory=lambda: os.path.expanduser("~"))
+    # Both default_factories go through a lambda so they resolve the module global at
+    # CALL time: a dataclass field binds the function object at class-definition time,
+    # which makes the identity these two derive from the one thing a test cannot
+    # substitute — in the module whose whole failure mode is auditing the wrong account.
+    username: str = field(default_factory=lambda: _default_username())
+    home: str = field(default_factory=lambda: _default_home())
     environ: Dict[str, str] = field(default_factory=lambda: dict(os.environ))
     run: Callable[..., "subprocess.CompletedProcess"] = subprocess.run
     is_posix: bool = field(default_factory=lambda: hasattr(os, "getuid"))
@@ -342,7 +399,24 @@ def rule_no_ssh_access(ctx: Ctx) -> Rule:
     rid = "no-ssh-access"
     problems: List[str] = []
 
-    if ctx.environ.get("SSH_AUTH_SOCK"):
+    sock = ctx.environ.get("SSH_AUTH_SOCK")
+    foreign_agent = ""
+    if sock:
+        # Same class as the $HOME leak (see `_default_home`): under `sudo -u factory` the
+        # agent socket still belongs to the INVOKING user, so `ssh-add -l` would answer for
+        # the operator's agent while the row claims to describe the guest house — in either
+        # direction (a false FAIL from the operator's keys, or a false PASS). Only skip when
+        # the socket demonstrably belongs to someone else; an unstattable path proves
+        # nothing and keeps the original behavior.
+        audited_uid = _account_uid(ctx.username)
+        try:
+            sock_uid = os.stat(sock).st_uid
+        except OSError:
+            sock_uid = None
+        if sock_uid is not None and audited_uid is not None and sock_uid != audited_uid:
+            foreign_agent = (f"agent check skipped: SSH_AUTH_SOCK belongs to uid {sock_uid}, "
+                             f"not {ctx.username} (uid {audited_uid})")
+    if sock and not foreign_agent:
         try:
             r = ctx.run(["ssh-add", "-l"], capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and (r.stdout or "").strip():
@@ -377,6 +451,12 @@ def rule_no_ssh_access(ctx: Ctx) -> Rule:
 
     if problems:
         return Rule(rid, FAIL, "; ".join(problems))
+    if foreign_agent:
+        # Half-answered is not a PASS: the key-file half held, the agent half was never
+        # asked. Say which, so nobody reads it as "no agent identities".
+        return Rule(rid, SKIP, f"no private key material under {ctx.ssh_dir}, but the "
+                               f"{foreign_agent} — rerun in a session owned by that account "
+                               f"for the agent half")
     return Rule(rid, PASS, "no loaded ssh-agent identities and no private key material found")
 
 
@@ -1220,13 +1300,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "itself is worse than no proof.")
     args = parser.parse_args(argv)
 
-    result = audit_boundary() if args.boundary else audit()
+    ctx = Ctx()
+    result = audit_boundary(ctx) if args.boundary else audit(ctx)
+    mismatch = home_env_mismatch(ctx)
     if args.json:
-        print(json.dumps({"deployed": result.deployed,
+        print(json.dumps({"deployed": result.deployed, "auditing": ctx.username,
+                           "home": ctx.home, "home_env_mismatch": mismatch,
                            "rules": [r._asdict() for r in result.rules]}, indent=2))
     else:
+        if mismatch:
+            print(mismatch)
+            print()
         if args.boundary:
-            print(boundary_banner())
+            print(boundary_banner(ctx))
             print()
         elif not result.deployed:
             print(NON_GUEST_HOUSE_BANNER)

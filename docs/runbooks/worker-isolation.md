@@ -218,7 +218,8 @@ currently **DO NOT ARM** (see this file's STATUS note).
 | `boundary-keychain` | SKIP — no other identity's keychain directory is even visible (their `~/Library` is 0700); consistent with containment, reported as "nothing proven" rather than a PASS |
 | `deployment-not-peer-readable`, evaluated against the deployed layout | **FAIL — the finding, below; fixed and re-verified the same day** |
 | the same rule against `/Users/agent` | PASS — no factory artifacts under that home |
-| in-identity runs as `factory` / `factory-grader` | **NOT RUN** — need `sudo`; the grader also needs isolation armed |
+| the account rules as `factory` (operator ran it) | **INVALID for three rules — see "the wrong account" below.** Valid and green: `standard-user`, `no-passwordless-sudo`, `no-docker-socket`, `runtime-read-only` (bare repo owned by uid 501, not this account, and proven non-writable), plus the checkout-scoped `brakes-engaged` (STOP present, mode=shift), `dashboard-localhost` (127.0.0.1) and `shared-drop-hygiene` |
+| `--boundary` as `factory` / anything as `factory-grader` | **NOT RUN** — the grader needs isolation armed |
 | the malicious candidate, end-to-end through a real shift | **NOT RUN** — same reason |
 
 **The finding: the deployed guest house is readable by any local account.**
@@ -269,6 +270,58 @@ A new rule, `deployment-not-peer-readable`, reports this class by consequence ra
 than by mode — it names the artifacts a peer can actually read, and checks traversal, so a
 0644 file under a 0700 ancestor is correctly not reported. `home-dir-perms` says the mode is
 wrong; this one says what that costs.
+
+**The second finding: the doctor audited the wrong account, and passed.**
+
+The perimeter run (`sudo -u factory python3 …/guesthouse_check.py`) came back `9 pass, 0
+fail, 2 skip`. Read the rows against each other:
+
+```
+standard-user        PASS  'factory' is a standard (non-admin) user
+home-dir-perms       PASS  /Users/martintreiber mode 0o700          ← not the factory's home
+credentials-hygiene  SKIP  /Users/martintreiber/.factory-secrets/env not present
+```
+
+`sudo` rewrites `USER`/`LOGNAME` to the target account but leaves `$HOME` pointing at the
+INVOKING user (it only rewrites HOME with `-H`, or with `always_set_home` in sudoers, which
+macOS's default does not set). The doctor took its username from the environment and its
+home from `os.path.expanduser("~")` — so it named the factory user in one column while
+measuring the operator's account in the other, and PASSed, because the operator's home is
+well-formed. `credentials-hygiene` reported "not present" for a PAT file that exists, under
+the audited account's real home. Three of the eleven rows were about the wrong account; the
+green table certified nothing about the guest house.
+
+This is the same failure the context gate was built to prevent — auditing the wrong account
+— re-entering through the environment instead of through the account name, which is why the
+gate did not catch it: `is_guest_house_context` short-circuits on `username == "factory"`
+and never noticed the home disagreed.
+
+Fixed: `Ctx.home` now resolves from the **passwd database** for the account being audited,
+never from `$HOME`, and a `$HOME` disagreement prints a banner naming `sudo` as the likely
+cause (the audit proceeds on the passwd home — the account's home by definition). `--json`
+gained `auditing`/`home`/`home_env_mismatch` so a machine-readable consumer can catch the
+same thing. The ssh-agent half of `no-ssh-access` had the identical leak — `SSH_AUTH_SOCK`
+also survives `sudo`, so `ssh-add -l` answered for the operator's agent — and now reports
+SKIP with the reason when the socket belongs to another uid, rather than passing on
+somebody else's agent.
+
+`sudo -H -u factory …` also works and is now redundant. What is NOT fixed by any of this:
+that run used the DEPLOYED copy of the doctor, which predates all of today's work — hence
+eleven rows and no `deployment-not-peer-readable`. To close the perimeter half of this
+drill, ship the current code to the deployment first:
+
+```bash
+# operator: publish to the bare repo the deployment pulls from
+git push /Users/Shared/factory.git main
+# then, as the factory user:
+sudo -u factory bash /Users/factory/fab/factory/deploy/user-factory/update.sh
+sudo -u factory python3 /Users/factory/fab/factory/scripts/guesthouse_check.py
+sudo -u factory python3 /Users/factory/fab/factory/scripts/guesthouse_check.py --boundary
+```
+
+(The operator's own checkout is no longer readable by the factory user — that is the first
+finding's fix working — so running the doctor from `~martintreiber/…` as `factory` is not an
+option, by design.)
 
 ## Turning it off
 
