@@ -216,7 +216,7 @@ currently **DO NOT ARM** (see this file's STATUS note).
 | `boundary-dashboard-write` | **PASS** — 403 on an unauthenticated write, i.e. the Phase 3 prerequisite (`dashboard/auth.py`) is live on the running board |
 | `boundary-process-escape` | **PASS** — no passwordless sudo, and no foreign-owned process is signalable from the operator account |
 | `boundary-keychain` | SKIP — no other identity's keychain directory is even visible (their `~/Library` is 0700); consistent with containment, reported as "nothing proven" rather than a PASS |
-| `deployment-not-peer-readable`, evaluated against the deployed layout | **FAIL — the finding, below** |
+| `deployment-not-peer-readable`, evaluated against the deployed layout | **FAIL — the finding, below; fixed and re-verified the same day** |
 | the same rule against `/Users/agent` | PASS — no factory artifacts under that home |
 | in-identity runs as `factory` / `factory-grader` | **NOT RUN** — need `sudo`; the grader also needs isolation armed |
 | the malicious candidate, end-to-end through a real shift | **NOT RUN** — same reason |
@@ -248,14 +248,24 @@ Cause: the account predates `install.sh --guest-house` (the wizard `chmod 700 ~`
 the older `deploy/user-factory/01-create-user.sh` path left the macOS default). The doctor's
 `home-dir-perms` rule would have caught it — on an account nobody had run the doctor on.
 
-Fix (operator, one command, then re-verify):
+**FIXED the same day, verified.** The operator ran `sudo chmod 700 /Users/factory`.
+Re-checked from an account that owns none of it, with no `sudo`:
 
-```bash
-sudo chmod 700 /Users/factory
-sudo -u factory python3 /Users/factory/fab/factory/scripts/guesthouse_check.py
+```
+/Users/factory   drwx------+  factory  staff
+open('/Users/factory/fab/factory/store/blackboard.db','rb')  →  [Errno 13] Permission denied
+head /Users/factory/fab/factory/config.yaml                  →  Permission denied
 ```
 
-A new rule, `deployment-not-peer-readable`, now reports this class by consequence rather
+`boundary-other-homes` now lists only `/Users/agent`; the deployment dropped out of the
+probe's own output. Note the second-order effect, which is the containment working rather
+than a regression: `deployment-not-peer-readable` evaluated from *another* account now
+reports `SKIP  no factory directory found`, because the tree is no longer traversable from
+outside. It is an account-scoped rule and from here on it can only be answered by the
+account it is about — `sudo -u factory python3 <factory>/scripts/guesthouse_check.py`,
+which is the run still owed for the perimeter half of this drill.
+
+A new rule, `deployment-not-peer-readable`, reports this class by consequence rather
 than by mode — it names the artifacts a peer can actually read, and checks traversal, so a
 0644 file under a 0700 ancestor is correctly not reported. `home-dir-perms` says the mode is
 wrong; this one says what that costs.
