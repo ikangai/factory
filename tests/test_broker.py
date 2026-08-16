@@ -13,6 +13,8 @@ import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from factory.common import harness_surface as hs
 from factory.common.frozen_source import _is_frozen
 from factory.orchestrator import broker
@@ -728,6 +730,54 @@ def test_run_once_interactive_decline_rejects_and_spends(tmp_path):
     assert live.split()[0] == base_sha             # nothing pushed
     assert envelope.list_outbox(str(outbox)) == []
     assert (processed / f"{env['nonce']}.json").exists()
+
+
+def test_run_once_no_operator_at_the_prompt_is_pending_never_a_decline(tmp_path):
+    """Drill 3 (2026-08-16): an interactive run-once in a context that cannot prompt a
+    human (no tty, or piped answers exhausted mid-queue) used to record "operator declined"
+    — spending the nonce forever and resolving the factory-side approval 'rejected' with an
+    audit note no operator ever made. Nobody-was-there must degrade to the same soft
+    'pending' outcome --unattended produces."""
+    rig = _rig(tmp_path)
+    remote_bare, _, _, base_sha, tip_sha, entry = rig
+    env = _env_for(rig)
+    outbox, receipts = tmp_path / "outbox", tmp_path / "receipts"
+    pins_path, spent_path = _authority_paths(tmp_path)
+    processed = tmp_path / "processed"
+    envelope.write_envelope(env, str(outbox))
+    allow_path = _allow_yaml(tmp_path, entry)
+
+    def no_operator(text):
+        raise broker.NoOperatorAvailable("stdin is not interactive")
+
+    results = broker.run_once(outbox_dir=str(outbox), receipts_dir=str(receipts),
+                              allowlist_path=allow_path, spent_path=spent_path,
+                              pins_path=pins_path, processed_dir=str(processed),
+                              unattended=False, confirm_fn=no_operator, runner=_Runner())
+    assert results[0]["nonce"] == env["nonce"] and results[0]["status"] == "pending"
+    assert "NOT declined" in results[0]["reason"]
+    assert envelope.read_receipt(str(receipts), env["nonce"]) is None   # no verdict recorded
+    assert broker.is_spent(spent_path, env["nonce"]) is False           # still retryable
+    assert envelope.list_outbox(str(outbox)) == [env["nonce"]]          # still queued
+    assert not (processed / f"{env['nonce']}.json").exists()            # not archived
+    assert broker.is_pinned(pins_path, tip_sha) is False
+    live = _git(["ls-remote", str(remote_bare), "refs/heads/base"], tmp_path)
+    assert live.split()[0] == base_sha                                  # nothing pushed
+
+
+def test_default_confirm_raises_no_operator_rather_than_answering_no(monkeypatch, capsys):
+    """The seam the test above depends on: EOF from `input()` (stdin closed / not a tty) is
+    "no human could answer", NOT the human answering no."""
+    def eof(*a, **k):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", eof)
+    with pytest.raises(broker.NoOperatorAvailable):
+        broker._default_confirm("the prompt")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+    assert broker._default_confirm("the prompt") is False     # a real 'n' still declines
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "y")
+    assert broker._default_confirm("the prompt") is True
 
 
 def test_run_once_pre_pinned_tip_needs_no_prompt_even_when_interactive(tmp_path):

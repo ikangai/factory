@@ -259,8 +259,11 @@ step 2 immediately):
 - [ ] `autonomy.publication_broker: true` AND `autonomy.push_approval: true` are BOTH set
       on the branch the factory actually runs — verified by hand (see step 4's note: the
       code does not yet refuse the contradictory combination for you).
-- [ ] The drill-3 procedure (below) has been run at least once, for real, on this
-      deployment.
+- [ ] `python3 scripts/drill3_rehearse.py --dir /tmp/drill3` (the drill-3 procedure below)
+      has been run on THIS machine and reported every step green. It rehearses against a
+      throwaway stand-in deployment, so it is safe to run whenever you like — and it proves
+      the code and policy, never this deployment's credential split, which is what the
+      three checklist items above it are for.
 - [ ] You have personally run `factory broker run-once` interactively at least once and
       confirmed the diff shown matches what you expected — not just that the flow works.
 
@@ -300,11 +303,14 @@ envelope:
   broker ever got to it (e.g. your machine was asleep). Distinct status from `rejected` so
   it's easy to tell "the operator wasn't around in time" from "something was wrong".
 - **`pending`** (not a receipt status — no receipt is written for it) — the envelope
-  verified clean on destination/liveness but its `tip_sha` isn't pinned and the run was
-  `--unattended`. Left untouched in `outbox/`, NOT marked spent: a later
-  `factory broker pin <sha>` followed by any later run (interactive or unattended) can
-  still complete it. This is the ONLY outcome that doesn't finalize — everything else is
-  permanent.
+  verified clean on destination/liveness but its `tip_sha` isn't pinned, and either the run
+  was `--unattended` **or** there was no operator to ask (stdin is not a terminal, or piped
+  answers ran out mid-queue — `NoOperatorAvailable`, drill 3's own finding, fixed
+  2026-08-16: before that, "nobody was there" was recorded as `rejected`/"operator
+  declined", spending the nonce and writing an audit line no operator ever made). Left
+  untouched in `outbox/`, NOT marked spent: a later `factory broker pin <sha>` followed by
+  any later run (interactive or unattended) can still complete it. This is the ONLY outcome
+  that doesn't finalize — everything else is permanent.
 
 **A nonce that reaches ANY terminal outcome is spent forever**, authoritatively via
 `~/.factory-broker/spent` (operator-owned, append-only) — `orchestrator/broker.py:
@@ -329,48 +335,134 @@ different: it is NOT dead — pin the tip and rerun.
 ## Drill-3 procedure
 
 Drill 3 (`docs/plans/2026-08-06-production-hardening-roadmap.md` Part 5): *change the
-branch/candidate after approval — execution rejected.* The code-level proof lives in
-`tests/test_broker.py` (`test_verify_rejects_base_moved_since_approval`,
-`test_verify_rejects_tampered_envelope`, `test_verify_rejects_a_spent_nonce_replay`,
-`test_deleting_the_spool_receipt_does_not_unspend_the_nonce`,
-`test_verify_rejects_when_filename_nonce_differs_from_content_nonce`,
-`test_verify_rejects_an_expired_envelope`,
-`test_critical1_unpinned_malicious_tip_never_reaches_the_real_remote`, and
-`test_verify_happy_path_with_a_pin_is_ok`) — real local git repos, no mocks, exercised on
-every test run. To rehearse it live, against your own real deployment (`--unattended`
-throughout, since that's the production posture — do each step, then move to the next
-WITHOUT pinning unless the step says to):
+branch/candidate after approval — execution rejected.*
 
-1. **Base moved.** Approve a graduation (broker armed). BEFORE running
-   `factory broker run-once --unattended`, push any other commit directly to the real
-   remote's base branch (from anywhere else with access). Run it — expect a `rejected`
-   receipt citing "base moved"; confirm the intruding commit is untouched on the remote
-   (nothing force-pushed over it).
-2. **Tamper.** Find the pending envelope under `outbox/`, hand-edit a field in the `.json`
-   (leave the `.sha256` sidecar alone). Run `run-once --unattended` — expect `rejected`,
-   "content hash mismatch".
-3. **Unpinned (the content-authenticity check, the round-2 addition).** Approve a fresh
-   graduation, do NOT pin it. Run `run-once --unattended` — expect status `pending` (no
-   receipt written), the envelope still sitting in `outbox/`, and the real remote
-   UNCHANGED. This is the check CRITICAL-1 exists for.
-4. **Replayed nonce.** Pin the tip from step 3 (`factory broker pin <sha>`), run
-   `run-once --unattended` again — expect `pushed`. Now manually re-drop the SAME
-   envelope+hash files back into `outbox/` (they were archived to
-   `~/.factory-broker/processed/` — copy them back). Run `run-once --unattended` again —
-   expect `rejected`, "already spent". Then delete the receipt copy in `receipts/` and
-   run once more — still `rejected`, "already spent" (the ledger, not the receipt file,
-   is authority).
-5. **Expiry.** Approve a graduation, then don't run the broker until
-   `autonomy.envelope_ttl_hours` has passed (or temporarily set it very low for the
-   drill). Run `run-once --unattended` — expect an `expired` receipt.
-6. **Happy path.** Approve a graduation with nothing else changed; run
-   `factory broker run-once` BY HAND (interactive, no `--unattended`); read the
-   operator-derived diff it shows you; confirm; verify `pushed`, the real remote now has
-   the new tip, the tip now appears in `factory broker pins`, and
-   `factory broker-receipts` resolves the approval to `approved`.
+**There are two boundaries, not one, and they fail differently:**
 
-Record the outcome of each step (pass/fail + evidence) in this file's revision history or
-your own ops log before marking the drill complete for a given deployment.
+| | in force when | refuses with |
+|---|---|---|
+| **factory-side consent gate** — `reporting/approvals.py: execute_approval` | ALWAYS, armed or not. The only one in force at `publication_broker: false` | `preview-stale`: the card pins range + commit count + BOTH endpoint shas; approving re-derives under the repo lock and refuses when any moved |
+| **operator-side broker** — `orchestrator/broker.py: verify_envelope` | armed only | `rejected`/`expired`/`pending`: allowlist authorizes the destination, live `ls-remote` the base, the pin store the CONTENT, the spent ledger kills replays |
+
+An unarmed deployment still gets drill 3's guarantee, from the first row alone. Both rows
+are drilled together below.
+
+### Rehearse it on a throwaway deployment — never on production
+
+```bash
+python3 scripts/drill3_rehearse.py --dir /tmp/drill3            # both halves, ~5s
+python3 scripts/drill3_rehearse.py --dir /tmp/drill3 --half broker
+```
+
+Nineteen steps, each printing PASS/FAIL with its own evidence, plus `results.json`; exit
+non-zero if any guard behaved differently than the authority line requires. It builds a
+complete stand-in deployment under `--dir`: the "remote" is a local bare repo, the
+allowlist/pins/spent-ledger are throwaway files, and `FACTORY_BROKER_*` points every path
+inside it. `tests/test_drill3_rehearse.py` runs the whole thing on every test run, so the
+drill cannot rot into a script nobody executes.
+
+**The earlier version of this procedure told you to push a commit directly to the real
+remote's base branch (to trip the base-moved check) and then to publish for real (the happy
+path).** Both test a guard by performing, on production, the act the guard exists to
+prevent — the shape this repo's standing rule forbids: never probe a boundary with
+something that acts on success (the rule exists because an early boundary probe cleared the
+live killswitch; drill 4's refusal steps needed the same correction). Nothing drilled here
+needs the real remote: every check is a property of the code plus your own
+allowlist/pins/ledger. The harness additionally sets `allow_issue_ops: false`, writes no
+issue actions, and routes the factory half's git through a runner that refuses `gh`, so no
+step can reach GitHub even if a guard failed outright.
+
+What the rehearsal therefore does NOT prove — these are deployment properties, and the
+"Verification checklist" above is where they're checked: that the credential is really
+split (factory cannot push, you can), that `~/.factory-broker/` is unreadable from the
+factory account, and that both sides resolve the same spool.
+
+### What each step drills
+
+*Factory half — the candidate/base changed after the card was approved:*
+
+1. an extra commit on `factory/auto` after approval → `preview-stale`, nothing pushed, the
+   card's payload refreshed in place and the row returned to `pending` for a re-decision;
+2. an **amend** — identical commit count, different content (the case a count-only check
+   was blind to before the endpoint shas joined the compare) → `preview-stale`;
+3. the base moved under the card (an upstream push) → `preview-stale`, the upstream commit
+   untouched;
+4. the same swap with the **broker armed** → refused BEFORE the prepare step: no envelope
+   is written, nothing is pushed to the local bare, there is nothing for an operator to be
+   asked about later;
+5. the positive control — nothing changed, the push lands. Without it the four refusals
+   above prove only that it refuses.
+
+*Broker half — the envelope changed after the operator pinned the content:*
+
+6. base moved between approval and execution (the live `ls-remote` re-verification);
+7. the envelope hand-edited, sidecar left alone → content-hash mismatch;
+8. the **branch** swapped — and the envelope even supplies its own `remote_url`/`bare_path`
+   to be sure they are ignored (destination comes from the allowlist, never the envelope);
+9. the **repository** swapped to one that was never allowlisted;
+10. the **content** swapped for something structurally perfect but unreviewed — correct
+    live base, fresh nonce, own recomputed hash, a genuine fast-forward. Destination +
+    liveness checks alone would have published this; only the pin gate stops it, and it
+    stops it as `pending`, not as a failure;
+11. a pinned tip that would rewrite rather than extend the base (never a force push);
+12. filename nonce desynchronized from the envelope's own nonce (replay-guard identity);
+13. expiry;
+14. an interactive run with **no tty** — the queue survives it, unspent (see below);
+15. the positive control — the operator reads the operator-*derived* diff (with the
+    envelope's deliberately false `n_commits: 99` claim shown as unverified) and confirms;
+16. + 17. the same envelope re-dropped into the outbox — rejected as spent, and still
+    rejected after deleting the receipt copy in `receipts/` (the operator-owned ledger is
+    the authority, not the factory-writable receipt);
+18. the envelope declined at the prompt is terminal — spent, archived, never pinned.
+
+### Two things about interactive runs, learned by running this
+
+- **An interactive `run-once` walks the WHOLE outbox, oldest first, and prompts per
+  envelope.** A deferred (`pending`, unpinned) envelope is therefore prompt #1 the next
+  time you run interactively — ahead of the publication you actually sat down to approve.
+  The first execution of this drill piped a bare `y` into a queue of two and published the
+  candidate nobody had reviewed. Read the nonce and the derived diff in each prompt; run
+  `factory broker status` first if you want to know what's queued.
+- **Answer per prompt, or pass `--unattended`.** With no tty (a script, a cron entry, ssh
+  with stdin closed) the run now leaves everything `pending` rather than declining it —
+  but before 2026-08-16 it recorded every queued envelope as "operator declined", spent
+  forever.
+
+Record the outcome (pass/fail + evidence) below, or in your own ops log, before marking the
+drill complete for a given deployment.
+
+### Executed 2026-08-16 — 19/19, one defect found and fixed
+
+Run on the operator's dev checkout (single-user layout) via
+`scripts/drill3_rehearse.py --dir <scratch>`; the harness itself was written by running the
+procedure by hand first. Both halves as tabulated above, all nineteen steps behaving as the
+authority line requires. Highlights worth keeping:
+
+| check | result |
+|---|---|
+| factory half, candidate advanced / amended / base moved | `preview-stale` each time; the local remote never moved; the row returned to `pending` with its payload refreshed to reality |
+| factory half, armed + swapped | refused before `graduate_and_prepare_envelope` was ever called — `prepare never called: True`, no outbox directory created at all |
+| broker half, base moved | `base moved: envelope pinned 6a4303466, live main is a199c2c87`; the intruding commit intact (nothing force-pushed over it) |
+| broker half, branch/repo swapped | `no allowlist entry for …/'release'` and `…'ikangai/clive'/'main'`; the envelope's own `remote_url`/`bare_path` were ignored; no `refs/heads/release` was ever created |
+| broker half, unreviewed-but-perfect candidate | `pending` — unspent, unarchived, remote untouched. This is the one destination+liveness checks alone would have published |
+| broker half, force-push shape | `95f2bcaf3 is not a fast-forward of a199c2c87` even though the tip WAS pinned |
+| broker half, replay | `nonce already spent` twice — the second time with the spool receipt deleted |
+| positive controls | both halves published exactly the approved tip; the interactive prompt showed the diff derived from the bare repo and labeled the envelope's `n_commits: 99` claim as unverified |
+
+**Defect found (fixed, `cf8663f`).** An interactive `run-once` with no tty — a script, a
+cron entry, ssh with stdin closed — read the `EOFError` from `input()` as the operator
+answering no. That is terminal: nonce spent forever, envelope archived, and once the
+receipt is ingested the factory-side approval resolves `rejected` with the note "operator
+declined" — an audit statement no operator ever made, in the one subsystem whose entire
+purpose is binding publications to decisions humans actually made. Recoverable (re-approving
+prepares a fresh envelope), but the audit trail lied. `watch()` already refuses to run
+without `--unattended` for exactly this reason; the same reasoning now applies one level
+down. EOF raises `NoOperatorAvailable` and degrades to the soft `pending` outcome; an
+explicit `n` still declines terminally. Found because the drill harness's own first run
+piped a single `y` into a queue of two envelopes and the second one was declined by EOF.
+
+Not fixed, recorded instead: the queue-order hazard above. It is inherent to a per-envelope
+prompt loop, and the prompt does identify its envelope; the fix is the operator reading it.
 
 ## Teardown
 
