@@ -21,6 +21,7 @@ FUSER="${FACTORY_USER:-factory}"
 WRAPPER_DEST="/opt/factory/run-target-code"
 SUDOERS="/etc/sudoers.d/factory-grader"
 EXPORT_ROOT="${FACTORY_EXPORT_ROOT:-/tmp/factory-grade}"
+EGROUP="${FACTORY_EXPORT_GROUP:-factory-grade}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "${1:-}" = "--uninstall" ]; then
@@ -38,9 +39,9 @@ id "$FUSER" >/dev/null 2>&1 || { echo "ERROR: factory user '$FUSER' does not exi
 
 # --- 1. the account ----------------------------------------------------------------------
 if id "$GUSER" >/dev/null 2>&1; then
-    echo "[1/5] user '$GUSER' already exists — skipping"
+    echo "[1/6] user '$GUSER' already exists — skipping"
 else
-    echo "[1/5] creating '$GUSER' (Standard, no admin, no login needed) ..."
+    echo "[1/6] creating '$GUSER' (Standard, no admin, no login needed) ..."
     # No -admin: this account exists to be powerless. A random password it never uses —
     # nobody logs in as the grader; the factory reaches it only through the pinned sudo rule.
     sysadminctl -addUser "$GUSER" -fullName "Factory Grader" -home "$GHOME" \
@@ -51,14 +52,14 @@ fi
 chmod 700 "$GHOME" 2>/dev/null || true
 
 # --- 2. the wrapper: the ONLY thing the grant allows -------------------------------------
-echo "[2/5] installing the wrapper at $WRAPPER_DEST ..."
+echo "[2/6] installing the wrapper at $WRAPPER_DEST ..."
 install -d -m 755 -o root -g wheel /opt/factory
 install -m 755 -o root -g wheel "$HERE/run-target-code" "$WRAPPER_DEST"
 # root-owned and not writable by the factory user ON PURPOSE: if the caller could edit the
 # wrapper, the pinned grant would be worthless — it would run whatever the caller wrote.
 
 # --- 3. the grant: user-to-user, never root ----------------------------------------------
-echo "[3/5] writing $SUDOERS ..."
+echo "[3/6] writing $SUDOERS ..."
 TMP_SUDO="$(mktemp)"
 cat > "$TMP_SUDO" <<EOF
 # Factory grading isolation (Phase 3). The factory user may run ONE command as the
@@ -71,14 +72,40 @@ visudo -cf "$TMP_SUDO" >/dev/null || { echo "ERROR: refusing to install a sudoer
 install -m 440 -o root -g wheel "$TMP_SUDO" "$SUDOERS"
 rm -f "$TMP_SUDO"
 
-# --- 4. the export root ------------------------------------------------------------------
-echo "[4/5] export root $EXPORT_ROOT ..."
-install -d -m 711 -o "$FUSER" "$EXPORT_ROOT"
-# 711 = traverse-only: the grader enters its OWN export (granted per-export by an ACL the
-# factory applies) and cannot list what else is being graded.
+# --- 4. the shared grading group ----------------------------------------------------------
+# How the factory and the grader share ONE export tree without anybody stamping permissions
+# on candidate-controlled paths (2026-08-16 redesign; see run-target-code's own header for
+# the ACL-through-symlink route this replaced):
+#
+#   factory creates an EMPTY dir, chgrp's it to this group, sets 2770 (setgid)
+#   -> grader extracts `git archive` into it, umask 007
+#   -> every file is grader-OWNED (it can write its caches) and group-READABLE (the factory
+#      can diff test files out of it), and nothing outside the group can read any of it.
+#
+# One chmod, on one empty directory the factory just created. No -R, no ACLs, and no walk
+# of anything a candidate authored.
+echo "[4/6] shared grading group '$EGROUP' ..."
+if dseditgroup -o read "$EGROUP" >/dev/null 2>&1; then
+    echo "  group '$EGROUP' already exists — ensuring both members"
+else
+    dseditgroup -o create -r "Factory grading handover" "$EGROUP"
+fi
+for member in "$FUSER" "$GUSER"; do
+    dseditgroup -o edit -a "$member" -t user "$EGROUP" 2>/dev/null || true
+    dseditgroup -o checkmember -m "$member" "$EGROUP" >/dev/null 2>&1 \
+        || { echo "ERROR: could not add '$member' to '$EGROUP' — the handover needs both." >&2; exit 1; }
+done
+echo "  members: $FUSER (creates the empty export), $GUSER (materializes into it)"
 
-# --- 5. verify ---------------------------------------------------------------------------
-echo "[5/5] verifying the grant ..."
+# --- 5. the export root ------------------------------------------------------------------
+echo "[5/6] export root $EXPORT_ROOT ..."
+install -d -m 711 -o "$FUSER" "$EXPORT_ROOT"
+# 711 = traverse-only: the grader enters its OWN export and cannot list what else is being
+# graded. The per-export directories inside it carry the group; the root itself does not
+# need to.
+
+# --- 6. verify ---------------------------------------------------------------------------
+echo "[6/6] verifying the grant ..."
 if sudo -n -u "$GUSER" "$WRAPPER_DEST" "$EXPORT_ROOT" /usr/bin/true 2>/dev/null; then
     echo "  OK: '$FUSER' can run the wrapper as '$GUSER' without a password"
 else
@@ -98,7 +125,7 @@ cat <<EOF
 
  THEN PROVE IT, as the grader — every rule must report it could NOT reach
  the control plane (docs/runbooks/worker-isolation.md):
-   sudo -u $GUSER python3 <factory>/scripts/guesthouse_check.py --boundary
+   sudo -u $GUSER -i python3 <factory>/scripts/guesthouse_check.py --boundary
 
  Isolation stays OFF until grader_user is set. Turning it on without this
  script installed makes every grading run fail loudly (no sudo grant) —

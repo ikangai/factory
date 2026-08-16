@@ -114,6 +114,29 @@ def make_real_grade_fn(store=None, *, scenario_ids: list[str], spec_path: str, m
 _DEFAULT_SMOKE = ["gate-demo", "hard-invoice-sum"]
 
 
+def grade_escapes_isolation(cfg: dict) -> bool:
+    """True for the ONE combination that would quietly undo grading isolation:
+    `grade.mode: smoke` while `super_worker.grader_user` is armed.
+
+    `grade_fn` runs the CANDIDATE's own program (`grade → run_smoke → run_one →
+    clive_invoke.run`) through a plain `subprocess.run`, as the factory user, in a tree the
+    grader also has. It is a fifth executor of candidate code and it is NOT on the
+    `common/target_exec.py` seam — a fact that docstring has carried since 2026-08-10, when a
+    review found the broader "every execution is isolated" claim stated in three places and
+    false in all three.
+
+    Arming isolation with the real grade on would therefore contain four executors and leave
+    the fifth running candidate code as the factory user — while the runbook, the design and
+    the config all read as though isolation were on. A containment control that is believed
+    to be on is worse than one known to be off, which is the same lesson the ACL handover
+    taught. Refuse the combination until the grade path is routed through the seam (which
+    needs an answer for the model credential `sudo` strips, and that answer is a design
+    decision, not an implementation detail)."""
+    sw = (cfg.get("super_worker") or {})
+    grade_mode = str(((cfg.get("grade") or {}).get("mode") or "stub")).lower()
+    return bool(str(sw.get("grader_user") or "").strip()) and grade_mode == "smoke"
+
+
 def build_grade(store, *, cfg: Optional[dict] = None,
                 run_one_fn: Optional[Callable] = None,
                 store_factory: Optional[Callable] = None) -> tuple[Optional[Callable], Optional[dict]]:
@@ -121,10 +144,23 @@ def build_grade(store, *, cfg: Optional[dict] = None,
     (DEFAULT) → `(None, None)`, so `develop_task` keeps the `_smoke_grade` default — the real
     grade is OFF unless opted in. 'smoke' → the inline behavioral grade closure PLUS a champion
     baseline measured ONCE (the current champion source), so `working_delta` is a real
-    champion-vs-candidate diff instead of the vacuous 0-vs-0. `run_one_fn` injectable for tests."""
+    champion-vs-candidate diff instead of the vacuous 0-vs-0. `run_one_fn` injectable for tests.
+
+    Refuses outright — never silently degrades to the stub — when the config asks for the real
+    grade AND grading isolation at once; see `grade_escapes_isolation`. Falling back quietly
+    would leave the operator believing both were in effect, which is the failure this guard
+    exists to prevent."""
     from ..common import config, paths
     cfg = cfg if cfg is not None else config.load_config()
     gcfg = (cfg.get("grade") or {})
+    if grade_escapes_isolation(cfg):
+        raise ValueError(
+            "contradictory config: grade.mode='smoke' runs the candidate's own program as "
+            "the FACTORY user (grade_fn is not on the target_exec seam), while "
+            "super_worker.grader_user is armed to contain exactly that kind of execution. "
+            "Pick one: set grade.mode='stub' to keep isolation meaningful, or clear "
+            "super_worker.grader_user to keep the behavioral grade. See "
+            "docs/runbooks/worker-isolation.md.")
     if str(gcfg.get("mode") or "stub").lower() != "smoke":
         return None, None
     scenario_ids = gcfg.get("smoke_scenarios") or _DEFAULT_SMOKE

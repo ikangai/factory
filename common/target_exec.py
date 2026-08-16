@@ -148,42 +148,101 @@ def remove_export(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)   # sweeps the factory-owned parent either way
 
 
-def grant_grader_access(path: str) -> None:
-    """DISABLED 2026-08-10 — this mechanism made ARMING isolation strictly worse than
-    leaving it off, which is the worst outcome a security control can have.
+def export_group() -> str:
+    """The POSIX group both identities belong to (`deploy/user-factory/05-create-grader-
+    user.sh` creates it and adds both). It is what lets ONE export tree be grader-owned and
+    factory-readable without anybody stamping permissions on candidate-controlled paths."""
+    from . import config
+    sw = config.load_config().get("super_worker", {}) or {}
+    return str(sw.get("export_group") or "factory-grade").strip()
 
-    It applied `chmod -R +a "user:<grader> allow …"` across the export. BSD `chmod -R` does
-    not descend THROUGH a symlink, but it does act on the TARGET of every symlink it meets.
-    A candidate commits a symlink under `tests/` — never covered by the frozen gate, and
-    `require_test` MANDATES the worker ship files there — and the factory then writes an
-    inheriting read/write ACE onto whatever it points at. Proven by probe:
 
-        tests/fixture_env  -> ~/.factory-secrets/env   => grader gains read,write
-        tests/fixture_dir  -> FACTORY_ROOT             => grader gains add_file,delete_child
+def materialize_as_grader(src_repo: str, dest: str, ref: str, *,
+                          user: str, runner=None) -> None:
+    """Hand `ref` to the grader as a STREAM, and let the grader build its own tree.
+
+    Replaces (2026-08-10 .. 2026-08-16) a `chmod -R +a "user:<grader> allow …"` walk of the
+    exported tree. BSD `chmod -R` does not descend THROUGH a symlink, but it does act on the
+    TARGET of every symlink it meets — and a candidate is REQUIRED to ship files under
+    `tests/`, which the frozen gate never covers. Probed, all three:
+
+        tests/fixture_env  -> ~/.factory-secrets/env   => grader gained read,write
+        tests/fixture_dir  -> FACTORY_ROOT             => grader gained add_file,delete_child
                                                           (i.e. unlink STOP, replace config)
-        tests/fixture_home -> the 0700 home            => grader gains list,search
+        tests/fixture_home -> the 0700 home            => grader gained list,search
 
-    The ACEs also SURVIVE the export's deletion — `remove_export` removes the tree, not the
-    ACLs it stamped elsewhere. Bounded only by "everything the factory user owns", which is
-    precisely the control plane.
+    The ACEs outlived the export, too: `remove_export` deletes a tree, not permissions
+    stamped elsewhere. Arming isolation was strictly worse than leaving it off — the worst
+    outcome a security control can have.
 
-    Leaving it as a no-op keeps grading isolation OFF-by-default and safe; the export
-    handover has to be redesigned so the grader materializes its own tree (a `git archive`
-    stream extracted under the grader's own identity) instead of the factory walking
-    candidate-controlled paths and stamping permissions on what it finds. Until that lands,
-    an armed grader cannot write its export and grading fails LOUDLY — which is the correct
-    failure direction, and far better than the alternative this function created."""
-    return
+    What happens instead, and why each piece:
+
+      1. the factory creates ONE empty directory (`dest`), sets its group to the shared
+         grading group and its mode to 2770. The setgid bit makes every file created inside
+         inherit that group. This is the only permission operation in the handover, it
+         happens BEFORE any candidate content exists, and it touches exactly one path the
+         factory itself just made — there is nothing here for a symlink to redirect;
+      2. `git archive <ref>` streams the tree — not a clone. The grader receives no `.git`
+         at all: no object store, no other branches, no refs, no route home. (The old clone
+         copied the factory's ENTIRE object store for the target, including every other
+         candidate's work, and had to explicitly `remote remove origin` to drop the route
+         back — a mitigation the stream makes unnecessary.);
+      3. the grader extracts it through the pinned wrapper under `umask 007`, so every file
+         is grader-OWNED (it can write pytest caches, which grading needs) and group-
+         readable (the factory can still diff test files out of the export, which the
+         red-proof gate needs), and unreadable to anyone else.
+
+    Never raises: like `run_target_code`, a failure here has to surface as a red gate rather
+    than an exception escaping into the rail. Raises nothing, returns nothing — the caller
+    checks the tree."""
+    import subprocess as _sp
+    runner = runner or _sp.run
+    archive = _sp.Popen(["git", "-C", src_repo, "archive", "--format=tar", ref],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE)
+    try:
+        p = runner(["sudo", "-n", "-u", user, "--", grader_wrapper(), "--materialize", dest],
+                   stdin=archive.stdout, capture_output=True, text=True, timeout=300)
+    finally:
+        if archive.stdout:
+            archive.stdout.close()      # let `git archive` see EPIPE if the wrapper died
+        archive.wait(timeout=60)
+    rc = getattr(p, "returncode", 1)
+    if rc != 0 or archive.returncode != 0:
+        detail = (getattr(p, "stderr", "") or "")[:400]
+        raise RuntimeError(
+            f"export handover failed (wrapper rc={rc}, git archive rc={archive.returncode}): "
+            f"{detail}")
 
 
 def prepare_export(adapter, src_repo: str, dest: str, ref: str) -> str:
-    """Export `ref` out of `src_repo` into `dest` and hand it to the grader.
+    """Export `ref` out of `src_repo` into `dest` for whoever will run it.
 
     One call so the two halves cannot drift apart: an export nobody can enter fails every
-    grading run, and an export granted without being detached would hand the grader a
-    linked worktree into the factory's own git (Component C)."""
-    adapter.export_tree(src_repo, dest, ref)
-    grant_grader_access(dest)
+    grading run, and an export handed over without being detached would give the grader a
+    linked worktree into the factory's own git (Component C).
+
+    Isolation OFF (the default) keeps `adapter.export_tree` byte for byte — Phase 3 ships
+    off, and the unisolated path must not change under it. Isolation ON takes the stream
+    handover above, which differs in one visible way worth knowing before arming: the export
+    has no `.git`. A target whose test command needs git history cannot be graded isolated;
+    that is a deliberate trade, and the alternative (shipping untrusted code the factory's
+    whole object store) is what it is traded against."""
+    user = grader_user()
+    if not user:
+        adapter.export_tree(src_repo, dest, ref)
+        return dest
+    import os
+    import shutil
+    os.makedirs(dest, exist_ok=True)
+    try:
+        shutil.chown(dest, group=export_group())
+        os.chmod(dest, 0o2770)          # setgid: everything the grader extracts joins the group
+    except (OSError, LookupError) as e:
+        raise RuntimeError(
+            f"cannot hand {dest} to the grading group {export_group()!r} ({e}) — run "
+            f"deploy/user-factory/05-create-grader-user.sh, which creates the group and adds "
+            f"both identities to it") from e
+    materialize_as_grader(src_repo, dest, ref, user=user)
     return dest
 
 
@@ -203,12 +262,18 @@ def new_export(adapter, src_repo: str, ref: str, *, prefix: str = "cf-export-") 
     armed the candidate export was refused (every candidate discarded) and the red-proof
     export was refused *silently* (rc 126 -> 'missing' -> gate satisfied). The location and
     the confinement have to come from the same place or they drift apart."""
+    import os
     import tempfile
     dest = tempfile.mkdtemp(prefix=prefix, dir=export_root())
-    # mkdtemp is 0700; the grader must be able to traverse in.
-    try:
-        import os
-        os.chmod(dest, 0o755)
-    except OSError:
-        pass
+    if not grader_user():
+        # Unisolated: unchanged. 0700 mkdtemp would be fine for the factory alone, but the
+        # historical mode is kept so turning isolation off is byte-identical to before.
+        try:
+            os.chmod(dest, 0o755)
+        except OSError:
+            pass
+        return prepare_export(adapter, src_repo, dest, ref)
+    # Isolated: the wrapper refuses to materialize into a non-empty directory, and mkdtemp
+    # has already made an EMPTY one inside the confined root — which is exactly what the
+    # handover wants: the factory owns the container, the grader owns the contents.
     return prepare_export(adapter, src_repo, dest, ref)
