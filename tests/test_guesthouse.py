@@ -1938,3 +1938,23 @@ def test_credential_reach_names_the_host_not_the_token_source(tmp_path):
     assert rule.status == gh.FAIL
     assert "github.com" in rule.detail
     assert "GH_TOKEN" not in rule.detail
+
+
+def test_the_row_names_each_board_by_origin_not_by_the_assumed_route(monkeypatch):
+    """The live run printed "…:9787/api/settings: /api/promote: refused …" — the label
+    naming the route that 404s on precisely the board that does not serve it, which is the
+    confusion the fall-through was added to remove. The path is per-board now, so only the
+    detail may carry one."""
+    monkeypatch.setattr(gh, "_probe_write_route",
+                        lambda url: (gh.PASS, "/api/promote: refused unauthenticated write (403)"))
+    rule = gh.rule_boundary_dashboard_write(
+        gh.Ctx(dashboard_settings_url="http://127.0.0.1:9787/api/settings",
+               extra_dashboard_urls=()))
+    assert rule.status == gh.PASS
+    assert "http://127.0.0.1:9787: /api/promote" in rule.detail
+    assert "9787/api/settings" not in rule.detail
+
+
+def test_origin_leaves_an_unparseable_label_alone():
+    assert gh._origin("http://127.0.0.1:9788/api/settings") == "http://127.0.0.1:9788"
+    assert gh._origin("not-a-url") == "not-a-url"

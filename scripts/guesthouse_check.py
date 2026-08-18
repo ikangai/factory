@@ -947,7 +947,13 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
             if u]
     if not urls:
         return Rule(rid, SKIP, "no dashboard URL configured")
-    verdicts = [(url, _probe_write_route(url)) for url in urls]
+    # Label each board by its ORIGIN, not by the URL's path: the probe now decides which
+    # route to use per board, and the detail carries the one that actually answered. Keeping
+    # the assumed path in the label printed
+    #   "…:9787/api/settings: /api/promote: refused …"
+    # — naming the route that 404s on exactly the board that does not serve it, which is the
+    # confusion this rule was just fixed to remove.
+    verdicts = [(_origin(url), _probe_write_route(url)) for url in urls]
     bad = [f"{u}: {d}" for u, (s, d) in verdicts if s == FAIL]
     if bad:
         return Rule(rid, FAIL, "; ".join(bad))
@@ -967,6 +973,12 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
 #                    BEFORE it opens the Blackboard, so no promotion can occur.
 # Anything added here must be checked the same way: reaching validation must not mutate.
 _WRITE_ROUTES = ("/api/settings", "/api/promote")
+
+
+def _origin(url: str) -> str:
+    """scheme://host:port — how a board is named in output, since the path is now per-board."""
+    p = urllib.parse.urlparse(url)
+    return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else url
 
 
 def _probe_write_route(url: str) -> Tuple[str, str]:
