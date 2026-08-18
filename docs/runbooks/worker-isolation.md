@@ -90,6 +90,11 @@ from the address bar. Reads need no key.
    `/etc/sudoers.d/factory-grader` granting the factory user exactly one command as exactly
    one other user — **no root, no `chown`**; creates the traverse-only export root.
 
+   It also installs a copy of the doctor at `/opt/factory/guesthouse_check.py`, for step 3:
+   a correctly-configured guest house has a 0700 home, so the grader cannot read
+   `<factory>/scripts/guesthouse_check.py` at all. Root-owned and world-readable (this code
+   is public), refreshed by every re-run — the same lifecycle as the wrapper beside it.
+
    The grader needs **no `claude` install and no Claude login**. It only runs the target's
    test command.
 
@@ -115,8 +120,15 @@ from the address bar. Reads need no key.
 
 3. **Prove it, as the grader** — this is the deliverable, not the config change:
    ```bash
-   sudo -u factory-grader -i python3 <factory>/scripts/guesthouse_check.py --boundary
+   sudo -u factory-grader -i python3 /opt/factory/guesthouse_check.py \
+        --boundary --factory-root <factory>
    ```
+   Note which copy: the root-installed one, because the grader cannot read the guest
+   house's 0700 home — so it must also be **told** which deployment to ask about. The
+   probes need that root's PATH, never read access to it; being refused *is* the result
+   they are looking for. (`$FACTORY_ROOT` works too, but `sudo -i` scrubs the environment,
+   so pass the flag.)
+
    Polarity is inverted: **PASS means "I could not do this"**. Every rule must pass. The
    probes bypass the account-scoped context gate on purpose — that gate only recognizes the
    `factory` account, so boundary rules run as another identity would skip themselves and
@@ -170,8 +182,11 @@ Two of those deserve their reasoning stated:
 ### Running it, per identity
 
 ```bash
-# 1. the grading identity — the Phase 3 interior boundary (needs isolation armed)
-sudo -u factory-grader -i python3 <factory>/scripts/guesthouse_check.py --boundary
+# 1. the grading identity — the Phase 3 interior boundary (needs isolation armed).
+#    The root-installed COPY, and --factory-root: the grader cannot read the 0700 home the
+#    original lives in, which is the containment it is here to measure.
+sudo -u factory-grader -i python3 /opt/factory/guesthouse_check.py \
+     --boundary --factory-root <factory>
 
 # 2. the guest-house account — the Phase 0 perimeter (can the factory reach the operator?)
 sudo -u factory -i python3 <factory>/scripts/guesthouse_check.py --boundary
@@ -400,6 +415,53 @@ banner's distinction:
   the probe now accepts a directory (via `listdir`) and reports `/Users/factory stays
   refused through a symlink (PermissionError)`.
 
+### Preparing the grader run — two more defects, and why the run had never happened
+
+The grader half of this drill (`--boundary` as `factory-grader`) is listed as still owed.
+Attempting to type it found two reasons it could not have been run, both consequences of
+the *same* 0700 home the first finding installed:
+
+- **The doctor was on the wrong side of the boundary.** Step 3 said to run
+  `<factory>/scripts/guesthouse_check.py` as the grader — a file inside a home the grader
+  cannot enter, by design. Until 2026-08-16 that step "worked" only because the home was
+  group-readable, which was itself the finding drill 2 opened with; closing the hole broke
+  the instruction that proves the hole is closed. `05-create-grader-user.sh` now installs a
+  root-owned, world-readable copy at `/opt/factory/guesthouse_check.py`, beside the wrapper
+  and with the same lifecycle, and the doctor takes `--factory-root` so the copy can be
+  told which deployment to ask about (its own path would answer `/opt`). The probes need
+  that root's PATH, never read access to it.
+
+- **`refused` and `absent` were the same answer, and it was the wrong one.**
+  `os.path.exists()` returns False both for "there is no such file" and for "you may not
+  look". Five control-plane probes pre-checked it, so measured from a *correctly contained*
+  identity they reported:
+
+  ```
+  boundary-blackboard    FAIL  …/store/blackboard.db does not exist (nothing proven)
+  boundary-config        FAIL  …/config.yaml does not exist (nothing proven)
+  boundary-secrets       FAIL  …/.factory-secrets/env does not exist (nothing proven)
+  boundary-factory-root  SKIP  … not present
+  boundary-killswitch    SKIP  STOP not present — engage it, then re-run this probe
+  ```
+
+  Every row is false, and the last one would have sent an operator to arm a brake that was
+  already armed and merely invisible from that account. `--boundary`'s contract is *every
+  rule must pass*, so the deliverable was unsatisfiable: **the tighter the containment, the
+  redder the table.** That is the symlink-anchor defect one more time — a probe reporting
+  its most negative verdict exactly where the boundary is strongest — and it is the third
+  instance in this drill, which makes it the pattern to look for rather than a one-off.
+
+  Fixed with a `_reachability()` classifier that separates the two via `os.stat` (ENOENT
+  only when the parent could actually be read): refused is containment and PASSes, absent
+  still proves nothing and never PASSes. `boundary-dependency-substitution` had a quieter
+  version — unreachable directories dropped out of its tally, so a contained grader was
+  told "N checked" by a probe that had silently skipped `FACTORY_ROOT` and its parent, the
+  two entries the rule exists for; they are now counted and named as unreachable.
+
+  Regression tests stand the fixture's own directory at `chmod 000` (which denies its
+  owner too, so a non-root test can stand in for another identity) and assert all three
+  readings: contained → PASS, tree-owner → FAIL, genuinely absent → nothing proven.
+
 **Use `-i`.** Without it, the first of those commands dies before the script's first line:
 
 ```
@@ -424,7 +486,8 @@ Takes effect at the next shift; nothing else changes. Isolation OFF is byte-iden
 the behavior before this phase — the same worktree, the same direct execution.
 
 To remove the machinery entirely: `sudo bash deploy/user-factory/05-create-grader-user.sh
---uninstall` (drops the grant and the wrapper; leaves the account for you to delete).
+--uninstall` (drops the grant, the wrapper and the doctor copy; leaves the account for you
+to delete).
 
 ## Failure modes and what they look like
 
@@ -437,3 +500,5 @@ To remove the machinery entirely: `sudo bash deploy/user-factory/05-create-grade
 | Grading fails with permission errors inside the export | The setgid bit or the group did not survive on the export directory (some filesystems drop setgid). The grader must be able to write its own working tree — pytest caches into it — and the factory must be able to read it back for the red-proof diff. |
 | Grading fails with `no such file or directory: .git` inside the export | An isolated export is a `git archive` of one ref: no history, no branches, no `.git`. A target whose test command needs git cannot be graded isolated — that is the trade for not shipping untrusted code the factory's whole object store. |
 | `--boundary` reports `nothing proven` | The path it probed does not exist. That is not containment, and is reported honestly rather than as a PASS. |
+| The grader run dies with `can't open file '<factory>/scripts/guesthouse_check.py': Permission denied` | Containment working, not a fault: the guest house's home is 0700 and the grader is not the guest house. Run the root-installed copy — `/opt/factory/guesthouse_check.py --boundary --factory-root <factory>`. |
+| The grader's `--boundary` table is full of `nothing proven` / `no factory directory` rows | The doctor derived its factory root from its own path — `/opt` — because `--factory-root` was omitted. The probes need the deployment's PATH; a table that proves nothing is not a pass. |

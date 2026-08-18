@@ -46,6 +46,8 @@ INSTALL_PS1 = paths.factory("install.ps1")
 README = paths.factory("README.md")
 GUESTHOUSE_CHECK = paths.factory("scripts", "guesthouse_check.py")
 RUNBOOK = paths.factory("docs", "runbooks", "guest-house.md")
+ISOLATION_RUNBOOK = paths.factory("docs", "runbooks", "worker-isolation.md")
+GRADER_SETUP = paths.factory("deploy", "user-factory", "05-create-grader-user.sh")
 
 
 def _read(path: str) -> str:
@@ -1656,3 +1658,165 @@ def test_symlink_probe_can_anchor_on_a_refused_directory(tmp_path, monkeypatch):
         assert rule.status == gh.PASS and str(other) in rule.detail
     finally:
         os.chmod(other, 0o700)
+
+
+# ==========================================================================================
+# The grader's own run — refused is not absent (2026-08-17)
+#
+# The Phase 3 deliverable is `--boundary` executed AS THE GRADING IDENTITY, and it had never
+# been run. It could not have passed: `os.path.exists()` answers False both for "no such
+# file" and for "you may not look", so on a CORRECTLY contained deployment (0700 guest-house
+# home — the thing drill 2 fixed) the five control-plane probes reported 3 FAIL + 2 SKIP.
+# Tighter containment produced a redder table, which is the symlink-anchor defect again.
+# ==========================================================================================
+
+@pytest.fixture
+def contained_deployment(tmp_path):
+    """A guest house this identity cannot enter, then handed back so tmp_path can be torn
+    down. `chmod 000` on a directory denies its own owner too (POSIX; root excepted), which
+    is how a non-root test stands in for another identity — same trick as the symlink-anchor
+    test above."""
+    home = tmp_path / "Users" / "factory"
+    root = home / "fab" / "factory"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "blackboard.db").write_text("x")
+    (root / "config.yaml").write_text("dashboard: {}\n")
+    (root / "STOP").write_text("halt")
+    (home / ".factory-secrets").mkdir()
+    (home / ".factory-secrets" / "env").write_text("GH_TOKEN=x\n")
+    os.chmod(home, 0o000)
+    try:
+        yield root, home
+    finally:
+        os.chmod(home, 0o700)
+
+
+def _contained_ctx(root, home, **kw):
+    return gh.Ctx(factory_root=str(root),
+                  env_file_path=str(home / ".factory-secrets" / "env"),
+                  config_path=str(root / "config.yaml"), **kw)
+
+
+@pytest.mark.parametrize("rid", ["boundary-blackboard", "boundary-config", "boundary-secrets",
+                                  "boundary-factory-root", "boundary-killswitch"])
+def test_contained_deployment_reads_as_contained_to_the_grader(contained_deployment, rid):
+    """The regression that made the Phase 3 proof unrunnable: every one of these reported
+    FAIL/SKIP on a deployment whose containment was perfect."""
+    root, home = contained_deployment
+    rule = dict(gh.BOUNDARY_RULES)[rid](_contained_ctx(root, home))
+    assert rule.status == gh.PASS, f"{rid}: {rule.detail}"
+    assert "permission denied" in rule.detail
+    assert "nothing proven" not in rule.detail
+
+
+def test_refusal_and_absence_are_told_apart(tmp_path):
+    """The distinction the whole fix rests on. Both are `os.path.exists() == False`."""
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    (closed / "secret").write_text("x")
+    os.chmod(closed, 0o000)
+    try:
+        assert not os.path.exists(closed / "secret"), "premise: exists() hides the refusal"
+        assert gh._reachability(str(closed / "secret"))[0] == gh.REFUSED
+        assert gh._cannot_read(str(closed / "secret"))[0] is True
+    finally:
+        os.chmod(closed, 0o700)
+    assert gh._reachability(str(tmp_path / "no-such-file"))[0] == gh.ABSENT
+    assert gh._cannot_read(str(tmp_path / "no-such-file"))[0] is False
+    assert gh._reachability(str(closed / "secret"))[0] == gh.PRESENT
+
+
+def test_an_absent_path_is_still_never_a_pass(tmp_path):
+    """The other half of the invariant: the fix must not turn "nothing there" into proof.
+    Guards the same property `test_boundary_reports_honestly_when_a_path_is_simply_absent`
+    holds for secrets, across the rules that gained the refused/absent split."""
+    missing = tmp_path / "nope"
+    ctx = gh.Ctx(factory_root=str(missing), env_file_path=str(missing / "env"),
+                 config_path=str(missing / "config.yaml"))
+    assert gh.rule_boundary_blackboard(ctx).status == gh.FAIL
+    root = gh.rule_boundary_factory_root(ctx)
+    assert root.status == gh.SKIP and "nothing proven" in root.detail
+    assert gh.rule_boundary_killswitch(ctx).status == gh.SKIP
+
+
+def test_killswitch_probe_still_reports_a_reachable_brake(tmp_path):
+    """The negative control for the new PASS branch: where the directory IS writable the
+    verdict must stay FAIL — a refusal is the only thing that earns the pass."""
+    root = tmp_path / "factory"
+    root.mkdir()
+    (root / "STOP").write_text("halt")
+    rule = gh.rule_boundary_killswitch(gh.Ctx(factory_root=str(root)))
+    assert rule.status == gh.FAIL
+    assert (root / "STOP").exists()
+
+
+def test_dependency_substitution_says_what_it_could_not_reach(contained_deployment):
+    """It silently dropped unreachable directories, so a contained grader was told "N
+    checked" by a probe that had skipped FACTORY_ROOT and its parent — the two entries the
+    rule exists for. Unreachable is the right verdict; being counted as checked is not."""
+    root, home = contained_deployment
+    rule = gh.rule_boundary_dependency_substitution(
+        _contained_ctx(root, home, import_path_dirs_fn=lambda: [], environ={}))
+    assert rule.status == gh.PASS
+    assert "unreachable from here" in rule.detail
+    assert str(root) in rule.detail
+
+
+def test_boundary_run_as_the_tree_owner_still_fails(contained_deployment):
+    """The negative control the runbook insists on: run as the identity that OWNS the tree,
+    the FAILs are the correct answer. A suite that passed here would be measuring nothing."""
+    root, home = contained_deployment
+    os.chmod(home, 0o700)                       # the owner's view of the same tree
+    ctx = _contained_ctx(root, home)
+    for rid in ("boundary-blackboard", "boundary-config", "boundary-secrets",
+                "boundary-factory-root", "boundary-killswitch"):
+        assert dict(gh.BOUNDARY_RULES)[rid](ctx).status == gh.FAIL, rid
+
+
+# --- telling the doctor WHICH deployment to ask about ------------------------------------
+def test_factory_root_flag_overrides_the_path_this_file_lives_in(tmp_path):
+    assert gh.Ctx(factory_root=str(tmp_path)).factory_root == str(tmp_path)
+
+
+def test_factory_root_falls_back_to_the_env_then_to_this_tree(monkeypatch, tmp_path):
+    """A COPY of the doctor (root-installed at /opt/factory) would otherwise derive `/opt`
+    as the deployment under test."""
+    monkeypatch.setenv("FACTORY_ROOT", str(tmp_path))
+    assert gh.Ctx().factory_root == str(tmp_path)
+    monkeypatch.delenv("FACTORY_ROOT")
+    assert gh.Ctx().factory_root == os.path.dirname(os.path.dirname(GUESTHOUSE_CHECK))
+
+
+def test_main_accepts_factory_root_and_none_means_no_override(capsys, tmp_path):
+    gh.main(["--boundary", "--json", "--factory-root", str(tmp_path)])
+    assert json.loads(capsys.readouterr().out)["rules"]
+
+
+# --- the doctor has to BE on the grader's side of the boundary ----------------------------
+def test_grader_setup_installs_and_removes_a_readable_copy_of_the_doctor():
+    """The grader cannot read <factory>/scripts/guesthouse_check.py — that is the 0700 home
+    working. Without a root-installed copy the runbook's step 3 cannot be typed at all."""
+    text = _read(GRADER_SETUP)
+    assert 'DOCTOR_DEST="/opt/factory/guesthouse_check.py"' in text
+    assert 'DOCTOR_SRC="$HERE/../../scripts/guesthouse_check.py"' in text
+    assert 'install -m 755 -o root -g wheel "$DOCTOR_SRC" "$DOCTOR_DEST"' in text
+    # A missing source must be said out loud: the grant still installs, but step 3 — the
+    # deliverable — becomes untypeable, and fails as a bare "Permission denied".
+    assert "WARNING: $DOCTOR_SRC not found" in text
+    uninstall = text.split('if [ "${1:-}" = "--uninstall" ]; then', 1)[1].split("fi\n", 1)[0]
+    assert "$DOCTOR_DEST" in uninstall, "--uninstall must not leave a stale doctor behind"
+
+
+def test_grader_setup_syntax_valid():
+    r = subprocess.run(["bash", "-n", GRADER_SETUP], capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+
+
+def test_isolation_runbook_prescribes_the_runnable_command():
+    """Every grader-identity invocation must name the installed copy AND pass
+    --factory-root; the old form (`<factory>/scripts/…`) is unreadable to that account."""
+    text = _read(ISOLATION_RUNBOOK)
+    for line in text.splitlines():
+        if "sudo -u factory-grader" in line and "guesthouse_check" in line:
+            assert "/opt/factory/guesthouse_check.py" in line, line
+    assert "--boundary --factory-root <factory>" in text
