@@ -1218,7 +1218,12 @@ def test_boundary_audit_has_no_context_gate():
     """The account-scoped gate recognizes only the `factory` account, so boundary rules run
     as a different identity would SKIP themselves and exit 0 — a proof that passes by not
     running."""
-    result = gh.audit_boundary(gh.Ctx(factory_root="/nonexistent-xyz"))
+    # Stubbed sockets: the assertion is about the RULE SET, and the live version POSTed to
+    # whatever board happened to be listening on this host (two routes per board since
+    # 2026-08-17). A test should not depend on — or knock on — a running deployment.
+    result = gh.audit_boundary(gh.Ctx(factory_root="/nonexistent-xyz",
+                                       dashboard_settings_url="", extra_dashboard_urls=(),
+                                       tcp_probe_fn=lambda t: (False, "stubbed")))
     assert result.deployed is True
     assert len(result.rules) == len(gh.BOUNDARY_RULES)
     assert not any(r.detail == gh._CONTEXT_GATED_DETAIL for r in result.rules)
@@ -1788,7 +1793,12 @@ def test_factory_root_falls_back_to_the_env_then_to_this_tree(monkeypatch, tmp_p
 
 
 def test_main_accepts_factory_root_and_none_means_no_override(capsys, tmp_path):
-    gh.main(["--boundary", "--json", "--factory-root", str(tmp_path)])
+    """The account audit, not --boundary: the boundary path opens real sockets (egress plus
+    every board route), which is seconds of wall clock and a live dependency for a test
+    about argument plumbing."""
+    gh.main(["--json", "--factory-root", str(tmp_path)])
+    assert json.loads(capsys.readouterr().out)["rules"]
+    gh.main(["--json"])
     assert json.loads(capsys.readouterr().out)["rules"]
 
 
@@ -1820,3 +1830,111 @@ def test_isolation_runbook_prescribes_the_runnable_command():
         if "sudo -u factory-grader" in line and "guesthouse_check" in line:
             assert "/opt/factory/guesthouse_check.py" in line, line
     assert "--boundary --factory-root <factory>" in text
+
+
+# ==========================================================================================
+# Probing the board that is actually there (2026-08-17, found on the live deployment)
+#
+# The two boards serve DIFFERENT write routes: `fleet_server` owns /api/settings, while
+# `dashboard/server.py` has exactly one write action, /api/promote. The probe knew only the
+# first, so the deployment's own board answered 404, was written off as "route not present",
+# and its real write channel went unasked — while the row read PASS off the other board.
+# ==========================================================================================
+
+class _FakeHTTPError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def _fake_urlopen(status_by_path):
+    """Stand in for urllib.request.urlopen, keyed by the path actually requested."""
+    seen = []
+
+    def opener(req, timeout=None):
+        path = req.full_url.split("://", 1)[1].split("/", 1)[1]
+        seen.append("/" + path)
+        code = status_by_path.get("/" + path, 404)
+        if code == 200:
+            class _R:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+            return _R()
+        raise _FakeHTTPError(code)
+
+    opener.seen = seen
+    return opener
+
+
+@pytest.fixture
+def patched_http(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def install(status_by_path):
+        opener = _fake_urlopen(status_by_path)
+        monkeypatch.setattr(urllib.request, "urlopen", opener)
+        monkeypatch.setattr(urllib.error, "HTTPError", _FakeHTTPError)
+        return opener
+    return install
+
+
+def test_probe_falls_through_a_404_to_the_route_that_board_actually_serves(patched_http):
+    """The live defect: /api/settings 404s on the main board, whose write action is
+    /api/promote. A 404 means "not THAT route", never "no write channel"."""
+    opener = patched_http({"/api/promote": 403})
+    status, detail = gh._probe_write_route("http://127.0.0.1:9787/api/settings")
+    assert status == gh.PASS
+    assert "/api/promote" in detail and "403" in detail
+    assert opener.seen == ["/api/settings", "/api/promote"], "must try the caller's path first"
+
+
+def test_a_board_serving_no_known_write_route_proves_nothing(patched_http):
+    """It must not read as containment — the same rule the read probes follow."""
+    patched_http({})
+    status, detail = gh._probe_write_route("http://127.0.0.1:9787/api/settings")
+    assert status == gh.SKIP
+    assert "nothing proven" in detail
+
+
+def test_an_open_gate_is_caught_on_whichever_route_serves_it(patched_http):
+    patched_http({"/api/promote": 400})
+    status, detail = gh._probe_write_route("http://127.0.0.1:9787/api/settings")
+    assert status == gh.FAIL and "gate is open" in detail
+
+    patched_http({"/api/settings": 200})
+    status, detail = gh._probe_write_route("http://127.0.0.1:9788/api/settings")
+    assert status == gh.FAIL and "ACCEPTED" in detail
+
+
+def test_an_unreachable_board_is_not_reported_as_routeless(patched_http, monkeypatch):
+    """"Board is down" and "board serves no write route" are different answers; neither is
+    containment, and conflating them is what this whole drill keeps finding."""
+    import urllib.request
+
+    def dead(req, timeout=None):
+        raise OSError("connection refused")
+    monkeypatch.setattr(urllib.request, "urlopen", dead)
+    status, detail = gh._probe_write_route("http://127.0.0.1:9787/api/settings")
+    assert status == gh.SKIP and "board not running" in detail
+
+
+def test_every_probed_write_route_is_inert_by_review():
+    """The routes live in a module constant now, outside the AST check that guards the
+    payload, so pin the list: adding a route here requires proving validation cannot mutate
+    (see the constant's own comment — /api/resume is the one that already burned us)."""
+    assert gh._WRITE_ROUTES == ("/api/settings", "/api/promote")
+    assert "/api/resume" not in gh._WRITE_ROUTES
+
+
+# --- the credential row must name the HOST, not where the token came from -----------------
+def test_credential_reach_names_the_host_not_the_token_source(tmp_path):
+    """The deployment reported "a usable credential for (GH_TOKEN)" — `.split()[-1]` took
+    gh's trailing credential-source note where the host belongs."""
+    out = "github.com\n  ✓ Logged in to github.com account ikangai (GH_TOKEN)\n"
+    ctx = gh.Ctx(env_file_path=str(tmp_path / "none"), git_credentials_path=str(tmp_path / "none"),
+                 run=lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    rule = gh.rule_boundary_credential_reach(ctx)
+    assert rule.status == gh.FAIL
+    assert "github.com" in rule.detail
+    assert "GH_TOKEN" not in rule.detail
