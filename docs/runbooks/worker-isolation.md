@@ -511,6 +511,16 @@ Two more probe defects, both found by this run (fixed):
   `operator` **before** it opens the blackboard, so even a wide-open gate mutates nothing.
   The route list is a module constant now, pinned by a test, because the AST check that
   guards the payload does not reach it — and `/api/resume` is the one that already burned us.
+
+  **Re-run after deploying the fix, and the answer is good:** the row now reads
+  `http://127.0.0.1:9787: /api/promote: refused unauthenticated write (403);
+  http://127.0.0.1:9788: /api/settings: refused unauthenticated write (403)` — both boards
+  refuse, and the 9787 board's write gate is now *measured* rather than assumed. It was
+  serving the authenticated code already, so this closed no hole; it made a green row
+  earn itself. Note the labels: the first cut of the fix printed the board's URL with the
+  *assumed* path and the actual path after it (`…:9787/api/settings: /api/promote: …`),
+  naming the route that 404s on precisely the board that does not serve it. Boards are
+  labelled by origin now; only the detail carries a route.
 - **`boundary-credential-reach` named the token's origin where the host belongs.** It
   reported `a usable credential for (GH_TOKEN)`, which is not a hostname: `.split()[-1]` took
   the trailing credential-source note off gh's `Logged in to github.com account x (GH_TOKEN)`.
