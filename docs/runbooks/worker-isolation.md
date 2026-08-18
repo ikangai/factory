@@ -476,6 +476,51 @@ locates the tree from its own path and warns if `$HOME` belongs to another accou
 `02-bootstrap-as-factory.sh` now hard-refuses a foreign `$HOME` rather than writing the PAT
 env file into the wrong account — but the shell still has to start.
 
+### Re-run on the updated deployment, 2026-08-18 — and two more probe defects
+
+The deployment was updated to the current code (`git push deploy main`, then `update.sh` as
+the factory user; the `deploy` branch merged clean, the 4-knob config overlay untouched) and
+both runs were repeated against it. This is the first time the deployed doctor and the
+source doctor have been the same code.
+
+- **The account run: 11 pass, 0 fail, 1 skip** (the skip is `wsl-hardening`, not WSL) —
+  unchanged from the perimeter run above, now re-established on the current probes.
+  `brakes-engaged PASS — STOP present, mode=shift`, so nothing was running a live shift.
+- **`--boundary` as `factory`: 4 pass, 8 fail, 2 skip.** The negative control, and the FAIL
+  set is exactly the documented one (the five control-plane rows are the account reading its
+  own files, plus `credential-reach`, `other-homes`, and `dependency-substitution` on its own
+  `fab/`). **That is what the run was for**: the refused-is-not-absent change carried a risk
+  of turning FAILs into false PASSes, and the owner run still fails all eight. The new code
+  path is correctly inert here — nothing is refused to the tree's owner — so it remains
+  unexercised until the grader run happens.
+
+Two more probe defects, both found by this run (fixed):
+
+- **`boundary-dashboard-write` asked the wrong board the wrong question.** It POSTed
+  `/api/settings` to both boards; the deployment's config-derived board answered **404**,
+  which the probe reported as "route not present" and folded into a PASS earned entirely by
+  the *other* board. But 404 means "not THAT route", never "no write channel": the two
+  servers own different ones — `fleet_server` has `/api/settings`, while
+  `dashboard/server.py` has exactly one write action, **`/api/promote`**, which promotes a
+  champion and is a real state change. So the deployment's own board had its write gate
+  never asked about while the row read green. Same shape as the hardcoded-port defect that
+  preceded it, one layer in. The probe now tries every known write route (caller's path
+  first) and falls through a 404 to the next; a board serving none of them reports *nothing
+  proven* rather than passing. `/api/promote` is safe to probe for the same reason
+  `/api/settings` is: `do_promote` returns 400 for a payload with no `candidate_id`/
+  `operator` **before** it opens the blackboard, so even a wide-open gate mutates nothing.
+  The route list is a module constant now, pinned by a test, because the AST check that
+  guards the payload does not reach it — and `/api/resume` is the one that already burned us.
+- **`boundary-credential-reach` named the token's origin where the host belongs.** It
+  reported `a usable credential for (GH_TOKEN)`, which is not a hostname: `.split()[-1]` took
+  the trailing credential-source note off gh's `Logged in to github.com account x (GH_TOKEN)`.
+  Cosmetic — the FAIL itself was correct and expected — but a row that misidentifies what it
+  found is a row an operator cannot act on. It now parses the field after `to`.
+
+Housekeeping from the same round: two tests were making real POSTs to whatever board happened
+to be listening on the host (and, after the fall-through above, twice as many). Both are
+stubbed now. A probe suite may knock on a live deployment; its test suite may not.
+
 ## Turning it off
 
 ```yaml

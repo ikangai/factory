@@ -52,6 +52,7 @@ import re
 import stat
 import subprocess
 import sys
+import urllib.parse
 from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -957,27 +958,58 @@ def rule_boundary_dashboard_write(ctx: Ctx) -> Rule:
     return Rule(rid, SKIP, "; ".join(f"{u}: {d}" for u, (s, d) in verdicts))
 
 
+# The write routes worth probing, and why the SAME bogus payload is inert against each even
+# with the gate wide open. The two boards serve DIFFERENT ones — `fleet_server` owns
+# `/api/settings`, while `dashboard/server.py` has exactly one write action, `/api/promote`
+# — so a probe that knows only the first learns nothing about the second.
+#   /api/settings  — "__boundary_probe__" is not a known key, so validation rejects it.
+#   /api/promote   — `do_promote` returns 400 for a payload with no `candidate_id`/`operator`
+#                    BEFORE it opens the Blackboard, so no promotion can occur.
+# Anything added here must be checked the same way: reaching validation must not mutate.
+_WRITE_ROUTES = ("/api/settings", "/api/promote")
+
+
 def _probe_write_route(url: str) -> Tuple[str, str]:
-    """One board's write gate. Deliberately INVALID payload — see the caller's docstring."""
+    """One board's write gate. Deliberately INVALID payload — see the caller's docstring.
+
+    Tries every known write route rather than one, because a 404 means "this board does not
+    serve THAT route", never "this board has no write channel". On the deployment the
+    config-derived board (`dashboard/server.py`) answered 404 to `/api/settings` and was
+    reported as unprobed, while the row read PASS off the OTHER board — leaving
+    `/api/promote`, a real state change, never asked about. Found running the drill against
+    the live deployment, 2026-08-17; same shape as the hardcoded-port defect before it."""
     import urllib.error
     import urllib.request
     payload = json.dumps({"key": "__boundary_probe__", "value": "x"}).encode()
-    req = urllib.request.Request(url, data=payload, method="POST",
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return FAIL, f"ACCEPTED an unauthenticated write ({resp.status})"
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return PASS, f"refused unauthenticated write ({e.code})"
-        if e.code == 400:
-            return FAIL, ("reached VALIDATION unauthenticated (400) — the write gate is "
-                          "open; nothing was written only because the probe key is bogus")
-        if e.code == 404:
-            return SKIP, "route not present on this board"
-        return FAIL, f"unexpected status {e.code}"
-    except OSError:
+    # The caller's own path first: a test (or an operator) naming an explicit route must get
+    # that route probed, not a guess.
+    parsed = urllib.parse.urlparse(url)
+    paths = [parsed.path] + [r for r in _WRITE_ROUTES if r != parsed.path]
+    unreachable = None
+    for path in paths:
+        target = urllib.parse.urlunparse(parsed._replace(path=path))
+        req = urllib.request.Request(target, data=payload, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return FAIL, f"{path}: ACCEPTED an unauthenticated write ({resp.status})"
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return PASS, f"{path}: refused unauthenticated write ({e.code})"
+            if e.code == 400:
+                return FAIL, (f"{path}: reached VALIDATION unauthenticated (400) — the write "
+                              "gate is open; nothing was written only because the payload "
+                              "cannot validate")
+            if e.code == 404:
+                continue                      # not this board's route; try the next
+            return FAIL, f"{path}: unexpected status {e.code}"
+        except OSError as e:
+            unreachable = e
+            break
+    if unreachable is not None:
         return SKIP, "not reachable (board not running?)"
+    return SKIP, ("serves none of the known write routes ("
+                  + ", ".join(paths) + ") — nothing proven about this board")
 
 
 # ------------------------------------------------------------------------------------------
@@ -1069,8 +1101,13 @@ def rule_boundary_credential_reach(ctx: Ctx) -> Rule:
         r = ctx.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=15)
         blob = f"{getattr(r, 'stdout', '') or ''}{getattr(r, 'stderr', '') or ''}"
         if getattr(r, "returncode", 1) == 0 and "ogged in" in blob:
-            hosts = sorted({ln.strip().split()[-1] for ln in blob.splitlines()
-                            if "ogged in to" in ln}) or ["(unnamed host)"]
+            # `.split()[-1]` grabbed the trailing credential-source note, so the live
+            # deployment reported "a usable credential for (GH_TOKEN)" — the token's ORIGIN
+            # where the HOST belongs. gh prints "Logged in to github.com account x
+            # (GH_TOKEN)"; take the field that follows "to".
+            hosts = sorted({m.group(1) for m in
+                            (re.search(r"ogged in to\s+(\S+)", ln) for ln in blob.splitlines())
+                            if m}) or ["(unnamed host)"]
             found.append(f"`gh` holds a usable credential for {', '.join(hosts)}")
     except (OSError, subprocess.SubprocessError):
         pass
