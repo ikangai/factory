@@ -19,6 +19,7 @@ GUSER="${FACTORY_GRADER_USER:-factory-grader}"
 GHOME="/Users/$GUSER"
 FUSER="${FACTORY_USER:-factory}"
 WRAPPER_DEST="/opt/factory/run-target-code"
+DOCTOR_DEST="/opt/factory/guesthouse_check.py"
 SUDOERS="/etc/sudoers.d/factory-grader"
 EXPORT_ROOT="${FACTORY_EXPORT_ROOT:-/tmp/factory-grade}"
 EGROUP="${FACTORY_EXPORT_GROUP:-factory-grade}"
@@ -26,7 +27,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "${1:-}" = "--uninstall" ]; then
     echo "== removing the grading identity =="
-    rm -f "$SUDOERS" "$WRAPPER_DEST"
+    rm -f "$SUDOERS" "$WRAPPER_DEST" "$DOCTOR_DEST"
     echo "  removed $SUDOERS and $WRAPPER_DEST (the grant is gone; grading falls back to"
     echo "  the factory user the moment super_worker.grader_user is cleared)"
     echo "  the '$GUSER' account and $EXPORT_ROOT were left in place — remove by hand if"
@@ -57,6 +58,25 @@ install -d -m 755 -o root -g wheel /opt/factory
 install -m 755 -o root -g wheel "$HERE/run-target-code" "$WRAPPER_DEST"
 # root-owned and not writable by the factory user ON PURPOSE: if the caller could edit the
 # wrapper, the pinned grant would be worthless — it would run whatever the caller wrote.
+
+# The doctor rides along, for one reason: the boundary probes must run AS THE GRADER, and a
+# correctly-configured guest house has a 0700 home — so the grader cannot read
+# <factory>/scripts/guesthouse_check.py at all. Until 2026-08-16 that step only worked
+# because the home was group-readable, which was itself the finding drill 2 opened with.
+# A copy here is world-readable (this code is public), root-owned, and refreshed by every
+# re-run of this script — the same lifecycle as the wrapper next to it.
+DOCTOR_SRC="$HERE/../../scripts/guesthouse_check.py"
+if [ -f "$DOCTOR_SRC" ]; then
+    install -m 755 -o root -g wheel "$DOCTOR_SRC" "$DOCTOR_DEST"
+    echo "  installed the doctor at $DOCTOR_DEST (the grader cannot read the 0700 home)"
+else
+    # Loudly, not silently: the grant below is still valid, but step 3 — the deliverable of
+    # this whole phase — becomes untypeable, and its failure mode is a bare "Permission
+    # denied" that reads like a broken deployment rather than a missing file.
+    echo "  WARNING: $DOCTOR_SRC not found — the doctor was NOT installed." >&2
+    echo "           The grant is fine, but the boundary proof cannot be run as the grader" >&2
+    echo "           until you copy it to $DOCTOR_DEST by hand." >&2
+fi
 
 # --- 3. the grant: user-to-user, never root ----------------------------------------------
 echo "[3/6] writing $SUDOERS ..."
@@ -124,8 +144,12 @@ cat <<EOF
      grader_user: "$GUSER"
 
  THEN PROVE IT, as the grader — every rule must report it could NOT reach
- the control plane (docs/runbooks/worker-isolation.md):
-   sudo -u $GUSER -i python3 <factory>/scripts/guesthouse_check.py --boundary
+ the control plane (docs/runbooks/worker-isolation.md). Note WHICH copy of the
+ doctor: the grader cannot read the guest house's own 0700 home, so it runs the
+ root-installed copy and is TOLD which deployment to ask about:
+
+   sudo -u $GUSER -i python3 $DOCTOR_DEST \\
+        --boundary --factory-root <factory>
 
  Isolation stays OFF until grader_user is set. Turning it on without this
  script installed makes every grading run fail loudly (no sudo grant) —

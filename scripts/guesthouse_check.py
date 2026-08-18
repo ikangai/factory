@@ -233,6 +233,18 @@ def _dashboard_url_from_config(ctx: "Ctx") -> str:
 
 
 def _default_factory_root() -> str:
+    """The deployment under test. `$FACTORY_ROOT` first, then the path this file sits in.
+
+    The env var exists because the boundary probes have to run AS THE GRADING IDENTITY, and
+    that identity cannot read the 0700 guest-house home where this file normally lives — so
+    `05-create-grader-user.sh` installs a copy beside the wrapper at
+    `/opt/factory/guesthouse_check.py`, for which the path-derived answer would be `/opt`.
+    The probes need the factory root's PATH, never read access to it: being refused IS the
+    result they are looking for. Found trying to follow this repo's own runbook step after
+    the guest-house home was tightened (drill 2, 2026-08-16)."""
+    env = os.environ.get("FACTORY_ROOT")
+    if env:
+        return env
     # scripts/guesthouse_check.py -> factory/
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -805,13 +817,43 @@ RULES: List[Tuple[str, Callable[[Ctx], Rule]]] = [
 # and exit 0 — a proof that passes by not running, which is worse than no proof at all.
 # ==========================================================================================
 
+REFUSED, ABSENT, PRESENT = "refused", "absent", "present"
+
+
+def _reachability(path: str) -> Tuple[str, str]:
+    """(state, detail) — the three answers `os.path.exists()` collapses into one False.
+
+    `exists()` is False both for "there is no such file" and for "you are not allowed to
+    look", and to a boundary probe those are OPPOSITE results: the first proves nothing, the
+    second IS the containment being measured. Every boundary rule here used to pre-check
+    `exists()`, so on a correctly contained deployment — a 0700 guest-house home, which is
+    what drill 2 fixed on 2026-08-16 — the grader's control-plane probes reported three
+    FAILs ("does not exist (nothing proven)") and two SKIPs, and `--boundary`'s "every rule
+    must pass" was unsatisfiable. Same class as the symlink probe's missing directory
+    anchor: the rule reports its most negative verdict exactly where containment is
+    tightest, because tight containment makes the path invisible rather than refused.
+
+    `os.stat` separates them: ENOENT only when the parent could actually be read."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return ABSENT, f"{path} does not exist (nothing proven)"
+    except PermissionError:
+        return REFUSED, f"{path}: permission denied"
+    except OSError as e:
+        return REFUSED, f"{path}: {e}"
+    return PRESENT, path
+
+
 def _cannot_read(path: str) -> Tuple[bool, str]:
-    """(unreadable, detail). Anything other than a permission refusal — including the file
-    simply being absent — is reported honestly rather than counted as containment."""
+    """(unreadable, detail). A path this identity cannot even reach counts as containment;
+    a path that is genuinely absent proves nothing and is reported as such, never as a
+    PASS."""
     if not path:
         return False, "no path configured"
-    if not os.path.exists(path):
-        return False, f"{path} does not exist (nothing proven)"
+    state, detail = _reachability(path)
+    if state != PRESENT:
+        return state == REFUSED, detail
     try:
         with open(path, "rb") as fh:
             fh.read(1)
@@ -850,8 +892,13 @@ def rule_boundary_factory_root(ctx: Ctx) -> Rule:
     scenarios and the graders' own check modules — the blindness ARCHITECTURE claims."""
     rid = "boundary-factory-root"
     root = ctx.factory_root or ""
-    if not root or not os.path.exists(root):
-        return Rule(rid, SKIP, f"{root or '(unset)'} not present")
+    if not root:
+        return Rule(rid, SKIP, "(unset) not present")
+    state, detail = _reachability(root)
+    if state == ABSENT:
+        return Rule(rid, SKIP, detail)
+    if state == REFUSED:
+        return Rule(rid, PASS, detail)         # cannot even stat it — see `_reachability`
     try:
         os.listdir(root)
     except PermissionError:
@@ -868,7 +915,14 @@ def rule_boundary_killswitch(ctx: Ctx) -> Rule:
     rid = "boundary-killswitch"
     root = ctx.factory_root or ""
     stop = os.path.join(root, "STOP")
-    if not os.path.exists(stop):
+    state, detail = _reachability(stop)
+    if state == REFUSED:
+        # The strongest answer, not a missing one: an identity that cannot reach STOP cannot
+        # unlink it, and whether it is engaged is not this probe's question. Reported as
+        # "STOP not present — engage it" before the fix, sending the operator to arm a brake
+        # that was already armed and invisible to them from that account.
+        return Rule(rid, PASS, f"{detail} — it cannot be unlinked from here")
+    if state == ABSENT:
         return Rule(rid, SKIP, "STOP not present — engage it, then re-run this probe")
     if os.access(root, os.W_OK):
         return Rule(rid, FAIL, f"{root} is writable from here — STOP can be unlinked")
@@ -1211,10 +1265,20 @@ def rule_boundary_dependency_substitution(ctx: Ctx) -> Rule:
         dirs += [os.path.dirname(root.rstrip("/")), root]
     dirs += [p for p in (ctx.environ.get("PYTHONPATH", "").split(os.pathsep)) if p]
     dirs += ctx.import_path_dirs_fn()
-    seen, writable, hooks = set(), [], []
+    seen, writable, hooks, refused = set(), [], [], []
     for d in dirs:
         d = os.path.abspath(d) if d else ""
-        if not d or d in seen or not os.path.isdir(d):
+        if not d or d in seen:
+            continue
+        # A refused directory dropped out of the count silently, so a contained grader was
+        # told "N checked" by a probe that had skipped FACTORY_ROOT and its parent — the two
+        # entries this rule exists for. Unreachable is the right verdict (nothing can be
+        # dropped into a directory you cannot enter) but it has to be said out loud.
+        if _reachability(d)[0] == REFUSED:
+            seen.add(d)
+            refused.append(d)
+            continue
+        if not os.path.isdir(d):
             continue
         seen.add(d)
         if _writable(d):
@@ -1233,9 +1297,14 @@ def rule_boundary_dependency_substitution(ctx: Ctx) -> Rule:
         if hooks:
             detail += ("; " if detail else "") + "auto-imported hook present: " + ", ".join(hooks)
         return Rule(rid, FAIL, detail + " — a module dropped here is imported by the factory itself")
+    note = ""
+    if refused:
+        note = (f"; {len(refused)} unreachable from here (" + ", ".join(refused[:3])
+                + (f" +{len(refused) - 3} more" if len(refused) > 3 else "")
+                + ") — nothing can be dropped into a directory this identity cannot enter")
     return Rule(rid, PASS,
                 f"no writable directory on the factory's import path ({len(seen)} checked), "
-                f"no sitecustomize/usercustomize hook")
+                f"no sitecustomize/usercustomize hook" + note)
 
 
 def rule_boundary_host_writes(ctx: Ctx) -> Rule:
@@ -1362,6 +1431,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Guest-house deterministic doctor — audits the guest-house isolation rules "
                      "(docs/runbooks/guest-house.md). Never mutates anything.")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of a table")
+    parser.add_argument("--factory-root", default=None,
+                        help="the deployment to ask about (default: $FACTORY_ROOT, else the "
+                             "tree this file lives in). Needed when running an installed "
+                             "COPY of this doctor — e.g. the grading identity running "
+                             "/opt/factory/guesthouse_check.py, which cannot read the "
+                             "guest-house home the original lives in.")
     parser.add_argument("--boundary", action="store_true",
                         help="run the Phase 3 BOUNDARY probes instead: execute this AS THE "
                              "GRADING IDENTITY and every rule must report that it could NOT "
@@ -1369,7 +1444,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "itself is worse than no proof.")
     args = parser.parse_args(argv)
 
-    ctx = Ctx()
+    # None is the documented "no override" value — __post_init__ falls through to
+    # _default_factory_root() ($FACTORY_ROOT, else this file's tree).
+    ctx = Ctx(factory_root=args.factory_root)
     result = audit_boundary(ctx) if args.boundary else audit(ctx)
     mismatch = home_env_mismatch(ctx)
     if args.json:
